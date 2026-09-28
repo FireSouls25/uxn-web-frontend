@@ -1,0 +1,16 @@
+# Reference mockups — layout inspiration only, never shipped.
+reference/
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.astro/
+
+# Env
+.env
+.env.local
+
+# Logs / caches
+*.log

@@ -1,0 +1,135 @@
+---
+import Base from "../layouts/Base.astro";
+import { Boxes, Braces, FolderTree, Gamepad2, Play, Rocket } from "lucide-react";
+
+const RAIL = [Boxes, FolderTree, Braces, Gamepad2, Rocket];
+const NODES = [
+  { tag: "InputNode", title: "Keyboard Event", accent: "text-sky", detail: "Keys: [ArrowRight] / [D]" },
+  { tag: "PhysicsEvent", title: "Collision Enter 2D", accent: "text-green", detail: 'Other tag: "Hazard"' },
+  { tag: "CombatAct", title: "Hurt & Sound", accent: "text-red", detail: "Damage: −25 HP" },
+];
+---
+
+<Base title="Studio">
+  <div class="mx-auto max-w-[1400px] px-3 py-4">
+    {/* Project bar */}
+    <div class="pane flex flex-wrap items-center gap-3 rounded-xl px-4 py-3">
+      <span class="rounded-md bg-mauve/15 px-2.5 py-1 font-mono text-xs font-semibold text-mauve">
+        Cyberia: Neon Dungeon
+      </span>
+      <span class="font-mono text-[11px] text-subtext0">Startup scene: dungeon_crypt_02 · ETAL v2.4</span>
+      <span class="ml-auto inline-flex items-center gap-1.5 rounded-full bg-green/15 px-2.5 py-1 font-mono text-[11px] text-green">
+        <span class="size-1.5 animate-pulse rounded-full bg-green"></span> 60 FPS
+      </span>
+      <button
+        class="inline-flex items-center gap-1.5 rounded-lg bg-green px-3.5 py-1.5 text-[13px] font-semibold text-crust"
+      >
+        <Play size={14} /> <span data-i18n="st.run">Run</span>
+      </button>
+    </div>
+
+    <div class="mt-3 grid gap-3 lg:grid-cols-[44px_240px_1fr_280px]">
+      {/* Icon rail */}
+      <div class="pane hidden flex-col items-center gap-1 rounded-xl py-2 lg:flex">
+        {
+          RAIL.map((Icon, i) => (
+            <button
+              class:list={[
+                "grid size-9 place-items-center rounded-lg transition-colors",
+                i === 0 ? "bg-surface0 text-mauve" : "text-subtext0 hover:bg-surface0 hover:text-text",
+              ]}
+            >
+              <Icon size={17} />
+            </button>
+          ))
+        }
+      </div>
+
+      {/* Hierarchy */}
+      <div class="pane rounded-xl p-3">
+        <p class="font-mono text-[11px] uppercase tracking-widest text-subtext0" data-i18n="st.hierarchy">Hierarchy</p>
+        <ul class="mt-2 space-y-1 font-mono text-xs">
+          <li class="rounded-md px-2 py-1.5 text-subtext0">dungeon_crypt_02 <span class="text-peach">Root</span></li>
+          <li class="rounded-md bg-mauve/15 px-2 py-1.5 text-text">Player <span class="text-subtext0">[142, 88]</span></li>
+          <li class="rounded-md px-2 py-1.5 text-subtext0">Skeleton_Warrior_01 <span class="text-red">Enemy</span></li>
+          <li class="rounded-md px-2 py-1.5 text-subtext0">Torch_Light_Emitter_A <span class="text-yellow">Point</span></li>
+          <li class="rounded-md px-2 py-1.5 text-subtext0">Chest_Gold_Loot <span class="text-teal">Trigger</span></li>
+        </ul>
+        <div class="mt-3 border-t border-surface0 pt-3">
+          <p class="font-mono text-[11px] uppercase tracking-widest text-subtext0" data-i18n="st.palette">Palette · 16×16</p>
+          <div class="mt-2 grid grid-cols-5 gap-1">
+            {["bg-red", "bg-peach", "bg-yellow", "bg-green", "bg-sky"].map((c) => (
+              <div class={`aspect-square rounded ${c} opacity-80`}></div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Viewport + event graph */}
+      <div class="flex min-w-0 flex-col gap-3">
+        <div class="pane rounded-xl p-3">
+          <div class="mb-2 flex items-center gap-2 font-mono text-[11px] text-subtext0">
+            <span class="rounded bg-surface0 px-1.5 py-0.5">400%</span>
+            <span>Snap: 16px</span>
+            <span class="text-green">● LIVE EMULATION</span>
+          </div>
+          <div
+            class="grid aspect-video place-items-center rounded-lg border border-surface0 font-mono text-xs text-subtext0"
+            style="background-image: conic-gradient(var(--ctp-surface0) 25%, transparent 0 50%, var(--ctp-surface0) 0 75%, transparent 0); background-size: 16px 16px;"
+          >
+            <span class="rounded bg-crust/80 px-2 py-1" data-i18n="st.viewport">viewport · 320×180 canvas mounts here</span>
+          </div>
+        </div>
+        <div class="pane rounded-xl p-3">
+          <p class="font-mono text-[11px] uppercase tracking-widest text-subtext0" data-i18n="st.graph">
+            Visual event &amp; trigger graph
+          </p>
+          <div class="mt-2 grid gap-2 md:grid-cols-3">
+            {
+              NODES.map((n) => (
+                <div class="rounded-lg border border-surface0 bg-base p-3">
+                  <p class={`font-mono text-[10px] uppercase tracking-widest ${n.accent}`}>{n.tag}</p>
+                  <p class="mt-1 text-[13px] font-semibold">{n.title}</p>
+                  <p class="mt-1 font-mono text-[11px] text-subtext0">{n.detail}</p>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      </div>
+
+      {/* Inspector */}
+      <div class="pane rounded-xl p-3">
+        <div class="flex items-center justify-between">
+          <p class="font-mono text-[11px] uppercase tracking-widest text-subtext0" data-i18n="st.inspector">Inspector</p>
+          <span class="rounded-full bg-mauve/15 px-2 py-0.5 font-mono text-[10px] text-mauve" data-i18n="st.active">Active selection</span>
+        </div>
+        <div class="mt-2 rounded-lg bg-surface0 p-3">
+          <p class="text-sm font-semibold">Player</p>
+          <p class="font-mono text-[11px] text-subtext0">UUID: 8f42-player-main · Tag: Hero</p>
+        </div>
+        {[
+          ["Pos X / Y", "142.0, 88.0"],
+          ["Rotation", "0.0°"],
+          ["Scale", "1.0, 1.0"],
+          ["Active clip", "run_right · 6f"],
+        ].map(([k, v]) => (
+          <div class="mt-2 flex items-center justify-between rounded-lg border border-surface0 px-3 py-2">
+            <span class="font-mono text-[11px] text-subtext0">{k}</span>
+            <span class="font-mono text-xs text-green">{v}</span>
+          </div>
+        ))}
+        <button class="mt-3 w-full rounded-lg bg-surface0 px-3 py-2 text-[13px] font-medium transition-colors hover:bg-surface1" data-i18n="st.newbind">
+          + New bind
+        </button>
+      </div>
+    </div>
+
+    {/* Status bar */}
+    <div class="pane mt-3 flex flex-wrap gap-x-5 gap-y-1 rounded-xl px-4 py-2 font-mono text-[11px] text-subtext0">
+      <span><span class="text-green">●</span> <span data-i18n="st.eng">Engine: Ready</span></span>
+      <span data-i18n="st.rend">Renderer: pixel-perfect</span>
+      <span class="ml-auto">Cursor: [X: 142, Y: 88]</span>
+    </div>
+  </div>
+</Base>

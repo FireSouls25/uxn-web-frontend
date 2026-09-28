@@ -1,0 +1,80 @@
+---
+import SiteHeader from "../components/SiteHeader";
+import "../styles/theme.css";
+
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const { title, description = "Low-code games for the Uxn virtual machine." } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en" data-theme="mocha">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <title>{title} · uxn·forge</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <script is:inline>
+      try {
+        const savedTheme = localStorage.getItem("uxn.theme");
+        document.documentElement.dataset.theme =
+          savedTheme === "latte" || savedTheme === "mocha"
+            ? savedTheme
+            : matchMedia("(prefers-color-scheme: light)").matches
+              ? "latte"
+              : "mocha";
+      } catch {
+        /* private mode — mocha default stands */
+      }
+      try {
+        const savedLang = localStorage.getItem("uxn.lang");
+        document.documentElement.dataset.lang =
+          savedLang === "es" || savedLang === "en"
+            ? savedLang
+            : (navigator.language || "en").toLowerCase().startsWith("es")
+              ? "es"
+              : "en";
+      } catch {
+        /* private mode — English fallback stands */
+      }
+    </script>
+  </head>
+  <body class="min-h-screen">
+    <SiteHeader client:load />
+    <main>
+      <slot />
+    </main>
+    <footer class="border-t border-surface0">
+      <div
+        class="mx-auto flex max-w-6xl flex-col gap-2 px-4 py-6 font-mono text-[11px] text-subtext0 md:flex-row md:items-center"
+      >
+        <span>
+          uxn·forge <span class="text-overlay0">·</span> <span data-i18n="foot.tag">low-code for the Uxn/Varvara machine</span>
+        </span>
+        <span class="md:ml-auto" data-i18n="foot.stack">etal DSL → drifblim → .rom · linux / macos / windows / web</span>
+      </div>
+    </footer>
+    <script>
+      import { applyStaticLang, detectLang } from "../lib/i18n";
+      const lang = detectLang();
+      document.documentElement.dataset.lang = lang;
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", () => applyStaticLang(lang));
+      } else {
+        applyStaticLang(lang);
+      }
+      window.addEventListener("uxn:lang", (e) =>
+        applyStaticLang((e as CustomEvent).detail ?? detectLang()),
+      );
+    </script>
+  </body>
+</html>
