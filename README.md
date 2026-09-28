@@ -12,7 +12,16 @@ re-themes everything.
 |---|---|
 | `/` | Hero, workstation features, live export targets (`GET /targets` with static fallback) |
 | `/login`, `/register` | Animated forms backed by `POST /auth/*` (JWT session → `/studio`) |
-| `/studio` | Workstation shell skeleton: project bar, icon rail, hierarchy, viewport, event graph, inspector, status bar |
+| `/studio` | Workstation shell: project bar, icon rail, hierarchy, pixel canvas (select + drag), event graph, store-bound inspector, export pane, status bar |
+
+## Studio store + export
+
+`src/lib/store.ts` (nanostores) is the single source of truth canvas,
+inspector and exporter read. Persistence is login-gated: guests work
+in memory only (amber banner says so), logins persist to localStorage.
+`src/lib/export.ts` validates → emits → `POST /compile` → downloads
+the artifact (`forge-demo.html`, …) into Downloads. Landing target
+cards export the demo project; the studio panel exports live edits.
 
 ## i18n (en/es)
 
