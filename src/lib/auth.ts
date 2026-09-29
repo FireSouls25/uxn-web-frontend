@@ -60,8 +60,13 @@ export async function apiLogout(refresh: string): Promise<void> {
 }
 
 export async function authFetch(path: string, init?: RequestInit): Promise<Response> {
-  const raw = localStorage.getItem("uxn.session");
-  const access = raw ? (JSON.parse(raw) as { access?: string }).access : undefined;
+  let access: string | undefined;
+  try {
+    const raw = localStorage.getItem("uxn.session");
+    access = raw ? (JSON.parse(raw) as { access?: string }).access : undefined;
+  } catch {
+    access = undefined; // guests still reach the backend, just unauthenticated
+  }
   return fetch(`${API_URL}${path}`, {
     ...init,
     headers: {

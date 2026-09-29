@@ -78,10 +78,37 @@ npm test          # determinism, validation, dispatch markers…
 wrapping store/emitter/export with model-facing descriptions
 (sprites, nesting, transitions, scripts, sound, theme, validate,
 emit). Tested end-to-end (an agent-style flow builds a controlled
-scene in code). `AgentChat.tsx` is the spawnable chat shell;
-providers configure via `PUBLIC_AGENT_PROVIDERS`, endpoint via
-`PUBLIC_AGENT_ENDPOINT`. RAG corpus + endpoint contract live in
-`backend/rag/`.
+scene in code).
+
+`pi.ts` runs the `pi-agent-core` loop **in the browser** while the
+model lives on the backend. There is no provider picker, no model
+picker and no key field anywhere in the UI — and nothing in the chat
+header advertising the choice either: the chat POSTs `{messages,
+tools}` to `POST /agent/turn` and the server picks the route, holds
+the key and walks its own fallback chain. Which model that is depends
+on operator configuration (keys, kill switches, token budgets) and on
+live health, so it is a server decision, not a user one; the rules
+and the debugging story are in `backend/docs/operations.md`.
+`relayStream` replays the reply as pi's event stream — it must be an
+`AssistantMessageEventStream`, not a bare generator, because the loop
+awaits `result()` for the finished message. Failures arrive as a
+finished message with `stopReason: "error"` and
+`errorMessage: "turn:<status>"`; the chat maps that to a translated
+note (`agent.busy`, `agent.no_route`, `agent.signin`, `agent.offline`)
+so users never see backend English. Tool schemas allow extra keys on
+purpose — models invent plausible ones and our handlers ignore them.
+
+`AgentChat.tsx` keeps one agent instance alive, so the conversation
+remembers itself; tools still run in this tab against the open
+project. RAG corpus + endpoint contract live in `backend/rag/`.
+
+```sh
+# live check (needs a backend + a model; skipped by `npm test`)
+#   backend: LLM_DEV_BASE_URL=http://127.0.0.1:11500/v1 LLM_DEV_MODEL=local …
+#   (no key needed: cd ../backend && uv run python scripts/mock_llm.py)
+LIVE_AGENT=1 PUBLIC_API_URL=http://localhost:8079 \
+  npx vitest run src/lib/agent/live.test.ts
+```
 
 ## Develop
 

@@ -1,110 +1,103 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { Bot, KeyRound, Loader2, Send, X } from "lucide-react";
+import { Bot, Loader2, Send, X } from "lucide-react";
 import type { Agent } from "@mariozechner/pi-agent-core";
-import { t, useLang } from "../../lib/i18n";
-import {
-  createStudioAgent,
-  getApiKey,
-  listModels,
-  listProviders,
-  setApiKey,
-} from "../../lib/agent/pi";
+import { t, useLang, type Lang } from "../../lib/i18n";
+import { createStudioAgent } from "../../lib/agent/pi";
 
 interface Message {
   role: "user" | "agent" | "note" | "tool";
-  text: string;
+  text?: string;
+  key?: string;
 }
 
-/* Live agent chat: pi-agent-core loop in the browser, tools executing
-   against projectStore, streaming into this panel. Keys are BYOK
-   (localStorage, per provider). Nothing is faked: no key or no
-   network states say so plainly. */
+function render(m: Message, lang: Lang): string {
+  if (m.key) return t(lang, m.key);
+  return m.text ?? "";
+}
+
+/* Every failure is a status, never a backend string: the user reads
+   their own language and learns nothing about which provider exists.
+   The pi loop reports failures as a finished message with
+   stopReason "error" and `turn:<status>`, so this reads that. */
+function noteKeyForStatus(status: number): string {
+  if (status === 0) return "agent.offline";
+  if (status === 429) return "agent.busy";
+  if (status === 401 || status === 403) return "agent.signin";
+  if (status >= 500) return "agent.no_route";
+  return "agent.failed";
+}
+
+function statusOf(errorMessage: unknown): number {
+  const m = /^turn:(\d+)$/.exec(String(errorMessage ?? ""));
+  return m ? Number(m[1]) : -1;
+}
+
+/* Agent chat with the model chosen by the backend: no provider
+   picker, no API key field, nothing to configure. One Agent instance
+   is kept alive so the conversation remembers itself, and the tools
+   still run in this tab against the open project. */
 export default function AgentChat() {
   const lang = useLang();
   const [open, setOpen] = useState(false);
-  const [providers] = useState<string[]>(() => {
-    const discovered = listProviders();
-    return discovered.length > 0 ? discovered : [];
-  });
-  const [provider, setProvider] = useState("");
-  const [models, setModels] = useState<Array<{ id: string; name: string }>>([]);
-  const [model, setModel] = useState("");
-  const [key, setKey] = useState("");
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [messages, setMessages] = useState<Message[]>([
-    { role: "note", text: t(lang, "agent.welcome") },
-  ]);
+  const [messages, setMessages] = useState<Message[]>([{ role: "note", key: "agent.welcome" }]);
   const agentRef = useRef<Agent | null>(null);
 
-  useEffect(() => {
-    if (providers.length > 0 && !provider) setProvider(providers[0]);
-  }, [providers, provider]);
+  function push(role: Message["role"], text?: string, key?: string) {
+    setMessages((m) => [...m, { role, text, key }]);
+  }
 
-  useEffect(() => {
-    if (!provider) {
-      setModels([]);
-      return;
-    }
-    setModels(listModels(provider));
-    setKey(getApiKey(provider) ?? "");
-  }, [provider]);
-
-  useEffect(() => {
-    if (!model && models.length > 0) setModel(models[0].id);
-  }, [models, model]);
-
-  function push(role: Message["role"], text: string) {
-    setMessages((m) => [...m, { role, text }]);
+  /** Streamed text lands in the last bubble if it is still ours. */
+  function streamInto(snapshot: string) {
+    setMessages((m) => {
+      const last = m[m.length - 1];
+      if (last && last.role === "agent" && !last.key) {
+        return [...m.slice(0, -1), { role: "agent", text: snapshot }];
+      }
+      return [...m, { role: "agent", text: snapshot }];
+    });
   }
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
     const text = input.trim();
     if (!text || busy) return;
-    if (!provider || !model) {
-      push("note", t(lang, "agent.no_provider"));
-      return;
-    }
-    if (!getApiKey(provider)) {
-      push("note", t(lang, "agent.no_key"));
-      return;
-    }
     push("user", text);
     setInput("");
     setBusy(true);
     try {
-      const agent = createStudioAgent({ provider, model });
-      agentRef.current = agent;
+      const agent = (agentRef.current ??= createStudioAgent());
       let current = "";
-      agent.subscribe((event) => {
-        const e = event as unknown as Record<string, unknown>;
-        if (e["type"] === "message_update") {
-          const inner = e["assistantMessageEvent"] as Record<string, unknown> | undefined;
+      const off = agent.subscribe((event) => {
+        const ev = event as unknown as Record<string, unknown>;
+        if (ev["type"] === "message_update") {
+          const inner = ev["assistantMessageEvent"] as Record<string, unknown> | undefined;
           if (inner?.["type"] === "text_delta" && typeof inner["delta"] === "string") {
             current += inner["delta"] as string;
-            const snapshot = current;
-            setMessages((m) => {
-              const last = m[m.length - 1];
-              if (last && last.role === "agent" && (last as { live?: boolean }).live) {
-                return [...m.slice(0, -1), { role: "agent", text: snapshot } as Message];
-              }
-              return [...m, { role: "agent", text: snapshot } as Message];
-            });
+            streamInto(current);
           }
-        } else if (e["type"] === "tool_execution_start") {
-          const name = typeof e["toolName"] === "string" ? (e["toolName"] as string) : "tool";
-          push("tool", `⚙ ${name}`);
-        } else if (e["type"] === "turn_end") {
+        } else if (ev["type"] === "tool_execution_start") {
+          push("tool", `⚙ ${ev["toolName"] ?? "tool"}`);
+        } else if (ev["type"] === "message_end") {
+          const message = ev["message"] as { role?: string; stopReason?: string; errorMessage?: string };
+          if (message.role === "assistant" && message.stopReason === "error") {
+            push("note", undefined, noteKeyForStatus(statusOf(message.errorMessage)));
+          }
           current = "";
         }
       });
-      await agent.prompt(text);
-      agentRef.current = null;
-    } catch (err) {
-      push("note", err instanceof Error ? err.message : t(lang, "agent.offline"));
-      agentRef.current = null;
+      try {
+        await agent.prompt(text);
+      } catch (err) {
+        // prompt() resolves on error events; this only catches a truly
+        // broken agent (aborted, or the transcript went bad).
+        console.error("agent prompt failed", err);
+        push("note", undefined, "agent.failed");
+      } finally {
+        off();
+      }
     } finally {
       setBusy(false);
     }
@@ -130,55 +123,11 @@ export default function AgentChat() {
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
             className="pane fixed bottom-20 right-5 z-50 flex h-[460px] w-[340px] flex-col overflow-hidden rounded-2xl"
           >
-            <div className="flex items-center gap-1.5 border-b border-surface0 px-3 py-2">
-              <Bot size={15} className="shrink-0 text-mauve" />
+            <div className="flex items-center gap-2 border-b border-surface0 px-3.5 py-2.5">
+              <Bot size={15} className="text-mauve" />
               <span className="text-[13px] font-semibold">{t(lang, "agent.title")}</span>
             </div>
-            <div className="flex items-center gap-1.5 border-b border-surface0 px-3 py-2">
-              <select
-                aria-label={t(lang, "agent.provider")}
-                value={provider}
-                onChange={(e) => {
-                  setProvider(e.target.value);
-                  setModel("");
-                }}
-                className="select select-sm min-w-0 flex-1"
-              >
-                <option value="">{t(lang, "agent.provider")}…</option>
-                {providers.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-              <select
-                aria-label="Model"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                className="select select-sm min-w-0 flex-1"
-              >
-                <option value="">model…</option>
-                {models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name || m.id}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="flex items-center gap-1.5 border-b border-surface0 px-3 py-2">
-              <KeyRound size={13} className="shrink-0 text-subtext0" />
-              <input
-                type="password"
-                value={key}
-                onChange={(e) => {
-                  setKey(e.target.value);
-                  setApiKey(provider, e.target.value);
-                }}
-                placeholder={t(lang, "agent.key_ph")}
-                className="min-w-0 flex-1 bg-transparent font-mono text-[11px] outline-none placeholder:text-overlay0"
-              />
-            </div>
-            <div className="flex-1 space-y-2 overflow-y-auto px-3 py-3">
+            <div className="flex-1 space-y-2 overflow-y-auto px-3.5 py-3">
               {messages.map((m, i) => (
                 <div
                   key={i}
@@ -192,7 +141,7 @@ export default function AgentChat() {
                           : "mx-auto bg-transparent text-center font-mono text-[11px] text-subtext0"
                   }`}
                 >
-                  {m.text}
+                  {render(m, lang)}
                 </div>
               ))}
               {busy && (
