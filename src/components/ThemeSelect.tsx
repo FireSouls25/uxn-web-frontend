@@ -62,7 +62,7 @@ export default function ThemeSelect() {
           applyTheme(next);
           setChoice(next);
         }}
-        className="cursor-pointer bg-transparent font-mono text-[11px] outline-none"
+        className="select select-sm"
       >
         <option value="auto">{t(lang, "theme.system")}</option>
         <option value="mocha">{t(lang, "theme.mocha")}</option>

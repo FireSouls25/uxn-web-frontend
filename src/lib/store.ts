@@ -3,7 +3,7 @@
    Persistence is gated on login — guests work purely in memory (see
    SessionBanner), so nothing implies saving that isn't happening. */
 import { atom, computed } from "nanostores";
-import { SAMPLE_PROJECT, type Project, type SceneObject } from "./project";
+import { SAMPLE_PROJECT, migrateProject, type Project, type SceneObject } from "./project";
 import { getSession } from "./session";
 
 const STORE_KEY = "uxn.projects.v1";
@@ -31,8 +31,27 @@ function loadAll(): { projects: Record<string, Project>; current: string } {
   try {
     const raw = localStorage.getItem(STORE_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as { projects: Record<string, Project>; current: string };
-      if (parsed.projects[parsed.current]) return parsed;
+      const anyRaw = JSON.parse(raw) as Record<string, unknown>;
+      if (anyRaw["projects"] && typeof anyRaw["projects"] === "object") {
+        const projects: Record<string, Project> = {};
+        for (const [id, p] of Object.entries(anyRaw["projects"] as Record<string, unknown>)) {
+          projects[id] = migrateProject(p as Record<string, unknown>);
+        }
+        const ids = Object.keys(projects);
+        if (ids.length > 0) {
+          const current =
+            typeof anyRaw["current"] === "string" && projects[anyRaw["current"]]
+              ? (anyRaw["current"] as string)
+              : ids[0];
+          return { projects, current };
+        }
+      } else {
+        // Single-project shape (current or legacy): migrate in place.
+        const parsed = migrateProject(anyRaw);
+        if (parsed.scenes.some((s) => s.id === parsed.start)) {
+          return { projects: { [parsed.id]: parsed }, current: parsed.id };
+        }
+      }
     }
     // One-time migration from the single-project era.
     const legacy = localStorage.getItem(LEGACY_KEY);
@@ -59,6 +78,7 @@ export const projectStore = computed(
 );
 export const sceneIdStore = atom<string>(SAMPLE_PROJECT.start);
 export const selectionStore = atom<string | null>(null);
+export const spriteSelStore = atom<string>("hero");
 export const viewStore = atom<"scene" | "sprites" | "events" | "sound" | "code">("scene");
 
 if (typeof localStorage !== "undefined") {
@@ -173,7 +193,118 @@ export function patchObject(objectId: string, patch: Partial<SceneObject>): void
 }
 
 export function setTile(objectId: string, tile: number[]): void {
-  patchObject(objectId, { tile: [...tile] });
+  // Legacy 1bpp paint API: upgrades into the shared sprite.
+  const p = projectStore.get();
+  const scene = currentScene(p, sceneIdStore.get());
+  const obj = scene.objects.find((o) => o.id === objectId);
+  if (!obj) return;
+  setSpritePixels(obj.sprite, tile.flatMap((b) => Array.from({ length: 8 }, (_, c) => (b & (1 << (7 - c)) ? 1 : 0))));
+}
+
+export function setSpritePixels(spriteId: string, pixels: number[]): void {
+  const clean = pixels.slice(0, 64).map((v) => v & 3);
+  while (clean.length < 64) clean.push(0);
+  updateCurrent((prev) => ({
+    ...prev,
+    sprites: prev.sprites.map((s) => (s.id === spriteId ? { ...s, pixels: clean } : s)),
+  }));
+}
+
+export function addSprite(name: string): string {
+  let base = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24) || "sprite";
+  if (!/^[A-Za-z]/.test(base)) base = `s_${base}`;
+  let id = base;
+  let n = 2;
+  const p = projectStore.get();
+  while (p.sprites.some((s) => s.id === id)) id = `${base}_${n++}`;
+  updateCurrent((prev) => ({ ...prev, sprites: [...prev.sprites, { id, pixels: Array(64).fill(0) }] }));
+  spriteSelStore.set(id);
+  return id;
+}
+
+export function addAnimation(spriteIds: string[]): string {
+  const p = projectStore.get();
+  let id = "anim";
+  let n = 2;
+  while (p.anims.some((a) => a.id === id)) id = `anim_${n++}`;
+  updateCurrent((prev) => ({
+    ...prev,
+    anims: [...prev.anims, { id, frames: spriteIds.length > 0 ? spriteIds : [prev.sprites[0]?.id ?? "hero"], rate: 30, loop: true }],
+  }));
+  return id;
+}
+
+export function addScene(): string {
+  const p = projectStore.get();
+  let id = "scene";
+  let n = 2;
+  while (p.scenes.some((s) => s.id === id)) id = `scene_${n++}`;
+  updateCurrent((prev) => ({
+    ...prev,
+    scenes: [...prev.scenes, { id, objects: [], clicks: [], keys: [] }],
+  }));
+  sceneIdStore.set(id);
+  selectionStore.set(null);
+  return id;
+}
+
+export function deleteScene(id: string): void {
+  const p = projectStore.get();
+  if (p.scenes.length <= 1) return;
+  updateCurrent((prev) => {
+    const scenes = prev.scenes.filter((s) => s.id !== id);
+    const start = prev.start === id ? scenes[0].id : prev.start;
+    return {
+      ...prev,
+      start,
+      scenes: scenes.map((s) => ({
+        ...s,
+        clicks: s.clicks.filter((c) => c.goto !== id),
+        keys: s.keys.filter((k) => k.goto !== id),
+      })),
+    };
+  });
+  if (sceneIdStore.get() === id) {
+    const rest = projectStore.get().scenes;
+    sceneIdStore.set(rest[0].id);
+    selectionStore.set(null);
+  }
+}
+
+export function addObject(): string {
+  const p = projectStore.get();
+  const scene = currentScene(p, sceneIdStore.get());
+  let id = "obj";
+  let n = 2;
+  while (scene.objects.some((o) => o.id === id)) id = `obj_${n++}`;
+  const sprite = p.sprites[0]?.id ?? "hero";
+  const [cx, cy] = clampToCanvas(8 + scene.objects.length * 12, 8, p.width, p.height);
+  updateCurrent((prev) => ({
+    ...prev,
+    scenes: prev.scenes.map((s) =>
+      s.id !== scene.id ? s : { ...s, objects: [...s.objects, { id, x: cx, y: cy, sprite }] },
+    ),
+  }));
+  selectionStore.set(id);
+  return id;
+}
+
+export function deleteObject(objectId: string): void {
+  const p = projectStore.get();
+  const scene = currentScene(p, sceneIdStore.get());
+  updateCurrent((prev) => ({
+    ...prev,
+    scenes: prev.scenes.map((s) =>
+      s.id !== scene.id
+        ? s
+        : {
+            ...s,
+            objects: s.objects.filter((o) => o.id !== objectId),
+            clicks: s.clicks.filter((c) => c.object !== objectId),
+          },
+    ),
+  }));
+  if (selectionStore.get() === objectId) selectionStore.set(null);
 }
 
 export function resizeProject(w: number, h: number): void {

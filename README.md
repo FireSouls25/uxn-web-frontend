@@ -13,7 +13,7 @@ re-themes everything.
 | `/` | Hero, workstation features, live export targets (`GET /targets` with static fallback) |
 | `/login`, `/register` | Animated forms backed by `POST /auth/*` (JWT session → `/studio`), with account-required-for-saving notice |
 | `/projects` | Project management: create/open/delete, per-project scene/object stats |
-| `/studio` | Workstation: scene canvas (select + drag + size presets), sprite editor, scene graph, sound mixer, generated-code preview, store-bound inspector, export pane, status bar |
+| `/studio` | Workstation: Godot-like scene hierarchy, canvas (select + drag + size presets), fullscreen sprite editor (gallery, animations, 4 real Uxn colors), scene graph, sound mixer, generated-code preview, physics inspector, export pane, status bar |
 
 ## Studio store + export
 
@@ -38,10 +38,14 @@ the dictionary, never inline.
 `Project` (scenes of 8px objects + click/key → goto bindings) lowers to
 two dependency-free files (`devices.ux`, `main.ux`) the backend compiles
 as-is. Deterministic (sorted ids, fixed 16-slot pool), validated up
-front (`validateProject`). Objects carry physics flags (solid / movable
-→ push / player + keyboard controls) lowered to collide-and-push frame
-code; up to 4 sound voices (MIDI 0–107) play once on boot through
-`Audio0–3` with a shared square wave — all inside Uxn limits.
+front (`validateProject`, legacy 1bpp projects auto-migrate). Objects
+reference a shared 8×8 2bpp sprite library (planar `.chr` layout, blit
+mode 129) with frame animations, and carry physics flags (solid /
+movable → push / player + keyboard controls) lowered to
+collide-and-push frame code; up to 4 sound voices (MIDI 0–107) play
+once on boot through `Audio0–3` with a shared square wave — all
+inside Uxn limits, palette computed from the emulator's own formula
+(`src/lib/palette.ts`).
 
 ```sh
 npm test          # determinism, validation, dispatch markers…

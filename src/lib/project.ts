@@ -1,19 +1,36 @@
-/* Project → ETAL emitter (v1).
+/* Project → ETAL emitter.
    A low-code project (scenes of 8px objects + click/key bindings that
-   switch scenes) lowers to dependency-free ETAL: two files, no imports
-   beyond siblings, only constructs the backend compiler accepts.
-   Deterministic by construction: sorted ids, fixed 16-slot pool,
-   literal everything — the same project always yields the same bytes,
-   so backend content-hash caching hits across users.
-   v1 scope: on_click (press-in-rect) + press_key → goto_scene.
-   on_hold/drag arrive with gesture-level bindings (proposed). */
+   switch scenes, physics flags, sprite-library animations, boot jingle)
+   lowers to dependency-free ETAL: two files, no imports beyond siblings,
+   only constructs the backend compiler accepts. Sprites are 8×8 2bpp
+   (16 planar bytes, channel one then channel two — the .chr layout),
+   blitted with mode 129 (2bpp, blend-1 identity: all four palette
+   colors addressable, opaque). Deterministic by construction: sorted
+   ids, fixed 16-slot pool, literal everything. */
+
+import { pixelsToPlanar, monoToPixels } from "./palette";
+
+export interface Sprite {
+  id: string;
+  /** 64 color indices 0–3, row-major. */
+  pixels: number[];
+}
+
+export interface Animation {
+  id: string;
+  /** Sprite ids, played in order. */
+  frames: string[];
+  /** Ticks per frame (60Hz frames). */
+  rate: number;
+  loop: boolean;
+}
 
 export interface SceneObject {
   id: string;
   x: number;
   y: number;
-  /** 8 × 1bpp rows, 0–255. Defaults to a solid block. */
-  tile?: number[];
+  /** Sprite id from the project library. */
+  sprite: string;
   /** Blocks the player (AABB, 8px). */
   solid?: boolean;
   /** Solid + pushable by the player when the landing cell is free. */
@@ -22,6 +39,8 @@ export interface SceneObject {
   player?: boolean;
   /** Keyboard dpad drives this object (requires player). */
   controls?: boolean;
+  /** Animation id from the project library. */
+  anim?: string;
 }
 
 export interface ClickBinding {
@@ -57,6 +76,10 @@ export interface Project {
   height: number;
   start: string;
   scenes: Scene[];
+  /** Shared 8×8 2bpp sprite library. */
+  sprites: Sprite[];
+  /** Frame collections over sprite ids. */
+  anims: Animation[];
   /** Up to 4 voices, played once on boot. Absent = silent. */
   sound?: { voices: Voice[] };
   updatedAt: number;
@@ -64,6 +87,49 @@ export interface Project {
 
 export const MAX_OBJECTS = 16;
 const IDENT = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+/** Upgrade a pre-library project: inline 1bpp tiles become sprites. */
+export function migrateProject(raw: Record<string, unknown>): Project {
+  const p = { ...(raw as object) } as Record<string, unknown>;
+  if (Array.isArray(p["sprites"]) && Array.isArray(p["anims"])) {
+    return {
+      sound: { voices: [] },
+      updatedAt: 0,
+      ...(p as object),
+    } as Project;
+  }
+  const sprites: Sprite[] = [];
+  const scenes = ((p["scenes"] ?? []) as Array<Record<string, unknown>>).map((s) => {
+    const sid = String(s["id"] ?? "scene");
+    const objects = ((s["objects"] ?? []) as Array<Record<string, unknown>>).map((o) => {
+      const oid = String(o["id"] ?? "obj");
+      const tile = o["tile"];
+      const pixels =
+        Array.isArray(tile) && tile.length === 8
+          ? monoToPixels((tile as unknown[]).map((b) => Number(b)))
+          : Array<number>(64).fill(1);
+      const spriteId = `${sid}_${oid}`.replace(/[^A-Za-z0-9_]/g, "_");
+      if (!sprites.some((x) => x.id === spriteId)) sprites.push({ id: spriteId, pixels });
+      const next = { ...(o as object) } as Record<string, unknown>;
+      delete next["tile"];
+      return { ...next, sprite: spriteId } as SceneObject;
+    });
+    return { ...(s as object), objects } as Scene;
+  });
+  return {
+    id: typeof p["id"] === "string" ? (p["id"] as string) : "demo",
+    name: typeof p["name"] === "string" ? (p["name"] as string) : "Migrated",
+    author: typeof p["author"] === "string" ? (p["author"] as string) : "uxn-forge",
+    width: typeof p["width"] === "number" ? (p["width"] as number) : 128,
+    height: typeof p["height"] === "number" ? (p["height"] as number) : 128,
+    start: typeof p["start"] === "string" ? (p["start"] as string) : (scenes[0]?.id ?? "main"),
+    scenes,
+    sprites,
+    anims: [],
+    sound: (p["sound"] as Project["sound"]) ?? { voices: [] },
+    updatedAt: 0,
+  };
+}
 
 function u16(n: number): boolean {
   return Number.isInteger(n) && n >= 0 && n <= 65535;
@@ -76,6 +142,22 @@ export function validateProject(p: Project): string[] {
   if (!u16(p.width) || !u16(p.height) || p.width === 0 || p.height === 0)
     errs.push("width/height must be 1–65535");
   const sceneIds = new Set(p.scenes.map((s) => s.id));
+  const spriteIds = new Set(p.sprites.map((s) => s.id));
+  if (spriteIds.size !== p.sprites.length) errs.push("duplicate sprite id");
+  for (const s of p.sprites) {
+    if (!IDENT.test(s.id)) errs.push(`bad sprite id '${s.id}'`);
+    if (s.pixels.length !== 64 || s.pixels.some((v) => v !== 0 && v !== 1 && v !== 2 && v !== 3))
+      errs.push(`sprite '${s.id}': needs 64 pixels of 0–3`);
+  }
+  const animIds = new Set(p.anims.map((a) => a.id));
+  if (animIds.size !== p.anims.length) errs.push("duplicate animation id");
+  for (const a of p.anims) {
+    if (!IDENT.test(a.id)) errs.push(`bad animation id '${a.id}'`);
+    if (a.frames.length === 0 || a.frames.length > 16) errs.push(`animation '${a.id}': 1–16 frames`);
+    for (const f of a.frames) if (!spriteIds.has(f)) errs.push(`animation '${a.id}': unknown sprite '${f}'`);
+    if (!Number.isInteger(a.rate) || a.rate < 1 || a.rate > 255)
+      errs.push(`animation '${a.id}': rate must be 1–255`);
+  }
   if (sceneIds.size !== p.scenes.length) errs.push("duplicate scene id");
   if (!sceneIds.has(p.start)) errs.push(`start scene '${p.start}' missing`);
   if (!IDENT.test(p.id)) errs.push(`bad project id '${p.id}'`);
@@ -95,6 +177,8 @@ export function validateProject(p: Project): string[] {
     for (const o of s.objects) {
       if (!IDENT.test(o.id)) errs.push(`bad object id '${o.id}'`);
       if (!u16(o.x) || !u16(o.y)) errs.push(`object '${o.id}': x/y must be 0–65535`);
+      if (!spriteIds.has(o.sprite)) errs.push(`object '${o.id}': unknown sprite '${o.sprite}'`);
+      if (o.anim && !animIds.has(o.anim)) errs.push(`object '${o.id}': unknown animation '${o.anim}'`);
       if (o.movable && !o.solid) errs.push(`object '${o.id}': movable requires solid`);
       if (o.controls && !o.player) errs.push(`object '${o.id}': controls require player`);
       const tile = o.tile ?? [];
@@ -201,11 +285,32 @@ function emitSetup(s: Scene): string {
   const lines = [`setup_${s.id} :: fn() {`];
   for (let i = 0; i < s.objects.length; i++) {
     const o = s.objects[i];
-    lines.push(`    ox[${i}] = ${o.x}; oy[${i}] = ${o.y}; ot[${i}] = &tile_${s.id}_${o.id}; oflags[${i}] = ${flagsOf(o)};`);
+    lines.push(`    ox[${i}] = ${o.x}; oy[${i}] = ${o.y}; ot[${i}] = &spr_${o.sprite}; oflags[${i}] = ${flagsOf(o)};`);
   }
   lines.push(`    ocount = ${s.objects.length};`);
   lines.push(`}`);
   return lines.join("\n") + "\n";
+}
+
+function emitAnim(s: Scene, anims: Map<string, Animation>): string[] {
+  const lines: string[] = [];
+  s.objects.forEach((o, i) => {
+    if (!o.anim) return;
+    const a = anims.get(o.anim);
+    if (!a) return;
+    const F = a.frames.length;
+    const hold = a.loop ? `afr_${s.id}_${o.id} = 0;` : `afr_${s.id}_${o.id} = ${F - 1};`;
+    lines.push(`    atick_${s.id}_${o.id} = atick_${s.id}_${o.id} + 1;`);
+    lines.push(`    if atick_${s.id}_${o.id} >= ${a.rate} {`);
+    lines.push(`        atick_${s.id}_${o.id} = 0;`);
+    lines.push(`        afr_${s.id}_${o.id} = afr_${s.id}_${o.id} + 1;`);
+    lines.push(`        if afr_${s.id}_${o.id} >= ${F} { ${hold} }`);
+    lines.push(`    }`);
+    a.frames.forEach((f, fi) => {
+      lines.push(`    if afr_${s.id}_${o.id} == ${fi} { ot[${i}] = &spr_${f}; }`);
+    });
+  });
+  return lines;
 }
 
 function emitDrive(s: Scene, pi: number, w: number, h: number, n: number): string[] {
@@ -251,7 +356,7 @@ function emitDrive(s: Scene, pi: number, w: number, h: number, n: number): strin
   return lines;
 }
 
-function emitFrame(s: Scene, w: number, h: number): string {
+function emitFrame(s: Scene, w: number, h: number, anims: Map<string, Animation>): string {
   const lines = [`${s.id}_frame :: fn() {`];
   lines.push(`    k: u8 = kb[0]; kb[0] = 0;`);
   lines.push(`    mnow: u8 = Mouse.state | mb[0]; mb[0] = 0;`);
@@ -261,6 +366,7 @@ function emitFrame(s: Scene, w: number, h: number): string {
   lines.push(`    my: u16 = Mouse.y;`);
   const driver = s.objects.findIndex((o) => o.controls);
   if (driver >= 0) lines.push(...emitDrive(s, driver, w, h, s.objects.length));
+  lines.push(...emitAnim(s, anims));
   const byObject = new Map(s.objects.map((o, i) => [o.id, i]));
   for (const c of [...s.clicks].sort((a, b) => (a.object < b.object ? -1 : 1))) {
     const i = byObject.get(c.object) as number;
@@ -296,11 +402,9 @@ export function emitProject(p: Project): Record<string, string> {
   out.push(``);
   for (const s of scenes) out.push(`SC_${s.id.toUpperCase()} :: ${indexOf.get(s.id)};`);
   out.push(``);
-  for (const s of scenes)
-    for (const o of [...s.objects].sort((a, b) => (a.id < b.id ? -1 : 1))) {
-      const tile = o.tile ?? [255, 255, 255, 255, 255, 255, 255, 255];
-      out.push(`data tile_${s.id}_${o.id} = [${tile.join(", ")}];`);
-    }
+  for (const o of [...p.sprites].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+    out.push(`data spr_${o.id} = [${pixelsToPlanar(o.pixels).join(", ")}];`);
+  }
   if (usedVoices(p).length > 0) {
     out.push(`data sq32 = [${SQ32.join(", ")}];`);
   }
@@ -340,16 +444,26 @@ export function emitProject(p: Project): Record<string, string> {
   out.push(`                Screen.x = ox[i];`);
   out.push(`                Screen.y = oy[i];`);
   out.push(`                Screen.addr = ot[i];`);
-  out.push(`                Screen.sprite = 1;`);
+  out.push(`                Screen.sprite = 129;`);
   out.push(`            }`);
   out.push(`        }`);
   out.push(`    }`);
   out.push(`}`);
   out.push(``);
+  const animMap = new Map(p.anims.map((a) => [a.id, a]));
+  for (const s of scenes) {
+    for (const o of [...s.objects].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+      if (o.anim && animMap.has(o.anim)) {
+        out.push(`atick_${s.id}_${o.id}: u8 = 0;`);
+        out.push(`afr_${s.id}_${o.id}: u8 = 0;`);
+      }
+    }
+  }
+  out.push(``);
   for (const s of scenes) {
     const objs = [...s.objects].sort((a, b) => (a.id < b.id ? -1 : 1));
     out.push(emitSetup({ ...s, objects: objs }));
-    out.push(emitFrame({ ...s, objects: objs }, p.width, p.height));
+    out.push(emitFrame({ ...s, objects: objs }, p.width, p.height, animMap));
   }
   const arms = scenes.map((s) => `        ${indexOf.get(s.id)} => { ${s.id}_frame(); }`).join("\n");
   out.push(`on_frame :: event() {`);
@@ -398,6 +512,11 @@ export function emitProject(p: Project): Record<string, string> {
 }
 
 /* Sample project: title → play via click or space. */
+const BLOCK = Array<number>(64).fill(1);
+const WALL_ROWS = [255, 129, 129, 129, 129, 129, 129, 255];
+const COIN_ROWS = [24, 60, 126, 255, 255, 126, 60, 24];
+const COIN2_ROWS = [0, 24, 60, 126, 126, 60, 24, 0];
+
 export const SAMPLE_PROJECT: Project = {
   id: "demo",
   name: "Forge Demo",
@@ -407,20 +526,27 @@ export const SAMPLE_PROJECT: Project = {
   start: "title",
   updatedAt: 0,
   sound: { voices: [{ note: 72, vol: 120 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }] },
+  sprites: [
+    { id: "hero", pixels: BLOCK },
+    { id: "wall", pixels: monoToPixels(WALL_ROWS) },
+    { id: "coin", pixels: monoToPixels(COIN_ROWS) },
+    { id: "coin2", pixels: monoToPixels(COIN2_ROWS) },
+  ],
+  anims: [{ id: "spin", frames: ["coin", "coin2"], rate: 30, loop: true }],
   scenes: [
     {
       id: "title",
       objects: [
-        { id: "hero", x: 16, y: 40, player: true, controls: true },
-        { id: "wall", x: 64, y: 64, solid: true, tile: [255, 129, 129, 129, 129, 129, 129, 255] },
-        { id: "coin", x: 96, y: 96, solid: true, movable: true, tile: [24, 60, 126, 255, 255, 126, 60, 24] },
+        { id: "hero", x: 16, y: 40, sprite: "hero", player: true, controls: true },
+        { id: "wall", x: 64, y: 64, sprite: "wall", solid: true },
+        { id: "coin", x: 96, y: 96, sprite: "coin", solid: true, movable: true, anim: "spin" },
       ],
       clicks: [{ object: "hero", goto: "play" }],
       keys: [{ key: 32, goto: "play" }],
     },
     {
       id: "play",
-      objects: [{ id: "hero", x: 8, y: 8, player: true, controls: true }],
+      objects: [{ id: "hero", x: 8, y: 8, sprite: "hero", player: true, controls: true }],
       clicks: [],
       keys: [{ key: 27, goto: "title" }],
     },

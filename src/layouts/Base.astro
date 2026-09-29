@@ -55,16 +55,8 @@ const { title, description = "Low-code games for the Uxn virtual machine." } = A
     <main>
       <slot />
     </main>
-    <footer class="border-t border-surface0">
-      <div
-        class="mx-auto flex max-w-6xl flex-col gap-2 px-4 py-6 font-mono text-[11px] text-subtext0 md:flex-row md:items-center"
-      >
-        <span>
-          uxn·forge <span class="text-overlay0">·</span> <span data-i18n="foot.tag">low-code for the Uxn/Varvara machine</span>
-        </span>
-        <span class="md:ml-auto" data-i18n="foot.stack">etal DSL → drifblim → .rom · linux / macos / windows / web</span>
-      </div>
-    </footer>
+  </body>
+</html>
     <script>
       import { applyStaticLang, detectLang } from "../lib/i18n";
       const lang = detectLang();

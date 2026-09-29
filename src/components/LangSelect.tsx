@@ -16,7 +16,7 @@ export default function LangSelect() {
         aria-label={t(lang, "lang.label")}
         value={lang}
         onChange={(e) => setLang(e.target.value as Lang)}
-        className="cursor-pointer bg-transparent font-mono text-[11px] outline-none"
+        className="select select-sm"
       >
         {LANGS.map((l) => (
           <option key={l} value={l}>

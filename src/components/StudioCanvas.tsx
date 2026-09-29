@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
+import { PALETTE } from "../lib/palette";
 import { t, useLang } from "../lib/i18n";
 import { currentScene, moveObject, projectStore, resizeProject, sceneIdStore, selectionStore } from "../lib/store";
 import type { SceneObject } from "../lib/project";
@@ -46,15 +47,14 @@ export default function StudioCanvas() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, project.width, project.height);
-    const ink = cssVar("--ctp-text", "#cdd6f4");
     const accent = cssVar("--ctp-mauve", "#cba6f7");
+    const sprites = new Map(project.sprites.map((s) => [s.id, s.pixels]));
     for (const o of scene.objects) {
-      const tile = o.tile ?? [255, 255, 255, 255, 255, 255, 255, 255];
-      ctx.fillStyle = ink;
+      const pixels = sprites.get(o.sprite) ?? [];
       for (let r = 0; r < TILE; r++) {
-        const byte = tile[r] ?? 0;
         for (let c = 0; c < TILE; c++) {
-          if (byte & (1 << (7 - c))) ctx.fillRect(o.x + c, o.y + r, 1, 1);
+          ctx.fillStyle = PALETTE[(pixels[r * 8 + c] ?? 0) & 3];
+          ctx.fillRect(o.x + c, o.y + r, 1, 1);
         }
       }
       if (o.id === selection) {
@@ -124,7 +124,7 @@ export default function StudioCanvas() {
               const preset = SIZE_PRESETS.find(([label]) => label === e.target.value);
               if (preset) resizeProject(preset[1], preset[2]);
             }}
-            className="cursor-pointer rounded-md border border-surface1 bg-mantle px-1.5 py-1 font-mono text-[11px] outline-none"
+            className="select"
           >
             {SIZE_PRESETS.map(([label]) => (
               <option key={label} value={label}>

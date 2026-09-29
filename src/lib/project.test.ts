@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   SAMPLE_PROJECT,
   emitProject,
+  migrateProject,
   validateProject,
   type Project,
 } from "./project";
@@ -23,9 +24,10 @@ describe("validateProject", () => {
         {
           id: "title",
           objects: [
-            ...Array.from({ length: 17 }, (_, i) => ({ id: `o${i}`, x: 0, y: 0 })),
-            { id: "floaty", x: 0, y: 0, movable: true },
-            { id: "brain", x: 0, y: 0, controls: true },
+            ...Array.from({ length: 17 }, (_, i) => ({ id: `o${i}`, x: 0, y: 0, sprite: "hero" })),
+            { id: "floaty", x: 0, y: 0, sprite: "hero", movable: true },
+            { id: "brain", x: 0, y: 0, sprite: "hero", controls: true },
+            { id: "ghost", x: 0, y: 0, sprite: "nope", anim: "nope" },
           ],
           clicks: [{ object: "ghost", goto: "nowhere" }],
           keys: [],
@@ -33,7 +35,7 @@ describe("validateProject", () => {
       ],
     };
     const errs = validateProject(bad);
-    expect(errs.length).toBeGreaterThanOrEqual(6);
+    expect(errs.length).toBeGreaterThanOrEqual(7);
   });
 
   it("rejects bad sound rows", () => {
@@ -42,6 +44,25 @@ describe("validateProject", () => {
       sound: { voices: [{ note: 200, vol: 0 }, { note: 60, vol: 300 }] },
     };
     expect(validateProject(bad).length).toBe(2);
+  });
+
+  it("migrates legacy inline tiles into the sprite library", () => {
+    const legacy = {
+      id: "old",
+      name: "Old",
+      author: "me",
+      width: 128,
+      height: 128,
+      start: "main",
+      scenes: [
+        { id: "main", objects: [{ id: "hero", x: 1, y: 2, tile: [255, 0, 0, 0, 0, 0, 0, 0] }], clicks: [], keys: [] },
+      ],
+    };
+    const p = migrateProject(legacy);
+    expect(validateProject(p)).toEqual([]);
+    expect(p.sprites.map((s) => s.id)).toEqual(["main_hero"]);
+    expect(p.sprites[0].pixels.slice(0, 8)).toEqual([1, 1, 1, 1, 1, 1, 1, 1]);
+    expect(p.scenes[0].objects[0]).toMatchObject({ sprite: "main_hero", x: 1, y: 2 });
   });
 });
 
@@ -63,6 +84,9 @@ describe("emitProject", () => {
     expect(files["main.ux"]).toContain("overlap88");
     expect(files["main.ux"]).toContain("oflags[");
     expect(files["main.ux"]).toContain("Audio0.pitch");
+    expect(files["main.ux"]).toContain("Screen.sprite = 129;");
+    expect(files["main.ux"]).toContain("data spr_coin = [");
+    expect(files["main.ux"]).toContain("afr_title_coin");
     expect(files["devices.ux"]).toContain("device Audio0 48");
   });
 

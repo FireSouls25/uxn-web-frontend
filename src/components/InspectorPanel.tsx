@@ -147,7 +147,7 @@ export default function InspectorPanel() {
                 aria-label={t(lang, "insp.event")}
                 value={newKind}
                 onChange={(e) => setNewKind(e.target.value as "click" | "key")}
-                className="rounded-md border border-surface1 bg-base px-1.5 py-1 font-mono text-[11px] outline-none"
+                className="select"
               >
                 <option value="click">{t(lang, "events.click")}</option>
                 <option value="key">{t(lang, "events.key")}</option>
@@ -167,7 +167,7 @@ export default function InspectorPanel() {
                 aria-label={t(lang, "insp.goto")}
                 value={newGoto}
                 onChange={(e) => setNewGoto(e.target.value)}
-                className="rounded-md border border-surface1 bg-base px-1.5 py-1 font-mono text-[11px] outline-none"
+                className="select"
               >
                 {project.scenes.map((s) => (
                   <option key={s.id} value={s.id}>
