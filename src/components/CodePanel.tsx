@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useStore } from "@nanostores/react";
 import { Check, Copy, Download } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
 import { emitProject } from "../lib/project";
-import { projectStore } from "../lib/store";
+import { codeFileStore, projectStore } from "../lib/store";
 
 /* Read-only preview of the generated files. Direct edits are
    intentionally disabled: the project is the source of truth, and a
@@ -12,7 +12,7 @@ import { projectStore } from "../lib/store";
 export default function CodePanel() {
   const lang = useLang();
   const project = useStore(projectStore);
-  const [file, setFile] = useState<"main.ux" | "devices.ux">("main.ux");
+  const file = useStore(codeFileStore);
   const [copied, setCopied] = useState(false);
 
   const files = useMemo(() => {
@@ -48,17 +48,6 @@ export default function CodePanel() {
   return (
     <div>
       <div className="mb-2 flex items-center gap-1.5">
-        {(["main.ux", "devices.ux"] as const).map((f) => (
-          <button
-            key={f}
-            onClick={() => setFile(f)}
-            className={`rounded-md px-2.5 py-1 font-mono text-[11px] transition-colors ${
-              file === f ? "bg-mauve/20 text-mauve" : "text-subtext0 hover:bg-surface0 hover:text-text"
-            }`}
-          >
-            {f}
-          </button>
-        ))}
         <span className="ml-auto flex gap-1">
           <button
             onClick={() => void copy()}

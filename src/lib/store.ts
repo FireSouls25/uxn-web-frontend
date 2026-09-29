@@ -79,6 +79,10 @@ export const projectStore = computed(
 export const sceneIdStore = atom<string>(SAMPLE_PROJECT.start);
 export const selectionStore = atom<string | null>(null);
 export const spriteSelStore = atom<string>("hero");
+export const paintColorStore = atom<number>(1);
+export const paintToolStore = atom<"brush" | "erase">("brush");
+export const voiceSelStore = atom<number>(0);
+export const codeFileStore = atom<"main.ux" | "devices.ux">("main.ux");
 export const viewStore = atom<"scene" | "sprites" | "events" | "sound" | "code">("scene");
 
 if (typeof localStorage !== "undefined") {

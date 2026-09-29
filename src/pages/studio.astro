@@ -3,10 +3,7 @@ import Base from "../layouts/Base.astro";
 import SessionBanner from "../components/SessionBanner";
 import StudioRail from "../components/StudioRail";
 import StudioCenter from "../components/StudioCenter";
-import HierarchyPanel from "../components/HierarchyPanel";
-import InspectorPanel from "../components/InspectorPanel";
-import ExportPanel from "../components/ExportPanel";
----
+import { StudioLeft, StudioRight } from "../components/StudioSides";
 ---
 
 <Base title="Studio">
@@ -20,31 +17,13 @@ import ExportPanel from "../components/ExportPanel";
         <StudioRail client:load />
       </div>
 
-      {/* Hierarchy */}
-      <div class="pane rounded-xl p-3">
-        <HierarchyPanel client:load />
-      </div>
+      <StudioLeft client:load />
 
-      {/* Center: active view */}
       <div class="min-w-0">
         <StudioCenter client:visible />
       </div>
 
-      {/* Event graph lives in the events view now; hierarchy stays static
-          until it binds to the store. */}
-
-      {/* Inspector + export */}
-      <div class="flex min-w-0 flex-col gap-3">
-        <div class="pane rounded-xl p-3">
-          <InspectorPanel client:visible />
-          <button class="mt-3 w-full rounded-lg bg-surface0 px-3 py-2 text-[13px] font-medium transition-colors hover:bg-surface1" data-i18n="st.newbind">
-            + New bind
-          </button>
-        </div>
-        <div class="pane rounded-xl p-3">
-          <ExportPanel client:visible />
-        </div>
-      </div>
+      <StudioRight client:visible />
     </div>
 
     {/* Status bar */}

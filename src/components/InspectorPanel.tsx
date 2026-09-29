@@ -106,6 +106,23 @@ export default function InspectorPanel() {
           {toggleRow("movable", t(lang, "insp.movable"))}
           {toggleRow("player", t(lang, "insp.player"))}
           {toggleRow("controls", t(lang, "insp.controls"))}
+          <label className="block">
+            <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
+              {t(lang, "insp.anim")}
+            </span>
+            <select
+              value={obj.anim ?? ""}
+              onChange={(e) => patchObject(obj.id, { anim: e.target.value || undefined })}
+              className="select w-full"
+            >
+              <option value="">—</option>
+              {project.anims.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.id} ({a.frames.length}f)
+                </option>
+              ))}
+            </select>
+          </label>
 
           <div className="rounded-lg border border-surface0 p-3">
             <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">

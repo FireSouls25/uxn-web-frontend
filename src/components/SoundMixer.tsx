@@ -1,12 +1,18 @@
 import { useStore } from "@nanostores/react";
 import { Play } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
-import { projectStore, setVoice } from "../lib/store";
+import { projectStore, voiceSelStore } from "../lib/store";
 
 /* 4-voice mixer inside Uxn limits: MIDI notes 0–107 over one shared
    square wave, played once on boot. Test tones use WebAudio. */
 export function midiHz(note: number): number {
   return 440 * Math.pow(2, (note - 69) / 12);
+}
+
+const NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+export function noteName(note: number): string {
+  return `${NAMES[((note % 12) + 12) % 12]}${Math.floor(note / 12) - 1}`;
 }
 
 export function testTone(note: number): void {
@@ -22,9 +28,11 @@ export function testTone(note: number): void {
   osc.stop(ctx.currentTime + 0.4);
 }
 
+/* Center lanes: compact per-voice summary, click to edit on the right. */
 export default function SoundMixer() {
   const lang = useLang();
   const project = useStore(projectStore);
+  const voice = useStore(voiceSelStore);
   const voices = [0, 1, 2, 3].map((i) => project.sound?.voices[i] ?? { note: 0, vol: 0 });
 
   return (
@@ -32,35 +40,29 @@ export default function SoundMixer() {
       <p className="mb-3 font-mono text-[11px] text-subtext0">{t(lang, "sound.hint")}</p>
       <div className="space-y-2">
         {voices.map((v, i) => (
-          <div key={i} className="flex flex-wrap items-center gap-3 rounded-lg border border-surface0 bg-base px-3 py-2">
+          <div
+            key={i}
+            onClick={() => voiceSelStore.set(i)}
+            className={`flex w-full cursor-pointer flex-wrap items-center gap-3 rounded-lg border px-3 py-2 text-left transition-colors ${
+              voice === i ? "border-mauve/50 bg-mauve/5" : "border-surface0 bg-base hover:border-surface1"
+            }`}
+          >
             <span className="font-mono text-[11px] text-subtext0">
               {t(lang, "sound.voice")} {i}
             </span>
-            <label className="flex items-center gap-1.5 font-mono text-[11px] text-subtext0">
-              {t(lang, "sound.note")}
-              <input
-                type="number"
-                value={v.note}
-                min={0}
-                max={107}
-                onChange={(e) => setVoice(i, Math.min(107, Math.max(0, Math.round(e.target.valueAsNumber || 0))), v.vol)}
-                className="w-16 rounded-md border border-surface1 bg-mantle px-2 py-1 text-right font-mono text-xs outline-none focus:border-mauve"
+            <span className="font-mono text-xs text-text">{noteName(v.note)}</span>
+            <span className="h-1.5 min-w-16 flex-1 overflow-hidden rounded-full bg-surface0">
+              <span
+                className="block h-full rounded-full bg-green"
+                style={{ width: `${Math.round((v.vol / 255) * 100)}%` }}
               />
-            </label>
-            <label className="flex items-center gap-1.5 font-mono text-[11px] text-subtext0">
-              {t(lang, "sound.vol")}
-              <input
-                type="number"
-                value={v.vol}
-                min={0}
-                max={255}
-                onChange={(e) => setVoice(i, v.note, Math.min(255, Math.max(0, Math.round(e.target.valueAsNumber || 0))))}
-                className="w-16 rounded-md border border-surface1 bg-mantle px-2 py-1 text-right font-mono text-xs outline-none focus:border-mauve"
-              />
-            </label>
+            </span>
             <button
-              onClick={() => testTone(v.note)}
-              className="ml-auto inline-flex items-center gap-1.5 rounded-md bg-surface0 px-2.5 py-1 font-mono text-[11px] transition-colors hover:bg-surface1"
+              onClick={(e) => {
+                e.stopPropagation();
+                testTone(v.note);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-md bg-surface0 px-2.5 py-1 font-mono text-[11px] transition-colors hover:bg-surface1"
             >
               <Play size={12} /> {t(lang, "sound.test")}
             </button>
