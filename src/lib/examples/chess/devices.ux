@@ -1,0 +1,74 @@
+( chess devices: system (palette theme), screen, mouse, two
+  audio voices, controller for keys, datetime for the AI seed.
+  Screen 192x128: panel x0-63, board x64-191 (8x16px cells). )
+device System 0 {
+    vector: 2
+    expansion: 2
+    wst: 1
+    rst: 1
+    metadata: 2
+    r: 2
+    g: 2
+    b: 2
+    debug: 1
+    state: 1
+}
+device Screen 32 {
+    vector: 2
+    width: 2
+    height: 2
+    auto: 1
+    pad: 1
+    x: 2
+    y: 2
+    addr: 2
+    pixel: 1
+    sprite: 1
+}
+device Mouse 144 {
+    vector: 2
+    x: 2
+    y: 2
+    state: 1
+    pad: 3
+    scrollx: 2
+    scrolly: 2
+}
+device Audio0 48 {
+    vector: 2
+    position: 2
+    output: 1
+    pad: 3
+    adsr: 2
+    length: 2
+    addr: 2
+    volume: 1
+    pitch: 1
+}
+device Audio1 64 {
+    vector: 2
+    position: 2
+    output: 1
+    pad: 3
+    adsr: 2
+    length: 2
+    addr: 2
+    volume: 1
+    pitch: 1
+}
+device Controller 128 {
+    vector: 2
+    button: 1
+    key: 1
+}
+device DateTime 192 {
+    year: 2
+    month: 1
+    day: 1
+    hour: 1
+    minute: 1
+    second: 1
+    dotw: 1
+    doty: 2
+    isdst: 1
+}

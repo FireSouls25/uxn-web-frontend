@@ -1,0 +1,42 @@
+( chess entry: 192x128 screen, frame vector, mate jingle on
+  track 1 (C5 E5 G5 C6), menu scene. Needs speakers for the full
+  effect; the game plays silently otherwise. )
+
+import "devices.ux"
+import "game.ux"
+
+meta { title: "Chess", author: "etal" }
+
+start :: fn() {
+    ( palette first: the VM boots all-black (System r/g/b zeroed),
+      so nothing is visible until the theme lands. Snake's theme:
+      grey-blue bg, pale fg, brown accent, black. )
+    theme(45163, 32876, 16508);
+    Screen.width = 192;
+    Screen.height = 128;
+    tracks[1].notes[0].pitch = 72;
+    tracks[1].notes[0].len = 8;
+    tracks[1].notes[1].pitch = 76;
+    tracks[1].notes[1].len = 8;
+    tracks[1].notes[2].pitch = 79;
+    tracks[1].notes[2].len = 8;
+    tracks[1].notes[3].pitch = 84;
+    tracks[1].notes[3].len = 16;
+    tracks[1].len = 4;
+    tracks[1].sample = &sq32;
+    tracks[1].slen = 32;
+    tracks[1].vol = 200;
+    tracks[1].adsr = 4369;
+    scene_go(SC_MENU);
+    Screen.vector = &on_frame;
+    Controller.vector = &on_key;
+    Mouse.vector = &on_mouse;
+}
+
+on_frame :: event() {
+    game_frame();
+}
+
+main :: event() {
+    start();
+}

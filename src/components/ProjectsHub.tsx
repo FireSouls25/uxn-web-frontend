@@ -4,6 +4,7 @@ import { motion } from "motion/react";
 import { FolderOpen, Plus, Trash2 } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
 import { createProject, currentIdStore, deleteProject, openProject, projectsStore } from "../lib/store";
+import { CHESS_DESCRIPTION, chessProject } from "../lib/examples";
 
 /* Project management: list, create, open, delete. Guests manage
    memory-only projects (banner says so); logins persist. */
@@ -26,12 +27,52 @@ export default function ProjectsHub() {
     window.location.href = "/studio";
   }
 
-  const list = Object.values(projects).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  function openChess() {
+    const p = chessProject();
+    const all = projectsStore.get();
+    projectsStore.set({ ...all, [p.id]: { ...p, updatedAt: Date.now() } });
+    openProject(p.id);
+    window.location.href = "/studio";
+  }
+
+  const list = Object.values(projects)
+    .filter((p) => p.kind !== "code")
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-10">
       <h1 className="text-2xl font-bold tracking-tight">{t(lang, "proj.title")}</h1>
       <p className="mt-1 text-sm text-subtext0">{t(lang, "proj.sub")}</p>
+
+      <h2 className="mt-8 font-mono text-[11px] uppercase tracking-widest text-mauve">
+        {t(lang, "proj.examples")}
+      </h2>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35 }}
+          className="pane rounded-xl border-mauve/30 p-4"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-[15px] font-semibold">Chess</h2>
+            <span className="rounded-full bg-teal/15 px-2 py-0.5 font-mono text-[10px] text-teal">
+              {t(lang, "proj.handwritten")}
+            </span>
+          </div>
+          <p className="mt-1.5 text-[13px] leading-relaxed text-subtext0">{CHESS_DESCRIPTION}</p>
+          <button
+            onClick={openChess}
+            className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-surface0 px-3 py-2 text-[13px] font-medium transition-colors hover:bg-surface1"
+          >
+            <FolderOpen size={14} /> {t(lang, "proj.open")}
+          </button>
+        </motion.div>
+      </div>
+
+      <h2 className="mt-8 font-mono text-[11px] uppercase tracking-widest text-subtext0">
+        {t(lang, "proj.mine")}
+      </h2>
 
       <form onSubmit={create} className="pane mt-6 flex gap-2 rounded-xl p-3">
         <input

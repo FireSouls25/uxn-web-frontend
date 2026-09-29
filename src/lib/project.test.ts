@@ -56,6 +56,39 @@ describe("validateProject", () => {
     expect(validateProject(bad).length).toBe(2);
   });
 
+  it("emits custom hooks only when defined", () => {
+    const plain = emitProject(SAMPLE_PROJECT)["main.ux"];
+    expect(plain).not.toContain("custom_frame");
+    const hooked: Project = {
+      ...structuredClone(SAMPLE_PROJECT),
+      customCode: "hits: u8 = 0;\n\ncustom_frame :: fn() {\n    hits = hits + 1;\n}\n",
+    };
+    const out = emitProject(hooked)["main.ux"];
+    expect(out).toContain("hits: u8 = 0;");
+    expect(out).toContain("custom_frame();");
+    expect(out).not.toContain("custom_setup();");
+  });
+
+  it("rejects custom code that collides with generated names", () => {
+    const bad: Project = { ...structuredClone(SAMPLE_PROJECT), customCode: "scene: u8 = 9;" };
+    expect(() => emitProject(bad)).toThrow(/collides/);
+    const bad2: Project = { ...structuredClone(SAMPLE_PROJECT), customCode: "ox: u8 = 1;" };
+    expect(validateProject(bad2).some((e) => e.includes("collides"))).toBe(true);
+  });
+
+  it("passes code projects through untouched", () => {
+    const code: Project = {
+      ...structuredClone(SAMPLE_PROJECT),
+      kind: "code",
+      codeFiles: { "main.ux": "main :: fn() {\n}\n" },
+      entry: "main.ux",
+    };
+    expect(validateProject(code)).toEqual([]);
+    expect(emitProject(code)).toEqual({ "main.ux": "main :: fn() {\n}\n" });
+    const noEntry: Project = { ...code, entry: "missing.ux" };
+    expect(validateProject(noEntry).some((e) => e.includes("entry"))).toBe(true);
+  });
+
   it("migrates legacy inline tiles into the sprite library", () => {
     const legacy = {
       id: "old",
@@ -132,5 +165,27 @@ describe("emitProject", () => {
       stdio: "pipe",
     });
     expect(existsSync(join(dir, "main.rom"))).toBe(true);
+  });
+
+  it("chess example validates and assembles with the real etal", async () => {
+    const { chessProject } = await import("./examples");
+    const project = chessProject();
+    expect(validateProject(project)).toEqual([]);
+    expect(Object.keys(emitProject(project)).sort()).toContain("rules.ux");
+    const etal =
+      process.env.ETAL_BIN ??
+      "/home/grim/Documents/projects/uxn-dsl/build/linux-x86/etal";
+    if (!existsSync(etal)) {
+      console.warn("skip: no etal binary");
+      return;
+    }
+    const dir = mkdtempSync(join(tmpdir(), "uxn-chess-"));
+    for (const [name, content] of Object.entries(emitProject(project))) {
+      writeFileSync(join(dir, name), content);
+    }
+    execFileSync(etal, ["-r", join(dir, project.entry ?? "main.ux"), "-o", join(dir, "chess.rom")], {
+      stdio: "pipe",
+    });
+    expect(existsSync(join(dir, "chess.rom"))).toBe(true);
   });
 });

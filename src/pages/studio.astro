@@ -1,13 +1,17 @@
 ---
 import Base from "../layouts/Base.astro";
+import ProjectBar from "../components/ProjectBar";
 import SessionBanner from "../components/SessionBanner";
 import StudioRail from "../components/StudioRail";
 import StudioCenter from "../components/StudioCenter";
 import { StudioLeft, StudioRight } from "../components/StudioSides";
 ---
 
-<Base title="Studio">
+<Base titleKey="page.studio" title="Studio">
   <div class="mx-auto max-w-[1400px] px-3 py-4">
+    <div class="mb-3">
+      <ProjectBar client:load />
+    </div>
     <div class="mb-3">
       <SessionBanner client:load />
     </div>
@@ -30,7 +34,7 @@ import { StudioLeft, StudioRight } from "../components/StudioSides";
     <div class="pane mt-3 flex flex-wrap gap-x-5 gap-y-1 rounded-xl px-4 py-2 font-mono text-[11px] text-subtext0">
       <span><span class="text-green">●</span> <span data-i18n="st.eng">Engine: Ready</span></span>
       <span data-i18n="st.rend">Renderer: pixel-perfect</span>
-      <span class="ml-auto">Cursor: [X: 142, Y: 88]</span>
+      <span class="ml-auto"><span data-i18n="st.cursor">Cursor</span>: [X: 142, Y: 88]</span>
     </div>
   </div>
 </Base>

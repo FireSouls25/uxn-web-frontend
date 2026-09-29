@@ -26,10 +26,16 @@ function freshSample(): Project {
 function loadAll(): { projects: Record<string, Project>; current: string } {
   const fallback = () => ({ projects: { demo: freshSample() }, current: "demo" });
   if (typeof localStorage === "undefined") return fallback();
-  // Logged-out work is memory-only: never read disk for guests.
-  if (!getSession()) return fallback();
+  const loggedIn = !!getSession();
+  // Guests read per-tab storage (survives full page loads in this tab);
+  // logins read local storage, adopting tab work once when it is absent.
+  let raw = loggedIn ? localStorage.getItem(STORE_KEY) : sessionStorage.getItem(STORE_KEY);
+  let adopted = false;
+  if (loggedIn && !raw) {
+    raw = sessionStorage.getItem(STORE_KEY);
+    adopted = !!raw;
+  }
   try {
-    const raw = localStorage.getItem(STORE_KEY);
     if (raw) {
       const anyRaw = JSON.parse(raw) as Record<string, unknown>;
       if (anyRaw["projects"] && typeof anyRaw["projects"] === "object") {
@@ -43,7 +49,17 @@ function loadAll(): { projects: Record<string, Project>; current: string } {
             typeof anyRaw["current"] === "string" && projects[anyRaw["current"]]
               ? (anyRaw["current"] as string)
               : ids[0];
-          return { projects, current };
+          const out = { projects, current };
+          // Adopted guest work after a login: write it through so the
+          // next fresh tab finds it under the account.
+          if (adopted) {
+            try {
+              localStorage.setItem(STORE_KEY, JSON.stringify(out));
+            } catch {
+              /* quota */
+            }
+          }
+          return out;
         }
       } else {
         // Single-project shape (current or legacy): migrate in place.
@@ -53,7 +69,7 @@ function loadAll(): { projects: Record<string, Project>; current: string } {
         }
       }
     }
-    // One-time migration from the single-project era.
+    // One-time migration from the single-project era (localStorage only).
     const legacy = localStorage.getItem(LEGACY_KEY);
     if (legacy) {
       const p = JSON.parse(legacy) as Project;
@@ -82,17 +98,17 @@ export const spriteSelStore = atom<string>("hero");
 export const paintColorStore = atom<number>(1);
 export const paintToolStore = atom<"brush" | "erase">("brush");
 export const voiceSelStore = atom<number>(0);
-export const codeFileStore = atom<"main.ux" | "devices.ux">("main.ux");
+export const codeFileStore = atom<string>("main.ux");
 export const viewStore = atom<"scene" | "sprites" | "events" | "sound" | "code">("scene");
 
 if (typeof localStorage !== "undefined") {
   const persist = (all: Record<string, Project>, id: string) => {
-    // Logged-out work stays in this tab only.
-    if (!getSession()) return;
+    // Guests write per-tab storage only; logins write local storage.
+    const box = getSession() ? localStorage : sessionStorage;
     try {
-      localStorage.setItem(STORE_KEY, JSON.stringify({ projects: all, current: id }));
+      box.setItem(STORE_KEY, JSON.stringify({ projects: all, current: id }));
     } catch {
-      /* quota — memory copy keeps working */
+      /* quota/private mode — memory copy keeps working */
     }
   };
   projectsStore.subscribe((all) => persist(all, currentIdStore.get()));
@@ -107,9 +123,9 @@ export function openProject(id: string): void {
   const all = projectsStore.get();
   if (!all[id]) return;
   currentIdStore.set(id);
-  sceneIdStore.set(all[id].start);
+  sceneIdStore.set(all[id].start || all[id].scenes[0]?.id || "");
   selectionStore.set(null);
-  viewStore.set("scene");
+  viewStore.set(all[id].kind === "code" ? "code" : "scene");
 }
 
 export function createProject(name: string): string {

@@ -53,6 +53,7 @@ export async function exportProject(
   const errs = validateProject(project);
   if (errs.length > 0) return { ok: false, message: errs[0] };
   const files = emitProject(project);
+  const entry = project.kind === "code" ? (project.entry ?? "main.ux") : "main.ux";
 
   let res: Response;
   try {
@@ -64,7 +65,7 @@ export async function exportProject(
         "Content-Type": "application/json",
         ...(access ? { Authorization: `Bearer ${access}` } : {}),
       },
-      body: JSON.stringify({ target, mode, entry: "main.ux", files, lang }),
+      body: JSON.stringify({ target, mode, entry, files, lang }),
     });
   } catch {
     return { ok: false, message: t(lang, "exp.offline") };

@@ -71,6 +71,8 @@ export interface Voice {
 
 export interface Project {
   id: string;
+  /** visual: scenes lowered by the emitter. code: hand-written files. */
+  kind: "visual" | "code";
   name: string;
   author: string;
   width: number;
@@ -83,7 +85,29 @@ export interface Project {
   anims: Animation[];
   /** Up to 4 voices, played once on boot. Absent = silent. */
   sound?: { voices: Voice[] };
+  /** Visual only: raw top-level ETAL spliced into main.ux. May define
+      custom_setup() and/or custom_frame() hooks (called when present). */
+  customCode?: string;
+  /** Code only: the file set, passed through untouched. */
+  codeFiles?: Record<string, string>;
+  /** Code only: entry file (default main.ux). */
+  entry?: string;
   updatedAt: number;
+}
+
+/** Generated identifiers custom code must not redeclare. Anchored
+    narrowly on purpose: the legal hooks custom_setup/custom_frame
+    must pass, and the backend compiler remains the final arbiter
+    (duplicate definitions fail loudly at export). */
+const RESERVED =
+  /\b(ox|oy|ot|oflags|ocount|scene|kb|mb|mouse_last|dpad|draw_all|pt_in_rect|overlap88|scene_go|start|main|sq32)\b|^\s*SC_[A-Za-z0-9_]*|atick_|afr_|spr_|^\s*setup_/m;
+
+export function validateCustomCode(code: string): string[] {
+  const errs: string[] = [];
+  if (code.length > 32 * 1024) errs.push("custom code exceeds 32KB");
+  const m = code.match(RESERVED);
+  if (m) errs.push(`custom code collides with generated name '${m[0].trim()}'`);
+  return errs;
 }
 
 export const MAX_OBJECTS = 16;
@@ -94,6 +118,7 @@ export function migrateProject(raw: Record<string, unknown>): Project {
   const p = { ...(raw as object) } as Record<string, unknown>;
   if (Array.isArray(p["sprites"]) && Array.isArray(p["anims"])) {
     return {
+      kind: "visual",
       sound: { voices: [] },
       updatedAt: 0,
       ...(p as object),
@@ -125,6 +150,7 @@ export function migrateProject(raw: Record<string, unknown>): Project {
   });
   return {
     id: typeof p["id"] === "string" ? (p["id"] as string) : "demo",
+    kind: "visual",
     name: typeof p["name"] === "string" ? (p["name"] as string) : "Migrated",
     author: typeof p["author"] === "string" ? (p["author"] as string) : "uxn-forge",
     width: typeof p["width"] === "number" ? (p["width"] as number) : 128,
@@ -146,6 +172,19 @@ export function validateProject(p: Project): string[] {
   const errs: string[] = [];
   if (!p.name || /["\\]/.test(p.name)) errs.push("name must be non-empty without quotes/backslashes");
   if (!p.author || /["\\]/.test(p.author)) errs.push("author must be non-empty without quotes/backslashes");
+  if (p.kind !== "visual" && p.kind !== "code") errs.push(`bad kind '${(p as { kind: unknown }).kind}'`);
+  if (!IDENT.test(p.id)) errs.push(`bad project id '${p.id}'`);
+  if (p.kind === "code") {
+    const files = p.codeFiles ?? {};
+    const entry = p.entry ?? "main.ux";
+    if (!files[entry]) errs.push(`entry '${entry}' missing from code files`);
+    for (const path of Object.keys(files)) {
+      if (path.startsWith("/") || path.split("/").includes(".."))
+        errs.push(`code file '${path}': relative paths only, no '..'`);
+    }
+    return errs;
+  }
+  if (p.customCode) errs.push(...validateCustomCode(p.customCode));
   if (!u16(p.width) || !u16(p.height) || p.width === 0 || p.height === 0)
     errs.push("width/height must be 1–65535");
   const sceneIds = new Set(p.scenes.map((s) => s.id));
@@ -363,7 +402,7 @@ function emitDrive(s: Scene, pi: number, w: number, h: number, n: number): strin
   return lines;
 }
 
-function emitFrame(s: Scene, w: number, h: number, anims: Map<string, Animation>): string {
+function emitFrame(s: Scene, w: number, h: number, anims: Map<string, Animation>, frameHook: boolean): string {
   const lines = [`${s.id}_frame :: fn() {`];
   lines.push(`    k: u8 = kb[0]; kb[0] = 0;`);
   lines.push(`    mnow: u8 = Mouse.state | mb[0]; mb[0] = 0;`);
@@ -390,6 +429,7 @@ function emitFrame(s: Scene, w: number, h: number, anims: Map<string, Animation>
     lines.push(`        scene_go(SC_${k.goto.toUpperCase()});`);
     lines.push(`    }`);
   }
+  if (frameHook) lines.push(`    custom_frame();`);
   lines.push(`    draw_all();`);
   lines.push(`}`);
   return lines.join("\n") + "\n";
@@ -398,6 +438,10 @@ function emitFrame(s: Scene, w: number, h: number, anims: Map<string, Animation>
 export function emitProject(p: Project): Record<string, string> {
   const errs = validateProject(p);
   if (errs.length > 0) throw new Error(`invalid project: ${errs.join("; ")}`);
+  if (p.kind === "code") return { ...(p.codeFiles ?? {}) };
+  const custom = (p.customCode ?? "").trim();
+  const hasSetupHook = /custom_setup\s*::/.test(custom);
+  const hasFrameHook = /custom_frame\s*::/.test(custom);
   const scenes = [...p.scenes].sort((a, b) => (a.id < b.id ? -1 : 1));
   const indexOf = new Map(scenes.map((s, i) => [s.id, i]));
 
@@ -407,6 +451,11 @@ export function emitProject(p: Project): Record<string, string> {
   out.push(``);
   out.push(`meta { title: "${p.name}", author: "${p.author}" }`);
   out.push(``);
+  if (custom) {
+    out.push(`( --- custom.ux : user-authored top-level declarations --- )`);
+    out.push(custom);
+    out.push(``);
+  }
   for (const s of scenes) out.push(`SC_${s.id.toUpperCase()} :: ${indexOf.get(s.id)};`);
   out.push(``);
   for (const o of [...p.sprites].sort((a, b) => (a.id < b.id ? -1 : 1))) {
@@ -470,7 +519,7 @@ export function emitProject(p: Project): Record<string, string> {
   for (const s of scenes) {
     // Store order, not sorted: hierarchy drag-reorder defines draw order.
     out.push(emitSetup(s));
-    out.push(emitFrame(s, p.width, p.height, animMap));
+    out.push(emitFrame(s, p.width, p.height, animMap, hasFrameHook));
   }
   const arms = scenes.map((s) => `        ${indexOf.get(s.id)} => { ${s.id}_frame(); }`).join("\n");
   out.push(`on_frame :: event() {`);
@@ -505,6 +554,7 @@ export function emitProject(p: Project): Record<string, string> {
     out.push(`    Audio${v}.pitch = ${128 + voice.note};`);
   }
   out.push(`    setup_${p.start}();`);
+  if (hasSetupHook) out.push(`    custom_setup();`);
   out.push(`    scene_go(SC_${p.start.toUpperCase()});`);
   out.push(`    Screen.vector = &on_frame;`);
   out.push(`    Controller.vector = &on_key;`);
@@ -526,6 +576,7 @@ const COIN2_ROWS = [0, 24, 60, 126, 126, 60, 24, 0];
 
 export const SAMPLE_PROJECT: Project = {
   id: "demo",
+  kind: "visual",
   name: "Forge Demo",
   author: "uxn-forge",
   width: 128,

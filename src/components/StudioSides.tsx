@@ -9,12 +9,31 @@ import SpriteTools from "./SpriteTools";
 import TransitionEditor from "./TransitionEditor";
 import VoiceEditor from "./VoiceEditor";
 import VoiceList from "./VoiceList";
-import { viewStore } from "../lib/store";
+import { t, useLang } from "../lib/i18n";
+import { projectStore, viewStore } from "../lib/store";
+
+/* Hand-written ETAL has no visual model: sides say so plainly. */
+function CodeNote() {
+  const lang = useLang();
+  return (
+    <p className="rounded-lg border border-dashed border-surface1 px-3 py-4 text-center text-[13px] text-subtext0">
+      {t(lang, "code.side_note")}
+    </p>
+  );
+}
 
 /* Left column follows the view: hierarchy for scenes, sprites for
    sprites, scene jumps for events, voices for sound, files for code. */
 export function StudioLeft() {
   const view = useStore(viewStore);
+  const project = useStore(projectStore);
+  if (project.kind === "code") {
+    return (
+      <div className="pane rounded-xl p-3">
+        <CodeNote />
+      </div>
+    );
+  }
   return (
     <div className="pane rounded-xl p-3">
       {view === "scene" && <HierarchyPanel />}
@@ -32,6 +51,19 @@ export function StudioLeft() {
    it is the panel — it acts on any view. */
 export function StudioRight() {
   const view = useStore(viewStore);
+  const project = useStore(projectStore);
+  if (project.kind === "code") {
+    return (
+      <div className="flex min-w-0 flex-col gap-3">
+        <div className="pane rounded-xl p-3">
+          <CodeNote />
+        </div>
+        <div className="pane rounded-xl p-3">
+          <ExportPanel />
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="flex min-w-0 flex-col gap-3">
       {view !== "code" && (

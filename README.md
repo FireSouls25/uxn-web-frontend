@@ -18,8 +18,11 @@ re-themes everything.
 ## Studio store + export
 
 `src/lib/store.ts` (nanostores) is the single source of truth canvas,
-inspector and exporter read. Persistence is login-gated: guests work
-in memory only (amber banner says so), logins persist to localStorage.
+inspector and exporter read. Persistence is login-gated by storage,
+not by memory: guests persist per-tab (`sessionStorage`, survives
+full page loads in this tab, never leaves it), logins persist to
+`localStorage` (adopting tab work once after a login). The studio top
+bar always names the open project, its kind, and its stats.
 `src/lib/export.ts` validates → emits → `POST /compile` → downloads
 the artifact (`forge-demo.html`, …) into Downloads. Landing target
 cards export the demo project; the studio panel exports live edits.
@@ -29,8 +32,11 @@ cards export the demo project; the studio panel exports live edits.
 One dictionary: `src/lib/i18n.ts`. Detection order is stored
 preference → `navigator.language` → English, applied pre-paint
 (`data-lang`, no flash) and persisted. Static Astro markup uses
-`data-i18n="key"` with English fallback content; React islands use
-`useLang()` + `t()`. Toggle lives in the header. New strings go in
+`data-i18n="key"` with English fallback content (plus `data-title-key`
+for `<title>`); React islands use `useLang()` + `t()`. Rule: no
+hardcoded UI text — every string lives in the dictionary in both
+languages, enforced by `src/lib/i18n.test.ts` (fails on missing or
+lopsided keys). Toggle lives in the header. New strings go in
 the dictionary, never inline.
 
 ## Project → ETAL emitter (`src/lib/project.ts`)
@@ -46,7 +52,14 @@ collision and keyboard-drive flags, lowered to collide-and-push frame
 code emitted in hierarchy order (drag-reorder = draw order); up to 4
 sound voices (MIDI 0–107) play once on boot through `Audio0–3` with a
 shared square wave — all inside Uxn limits, palette computed from the
-emulator's own formula (`src/lib/palette.ts`).
+emulator's own formula (`src/lib/palette.ts`). Two escape hatches
+keep it honest: visual projects accept a `customCode` block (raw
+top-level ETAL with optional `custom_setup`/`custom_frame` hooks,
+reserved generated names rejected), and `kind: "code"` projects pass
+hand-written file sets through untouched — see the chess port
+(`src/lib/examples/chess/`, synced from `uxn-webpage/chess/` via
+`sh scripts/sync-chess.sh`, full rules + AI + drag input, surfaced in
+/projects as the example).
 
 ```sh
 npm test          # determinism, validation, dispatch markers…

@@ -1,0 +1,859 @@
+( chess UI: scenes, board drawing, mouse drag, highlights,
+  animations, sounds. Board origin (64,0), 16px cells; panel x0-63.
+  State: view/turn/selection/drag/jiggle/transition/result. )
+
+import "devices.ux"
+import "rules.ux"
+import "screen.ux"
+import "font.ux"
+import "audio.ux"
+import "song.ux"
+import "scene.ux"
+import "input.ux"
+
+SC_MENU :: 0;
+SC_COLOR :: 1;
+SC_PLAY :: 2;
+SC_PAUSE :: 3;
+SC_OVER :: 4;
+
+view_white: u8 = 1;
+player_side: u8 = 0;
+sel_sq: u8 = 255;
+grabbed: u8 = 255;
+jig_sq: u8 = 255;
+jig_t: u8 = 0;
+trans_t: u8 = 0;
+fr: u8 = 0;
+prev_btn: u8 = 0;
+prev_key: u8 = 0;
+( Per-frame mouse snapshot (globals, not locals: six input handlers
+  sharing one snapshot saves ~25 zero-page bytes). )
+mgx: u16 = 0;
+mgy: u16 = 0;
+mgpressed: u8 = 0;
+mgreleased: u8 = 0;
+( Vector-latched input slots (one byte each, via lib/input.ux — see
+  that file for why polling alone misses keys and quick taps).
+  cpressed is the per-frame edge mask, keyhit the consumed key,
+  menu_sel the shared mouse/keyboard menu selection. )
+keybuf: [1] u8;
+mousebuf: [1] u8;
+cbtnbuf: [1] u8;
+prev_cbtn: u8 = 0;
+cpressed: u8 = 0;
+keyhit: u8 = 0;
+menu_sel: u8 = 0;
+game_result: u8 = 0;
+mate_side: u8 = 0;
+was_check: u8 = 0;
+
+buffer hl[64]: u8;
+buffer mbuf[8]: u8;
+
+( Move slide: from-sq, to-sq, piece, frames-left; t == 0 is idle.
+  Main RAM, so zero zero-page cost. Both sides arm it; the AI reply
+  chains off the human slide's last frame, so the two glides play in
+  turn with a natural thinking beat. Castling slides the king while
+  the rook snaps; en-passant victims vanish at move time rather than
+  on landing — both accepted simplifications. )
+buffer mvanim[6]: u8;
+( slots 0-3: from-sq, to-sq, piece, frames-left; 4-5: draw_play's AI
+  cap/status scratch. Per-frame elapsed scratch (u16 so the lerp
+  multiply promotes instead of wrapping u8; named temps would cost
+  zero-page, this doesn't). )
+buffer mvk[1]: u16;
+
+( Solid 8px tile (square halves pick color via blend) and the
+  valid-target dot. )
+data sqfill = [255, 255, 255, 255, 255, 255, 255, 255];
+data dot = [0, 0, 0, 24, 24, 0, 0, 0];
+
+( Mouse arrow: the VM hides the system cursor over the window
+  (SDL_ShowCursor off in uxn2.c), so uxn games draw their own —
+  without this the mouse visibly vanishes on top of the game. )
+data cursor = [192, 224, 240, 248, 252, 240, 200, 136];
+
+data jigx = [3, 253, 2, 254, 1, 0];
+
+SND_SELECT :: 79;
+SND_MOVE :: 76;
+SND_CAPTURE :: 55;
+SND_BAD :: 48;
+SND_CHECK :: 81;
+SND_MENU :: 67;
+SND_GO :: 72;
+
+( Text line without inlining draw_string's locals at every site
+  (macro locals budget zero-page per expansion — 24 sites would
+  cost ~170 bytes); one shared frame instead. )
+text :: fn(x: u8, y: u8, s: &u8) {
+    draw_string(x, y, s);
+}
+
+( Cursor last in every scene draw, tip at the exact mouse pixel. )
+draw_cursor :: fn() {
+    blit(mgx, mgy, &cursor, 1);
+}
+
+( Shared keyboard nav for two-item menus: arrows or W/S move the
+  shared menu_sel, Enter/Space/Z confirm. Returns 1 on confirm, else
+  0. Mouse hover writes the same menu_sel, so both inputs agree. )
+nav_keys :: fn() -> u8 {
+    if cpressed & 48 != 0 {
+        menu_sel = 1 - menu_sel;
+        sfx_note(SND_MENU, 6);
+        return 0;
+    }
+    if keyhit == 119 {
+        menu_sel = 1 - menu_sel;
+        sfx_note(SND_MENU, 6);
+        return 0;
+    }
+    if keyhit == 115 {
+        menu_sel = 1 - menu_sel;
+        sfx_note(SND_MENU, 6);
+        return 0;
+    }
+    if keyhit == 13 {
+        return 1;
+    }
+    if keyhit == 32 {
+        return 1;
+    }
+    if keyhit == 122 {
+        return 1;
+    }
+    return 0;
+}
+
+
+
+( u16 cell down to u8 via the mod bridge (one slot, no dead
+  temp: a `u16 mod 8` value flows straight into the `u8` return). )
+cell8 :: fn(v: u16) -> u8 {
+    t: u16 mod 8 = v;
+    return t;
+}
+
+( Display cell -> board file/rank through the view. )
+view_file :: fn(dx: u16) -> u8 {
+    if view_white != 0 {
+        return cell8(dx);
+    }
+    return 7 - cell8(dx);
+}
+
+view_rank :: fn(dy: u16) -> u8 {
+    if view_white != 0 {
+        return 7 - cell8(dy);
+    }
+    return cell8(dy);
+}
+
+( Board square -> display cell. )
+sq_dx :: fn(sq: u8) -> u8 {
+    f: u8 = sq - sq / 8 * 8;
+    if view_white != 0 {
+        return f;
+    }
+    return 7 - f;
+}
+
+sq_dy :: fn(sq: u8) -> u8 {
+    r: u8 = sq / 8;
+    if view_white != 0 {
+        return 7 - r;
+    }
+    return r;
+}
+
+( Mouse pixel -> board square, or 255 when off-board. )
+mouse_sq :: fn() -> u8 {
+    if mgx < 64 {
+        return 255;
+    }
+    if mgx >= 192 {
+        return 255;
+    }
+    if mgy >= 128 {
+        return 255;
+    }
+    return view_rank(mgy >> 4) * 8 + view_file((mgx - 64) >> 4);
+}
+
+( Point in a text-button rect (8px cells). Small types: all
+  coordinates fit u8 on a 192x128 screen. )
+in_rect :: fn(mx: u16, my: u16, x: u8, y: u8, w: u8) -> u8 {
+    if mx < x {
+        return 0;
+    }
+    if mx >= x + w {
+        return 0;
+    }
+    if my < y {
+        return 0;
+    }
+    if my >= y + 8 {
+        return 0;
+    }
+    return 1;
+}
+
+sfx_note :: fn(note: u8, len: u8) {
+    Audio0.addr = &sq32;
+    Audio0.length = len;
+    Audio0.volume = 220;
+    Audio0.adsr = 4369;
+    Audio0.pitch = note;
+}
+
+( Mark this square and its whole row/col/diag neighborhood? No —
+  mark exactly the legal targets of the selected square. )
+fill_hl :: fn(sq: u8) {
+    i: u8 = 0;
+    while i < 64 {
+        hl[i] = 0;
+        i = i + 1;
+    }
+    gen_legal(turn);
+    i: u8 = 0;
+    while i < 128 {
+        if i < moven {
+            if mfrom[i] == sq {
+                hl[mto[i]] = 1;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+clear_sel :: fn() {
+    sel_sq = 255;
+    grabbed = 255;
+}
+
+( 0 empty, 1 white, 2 black piece-square color pair for fills.
+  u8 coordinates: the board spans x64-192, y0-128. )
+draw_square_bg :: fn(dx: u8, dy: u8, light: u8) {
+    mode: u8 = 1;
+    if light == 0 {
+        mode = 2;
+    }
+    blit(64 + dx * 16, dy * 16, &sqfill, mode);
+    blit(64 + dx * 16 + 8, dy * 16, &sqfill, mode);
+    blit(64 + dx * 16, dy * 16 + 8, &sqfill, mode);
+    blit(64 + dx * 16 + 8, dy * 16 + 8, &sqfill, mode);
+}
+
+( Piece on a display cell, rotated 180 for the far side (both
+  flips) so both players read their army upright. Shares the
+  pixel plotter's frame (kind/side/mode live there, not here). )
+draw_piece_at :: fn(dx: u8, dy: u8, p: u8) {
+    draw_piece_px(64 + dx * 16 + 4, dy * 16 + 4, p);
+}
+
+( Piece at raw pixels (dragging / jiggling). )
+draw_piece_px :: fn(x: u16, y: u16, p: u8) {
+    k: u8 = kind_of(p);
+    side: u8 = side_of(p);
+    mode: u8 = 128;
+    if side_of(p) != view_white {
+        mode = 176;
+    }
+    blit(x, y, tile_addr(k, side), mode);
+}
+
+draw_board :: fn() {
+    dy: u8 = 0;
+    while dy < 8 {
+        if dy < trans_t {
+            dx: u8 = 0;
+            while dx < 8 {
+                ( displayed parity is always opposite the board
+                  parity, either way round )
+                draw_square_bg(dx, dy, 1 - (dx + dy) % 2);
+                dx = dx + 1;
+            }
+        }
+        dy = dy + 1;
+    }
+}
+
+( Full board + pieces + highlights + grabbed/jiggle/check fx. )
+draw_position :: fn() {
+    draw_board();
+    ( valid-target dots, only while something is selected )
+    if sel_sq != 255 {
+        dy: u8 = 0;
+        while dy < 8 {
+            if dy < trans_t {
+                dx: u8 = 0;
+                while dx < 8 {
+                    sq: u8 = view_rank(dy) * 8 + view_file(dx);
+                    if hl[sq] != 0 {
+                        blit(64 + dx * 16 + 4, dy * 16 + 4, &dot, 3);
+                    }
+                    dx = dx + 1;
+                }
+            }
+            dy = dy + 1;
+        }
+    }
+    ( pieces; the slide target hides while gliding (the glide draws it) )
+    sq: u8 = 0;
+    while sq < 64 {
+        if sq_dy(sq) < trans_t {
+            p: u8 = board[sq];
+            if p != 0 {
+                if sq != grabbed {
+                    if mvanim[3] == 0 {
+                        draw_piece_at(sq_dx(sq), sq_dy(sq), p);
+                    } else {
+                        if sq != mvanim[1] {
+                            draw_piece_at(sq_dx(sq), sq_dy(sq), p);
+                        }
+                    }
+                }
+            }
+        }
+        sq = sq + 1;
+    }
+    ( bot-move slide: lerp from-square to to-square over 10 frames.
+      All math is stack + buffer reads (u16 via mvk), so no zero-page
+      temps; the multiply would wrap u8, hence the promotion. )
+    if mvanim[3] != 0 {
+        mvk[0] = 10 - mvanim[3];
+        draw_piece_px(((64 + sq_dx(mvanim[0]) * 16 + 4) * (10 - mvk[0]) + (64 + sq_dx(mvanim[1]) * 16 + 4) * mvk[0]) / 10, ((sq_dy(mvanim[0]) * 16 + 4) * (10 - mvk[0]) + (sq_dy(mvanim[1]) * 16 + 4) * mvk[0]) / 10, mvanim[2]);
+        mvanim[3] = mvanim[3] - 1;
+    }
+    ( dragged piece follows the mouse )
+    if grabbed != 255 {
+        gp: u8 = board[grabbed];
+        if gp != 0 {
+            draw_piece_px(Mouse.x - 4, Mouse.y - 4, gp);
+        }
+    }
+    ( jiggle-back )
+    if jig_t != 0 {
+        jp: u8 = board[jig_sq];
+        if jp != 0 {
+            ox: u8 = jigx[jig_t - 1];
+            draw_piece_px(64 + sq_dx(jig_sq) * 16 + 4 + ox, sq_dy(jig_sq) * 16 + 4, jp);
+        }
+    }
+}
+
+( Piece value in pawns (fits u8: a full army is 39). )
+pval :: fn(k: u8) -> u8 {
+    if k == 0 {
+        return 1;
+    }
+    if k == 1 {
+        return 3;
+    }
+    if k == 2 {
+        return 3;
+    }
+    if k == 3 {
+        return 5;
+    }
+    if k == 4 {
+        return 9;
+    }
+    return 0;
+}
+
+( Material diff as sign + two digits in mbuf: "+03", "-12".
+  The old single 48+d digit showed ':' past a 9-point gap. )
+mat_show :: fn(d: u8, neg: u8) {
+    if neg == 0 {
+        mbuf[0] = 43;
+    } else {
+        mbuf[0] = 45;
+    }
+    mbuf[1] = 48 + d / 10;
+    mbuf[2] = 48 + d - (d / 10) * 10;
+    mbuf[3] = 0;
+}
+
+draw_panel :: fn() {
+    text(2, 2, "CHESS");
+    if turn == 0 {
+        text(2, 12, "W TO GO");
+    } else {
+        text(2, 12, "B TO GO");
+    }
+    ( material from white's view, in pawns )
+    mw: u8 = 0;
+    mb: u8 = 0;
+    sq: u8 = 0;
+    while sq < 64 {
+        p: u8 = board[sq];
+        if p != 0 {
+            if side_of(p) == 0 {
+                mw = mw + pval(kind_of(p));
+            } else {
+                mb = mb + pval(kind_of(p));
+            }
+        }
+        sq = sq + 1;
+    }
+    if mw >= mb {
+        mat_show(mw - mb, 0);
+    } else {
+        mat_show(mb - mw, 1);
+    }
+    text(2, 22, mbuf);
+    text(2, 40, "FLIP");
+    text(2, 52, "MENU");
+    if in_check(turn) != 0 {
+        if fr & 16 != 0 {
+            text(2, 70, "CHECK");
+        }
+    }
+}
+
+do_human_move :: fn(f: u8, t: u8) {
+    ( arm the slide before the board changes; the AI reply chains off
+      its last frame in draw_play, so both glides play in turn )
+    mvanim[0] = f;
+    mvanim[1] = t;
+    mvanim[2] = board[f];
+    mvanim[3] = 10;
+    cap: u8 = board[t];
+    do_move(f, t);
+    if cap != 0 {
+        sfx_note(SND_CAPTURE, 24);
+    } else {
+        sfx_note(SND_MOVE, 12);
+    }
+    after_move();
+}
+
+after_move :: fn() {
+    clear_sel();
+    st: u8 = game_status(turn);
+    if st == ST_MATE {
+        game_result = 1;
+        mate_side = turn;
+        tracks[1].pos = 0;
+        tracks[1].wait = 0;
+        sfx_note(SND_CHECK, 24);
+        scene_go(SC_OVER);
+        return;
+    }
+    if st == ST_DRAW {
+        game_result = 2;
+        scene_go(SC_OVER);
+        return;
+    }
+    if in_check(turn) != 0 {
+        if was_check == 0 {
+            sfx_note(SND_CHECK, 24);
+        }
+        was_check = 1;
+    } else {
+        was_check = 0;
+    }
+    ( the AI reply fires from draw_play as the human slide lands —
+      same frame would overwrite the human glide before anyone sees it )
+}
+
+start_game :: fn() {
+    setup_board();
+    seed = DateTime.second;
+    clear_sel();
+    trans_t = 0;
+    was_check = 0;
+    game_result = 0;
+    jig_t = 0;
+    ( drop any slide left over from a previous game ending mid-glide )
+    mvanim[3] = 0;
+    for_i: u8 = 0;
+    while for_i < 64 {
+        hl[for_i] = 0;
+        for_i = for_i + 1;
+    }
+    scene_go(SC_PLAY);
+    sfx_note(SND_GO, 12);
+    if turn != player_side {
+        ai_choose(turn);
+        do_move(ai_f, ai_t);
+        was_check = in_check(turn);
+        sfx_note(SND_MOVE, 12);
+    }
+}
+
+play_input :: fn() {
+    if mgpressed != 0 {
+        if in_rect(mgx, mgy, 2, 40, 32) != 0 {
+            view_white = 1 - view_white;
+            clear_sel();
+            sfx_note(SND_MENU, 6);
+            return;
+        }
+        if in_rect(mgx, mgy, 2, 52, 32) != 0 {
+            scene_push(SC_PAUSE);
+            sfx_note(SND_MENU, 6);
+            return;
+        }
+    }
+    if trans_t < 8 {
+        return;
+    }
+    if jig_t != 0 {
+        return;
+    }
+    sq: u8 = mouse_sq();
+    if grabbed != 255 {
+        if mgreleased != 0 {
+            if sq == grabbed {
+                grabbed = 255;
+                return;
+            }
+            if sq != 255 {
+                if hl[sq] != 0 {
+                    do_human_move(grabbed, sq);
+                    return;
+                }
+            }
+            jig_sq = grabbed;
+            jig_t = 6;
+            grabbed = 255;
+            sfx_note(SND_BAD, 24);
+        }
+        return;
+    }
+    if mgpressed != 0 {
+        if sq == 255 {
+            clear_sel();
+            return;
+        }
+        if board[sq] != 0 {
+            if side_of(board[sq]) == turn {
+                if turn == player_side {
+                    sel_sq = sq;
+                    grabbed = sq;
+                    fill_hl(sq);
+                    sfx_note(SND_SELECT, 8);
+                    return;
+                }
+            }
+        }
+        if sel_sq != 255 {
+            if hl[sq] != 0 {
+                do_human_move(sel_sq, sq);
+                return;
+            }
+        }
+        clear_sel();
+    }
+}
+
+draw_play :: fn() {
+    Screen.x = 0;
+    Screen.y = 0;
+    Screen.pixel = 128;
+    ( AI reply fires as the human slide lands (t == 1): one frame
+      later and the slide would be over, one synchronous move earlier
+      and the human glide would never show. Cap/status ride mvanim
+      scratch — named temps would cost zero-page, this doesn't. )
+    if turn != player_side {
+        if mvanim[3] == 1 {
+            ai_choose(turn);
+            mvanim[4] = board[ai_t];
+            mvanim[0] = ai_f;
+            mvanim[1] = ai_t;
+            mvanim[2] = board[ai_f];
+            mvanim[3] = 10;
+            do_move(ai_f, ai_t);
+            if mvanim[4] != 0 {
+                sfx_note(SND_CAPTURE, 24);
+            } else {
+                sfx_note(SND_MOVE, 12);
+            }
+            mvanim[5] = game_status(turn);
+            if mvanim[5] == ST_MATE {
+                game_result = 1;
+                mate_side = turn;
+                tracks[1].pos = 0;
+                tracks[1].wait = 0;
+                scene_go(SC_OVER);
+                return;
+            }
+            if mvanim[5] == ST_DRAW {
+                game_result = 2;
+                scene_go(SC_OVER);
+                return;
+            }
+            if in_check(turn) != 0 {
+                sfx_note(SND_CHECK, 24);
+                was_check = 1;
+            } else {
+                was_check = 0;
+            }
+        }
+    }
+    draw_position();
+    draw_panel();
+    draw_cursor();
+    if trans_t < 8 {
+        trans_t = trans_t + 1;
+    }
+    if jig_t != 0 {
+        jig_t = jig_t - 1;
+    }
+}
+
+draw_menu :: fn() {
+    Screen.x = 0;
+    Screen.y = 0;
+    Screen.pixel = 128;
+    text(76, 20, "CHESS");
+    text(80, 56, "PLAY");
+    text(80, 72, "QUIT");
+    ( menu kings always face the viewer (mode 128, no flip) )
+    blit(60, 56, tile_addr(5, 0), 128);
+    blit(124, 56, tile_addr(5, 1), 128);
+    if menu_sel == 0 {
+        text(70, 56, ">");
+    } else {
+        text(70, 72, ">");
+    }
+    draw_cursor();
+}
+
+menu_input :: fn() {
+    ( hover tracks the shared selection even without clicking )
+    if in_rect(mgx, mgy, 80, 56, 32) != 0 {
+        menu_sel = 0;
+    }
+    if in_rect(mgx, mgy, 80, 72, 32) != 0 {
+        menu_sel = 1;
+    }
+    if mgpressed != 0 {
+        if in_rect(mgx, mgy, 80, 56, 32) != 0 {
+            scene_go(SC_COLOR);
+            sfx_note(SND_MENU, 6);
+            return;
+        }
+        if in_rect(mgx, mgy, 80, 72, 32) != 0 {
+            ( nonzero System/state breaks the VM loop: a real quit.
+              brk here would only end one frame. )
+            System.state = 1;
+            return;
+        }
+    }
+    if nav_keys() != 0 {
+        if menu_sel == 0 {
+            scene_go(SC_COLOR);
+            sfx_note(SND_MENU, 6);
+        } else {
+            System.state = 1;
+            return;
+        }
+    }
+}
+
+draw_color :: fn() {
+    Screen.x = 0;
+    Screen.y = 0;
+    Screen.pixel = 128;
+    text(72, 20, "SIDE?");
+    text(76, 52, "WHITE");
+    text(76, 68, "BLACK");
+    blit(56, 52, tile_addr(5, 0), 128);
+    blit(56, 68, tile_addr(5, 1), 128);
+    if menu_sel == 0 {
+        text(66, 52, ">");
+    } else {
+        text(66, 68, ">");
+    }
+    draw_cursor();
+}
+
+color_input :: fn() {
+    if in_rect(mgx, mgy, 76, 52, 40) != 0 {
+        menu_sel = 0;
+    }
+    if in_rect(mgx, mgy, 76, 68, 40) != 0 {
+        menu_sel = 1;
+    }
+    if mgpressed != 0 {
+        if in_rect(mgx, mgy, 76, 52, 40) != 0 {
+            player_side = 0;
+            view_white = 1;
+            start_game();
+            return;
+        }
+        if in_rect(mgx, mgy, 76, 68, 40) != 0 {
+            player_side = 1;
+            view_white = 0;
+            start_game();
+            return;
+        }
+    }
+    if nav_keys() != 0 {
+        if menu_sel == 0 {
+            player_side = 0;
+            view_white = 1;
+        } else {
+            player_side = 1;
+            view_white = 0;
+        }
+        start_game();
+    }
+}
+
+draw_pause :: fn() {
+    draw_position();
+    draw_panel();
+    ( letterbox band, inlined: the only overlay site )
+    Screen.x = 0;
+    Screen.y = 40;
+    Screen.pixel = 128;
+    text(72, 48, "PAUSED");
+    text(64, 64, "CONTINUE");
+    text(68, 80, "QUIT");
+    if menu_sel == 0 {
+        text(54, 64, ">");
+    } else {
+        text(58, 80, ">");
+    }
+    draw_cursor();
+}
+
+pause_input :: fn() {
+    if in_rect(mgx, mgy, 64, 64, 64) != 0 {
+        menu_sel = 0;
+    }
+    if in_rect(mgx, mgy, 68, 80, 32) != 0 {
+        menu_sel = 1;
+    }
+    if mgpressed != 0 {
+        if in_rect(mgx, mgy, 64, 64, 64) != 0 {
+            scene = scene_pop();
+            sfx_note(SND_MENU, 6);
+            return;
+        }
+        if in_rect(mgx, mgy, 68, 80, 32) != 0 {
+            scene_sp = 0;
+            scene_go(SC_MENU);
+            sfx_note(SND_MENU, 6);
+            return;
+        }
+    }
+    if nav_keys() != 0 {
+        if menu_sel == 0 {
+            scene = scene_pop();
+        } else {
+            scene_sp = 0;
+            scene_go(SC_MENU);
+        }
+        sfx_note(SND_MENU, 6);
+    }
+}
+
+draw_over :: fn() {
+    draw_position();
+    draw_panel();
+    if game_result == 1 {
+        if mate_side == 0 {
+            text(52, 48, "MATE - BLACK");
+            text(80, 58, "WINS");
+        } else {
+            text(52, 48, "MATE - WHITE");
+            text(80, 58, "WINS");
+        }
+        if fr & 32 != 0 {
+            text(80, 74, "MATE");
+        }
+    } else {
+        text(80, 48, "DRAW");
+    }
+    text(80, 90, "MENU");
+    draw_cursor();
+}
+
+over_input :: fn() {
+    if mgpressed != 0 {
+        if in_rect(mgx, mgy, 80, 90, 32) != 0 {
+            scene_go(SC_MENU);
+            sfx_note(SND_MENU, 6);
+            return;
+        }
+    }
+    ( single button: any confirm key goes back, arrows just click )
+    if nav_keys() != 0 {
+        scene_go(SC_MENU);
+        sfx_note(SND_MENU, 6);
+    }
+}
+
+( Called by on_frame: this is a function so returns unwind the call.
+  Only the outer vector handler is an event. )
+game_frame :: fn() {
+    fr = fr + 1;
+    song_tick();
+    mgx = Mouse.x;
+    mgy = Mouse.y;
+    btn: u8;
+    mouse_take(mousebuf, btn);
+    btn = btn & 1;
+    mgpressed = btn & (prev_btn ^ 1);
+    mgreleased = (btn ^ 1) & prev_btn;
+    prev_btn = btn;
+    k: u8 = 0;
+    key_take(keybuf, k);
+    ( controller buttons through the same latch: tap-proof edges )
+    cpressed = (Controller.button | cbtnbuf[0]) & (prev_cbtn ^ 255);
+    prev_cbtn = Controller.button | cbtnbuf[0];
+    cbtnbuf[0] = 0;
+    keyhit = k;
+    if k == 27 {
+        if prev_key != 27 {
+            if scene == SC_PLAY {
+                scene_push(SC_PAUSE);
+            } else {
+                if scene == SC_PAUSE {
+                    scene = scene_pop();
+                }
+            }
+        }
+    }
+    prev_key = k;
+    if scene == SC_MENU {
+        menu_input();
+        draw_menu();
+        return;
+    }
+    if scene == SC_COLOR {
+        color_input();
+        draw_color();
+        return;
+    }
+    if scene == SC_PLAY {
+        play_input();
+        draw_play();
+        return;
+    }
+    if scene == SC_PAUSE {
+        pause_input();
+        draw_pause();
+        return;
+    }
+    over_input();
+    draw_over();
+}
+
+( Input vectors: tiny latches, never game logic (vectors must stay
+  short — the mouse one fires per motion event). )
+on_key :: event() {
+    key_latch(keybuf);
+    cbtn_latch(cbtnbuf);
+}
+
+on_mouse :: event() {
+    mouse_latch(mousebuf);
+}

@@ -3,7 +3,7 @@ import Base from "../layouts/Base.astro";
 import AuthForm from "../components/AuthForm";
 ---
 
-<Base title="Log in">
+<Base titleKey="page.login" title="Log in">
   <div className="mx-auto flex min-h-[70vh] max-w-6xl items-center justify-center px-4 py-14">
     <AuthForm mode="login" client:load />
   </div>

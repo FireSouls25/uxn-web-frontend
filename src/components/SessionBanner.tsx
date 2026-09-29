@@ -44,7 +44,7 @@ export default function SessionBanner() {
       </a>
       <button
         onClick={dismiss}
-        aria-label="Dismiss"
+        aria-label={t(lang, "misc.dismiss")}
         className="grid size-7 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
       >
         <X size={14} />
