@@ -3,7 +3,7 @@
    Persistence is gated on login — guests work purely in memory (see
    SessionBanner), so nothing implies saving that isn't happening. */
 import { atom, computed } from "nanostores";
-import { SAMPLE_PROJECT, migrateProject, type Project, type SceneObject } from "./project";
+import { MAX_OBJECTS, SAMPLE_PROJECT, migrateProject, type ObjectKind, type Project, type SceneObject } from "./project";
 import { getSession } from "./session";
 
 const STORE_KEY = "uxn.projects.v1";
@@ -275,18 +275,28 @@ export function deleteScene(id: string): void {
   }
 }
 
-export function addObject(): string {
+export function addObject(kind: ObjectKind = "static", name = "", sprite?: string): string {
   const p = projectStore.get();
   const scene = currentScene(p, sceneIdStore.get());
-  let id = "obj";
+  const clean = name.trim().slice(0, 24);
+  let id = clean && /^[A-Za-z][A-Za-z0-9_]*$/.test(clean) ? clean : "obj";
   let n = 2;
-  while (scene.objects.some((o) => o.id === id)) id = `obj_${n++}`;
-  const sprite = p.sprites[0]?.id ?? "hero";
+  const base = id;
+  while (scene.objects.some((o) => o.id === id)) id = `${base}_${n++}`;
   const [cx, cy] = clampToCanvas(8 + scene.objects.length * 12, 8, p.width, p.height);
+  const obj: SceneObject = {
+    id,
+    x: cx,
+    y: cy,
+    sprite: sprite ?? p.sprites[0]?.id ?? "hero",
+    kind,
+    ...(kind === "player" ? { controls: true } : {}),
+    ...(kind === "movable" ? { solid: true } : {}),
+  };
   updateCurrent((prev) => ({
     ...prev,
     scenes: prev.scenes.map((s) =>
-      s.id !== scene.id ? s : { ...s, objects: [...s.objects, { id, x: cx, y: cy, sprite }] },
+      s.id !== scene.id ? s : { ...s, objects: [...s.objects, obj] },
     ),
   }));
   selectionStore.set(id);
@@ -309,6 +319,72 @@ export function deleteObject(objectId: string): void {
     ),
   }));
   if (selectionStore.get() === objectId) selectionStore.set(null);
+}
+
+/** Rename an object id everywhere it is referenced (click bindings). */
+export function renameObject(oldId: string, newId: string): string | null {
+  const clean = newId.trim().slice(0, 24);
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(clean)) return "bad id";
+  const p = projectStore.get();
+  const scene = currentScene(p, sceneIdStore.get());
+  if (oldId !== clean && scene.objects.some((o) => o.id === clean)) return "duplicate id";
+  updateCurrent((prev) => ({
+    ...prev,
+    scenes: prev.scenes.map((s) =>
+      s.id !== scene.id
+        ? s
+        : {
+            ...s,
+            objects: s.objects.map((o) => (o.id === oldId ? { ...o, id: clean } : o)),
+            clicks: s.clicks.map((c) => (c.object === oldId ? { ...c, object: clean } : c)),
+          },
+    ),
+  }));
+  if (selectionStore.get() === oldId) selectionStore.set(clean);
+  return null;
+}
+
+/** Reorder within a scene (hierarchy drag). Slots — and draw order — follow. */
+export function reorderObject(from: number, to: number): void {
+  const p = projectStore.get();
+  const scene = currentScene(p, sceneIdStore.get());
+  if (from === to || from < 0 || to < 0 || from >= scene.objects.length || to >= scene.objects.length) return;
+  updateCurrent((prev) => ({
+    ...prev,
+    scenes: prev.scenes.map((s) => {
+      if (s.id !== scene.id) return s;
+      const objects = [...s.objects];
+      const [moved] = objects.splice(from, 1);
+      objects.splice(to, 0, moved);
+      return { ...s, objects };
+    }),
+  }));
+}
+
+/** Move an object to another scene (cross-scene hierarchy drop). */
+export function moveObjectToScene(objectId: string, targetSceneId: string): void {
+  const p = projectStore.get();
+  const scene = currentScene(p, sceneIdStore.get());
+  if (scene.id === targetSceneId) return;
+  const obj = scene.objects.find((o) => o.id === objectId);
+  const target = p.scenes.find((s) => s.id === targetSceneId);
+  if (!obj || !target || target.objects.length >= MAX_OBJECTS) return;
+  const [cx, cy] = clampToCanvas(obj.x, obj.y, p.width, p.height);
+  updateCurrent((prev) => ({
+    ...prev,
+    scenes: prev.scenes.map((s) => {
+      if (s.id === scene.id)
+        return {
+          ...s,
+          objects: s.objects.filter((o) => o.id !== objectId),
+          clicks: s.clicks.filter((c) => c.object !== objectId),
+        };
+      if (s.id === targetSceneId) return { ...s, objects: [...s.objects, { ...obj, x: cx, y: cy }] };
+      return s;
+    }),
+  }));
+  sceneIdStore.set(targetSceneId);
+  selectionStore.set(objectId);
 }
 
 export function resizeProject(w: number, h: number): void {

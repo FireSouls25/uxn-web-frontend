@@ -1,17 +1,25 @@
 import { useState } from "react";
 import { useStore } from "@nanostores/react";
-import { Plus, X } from "lucide-react";
+import { Box, Gamepad2, Move, Plus, X } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
+import type { ObjectKind } from "../lib/project";
 import {
   addBinding,
   currentScene,
   patchObject,
   projectStore,
   removeBinding,
+  renameObject,
   sceneIdStore,
   selectionStore,
   setObjectPos,
 } from "../lib/store";
+
+const KIND_META: Record<ObjectKind, { icon: typeof Box; key: string }> = {
+  player: { icon: Gamepad2, key: "kind.player" },
+  static: { icon: Box, key: "kind.static" },
+  movable: { icon: Move, key: "kind.movable" },
+};
 
 /* Inspector bound to the store selection: numeric X/Y, physics flags
    (solid / movable / player / controls) and the object's scene
@@ -32,6 +40,8 @@ export default function InspectorPanel() {
     .map((c, i) => ({ c, i }))
     .filter(({ c }) => obj && c.object === obj.id);
   const keyIdx = scene.keys.map((k, i) => ({ k, i }));
+  const [rename, setRename] = useState<string | null>(null);
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   function commit(field: "x" | "y", raw: number) {
     if (!obj || Number.isNaN(raw)) return;
@@ -39,18 +49,19 @@ export default function InspectorPanel() {
     setObjectPos(obj.id, next.x, next.y);
   }
 
-  function toggle(field: "solid" | "movable" | "player" | "controls") {
+  function toggle(field: "solid" | "controls") {
     if (!obj) return;
-    if (field === "movable" && !obj.solid && !obj.movable) {
-      patchObject(obj.id, { solid: true, movable: true });
-    } else if (field === "controls" && !obj.player && !obj.controls) {
-      patchObject(obj.id, { player: true, controls: true });
-    } else {
-      patchObject(obj.id, { [field]: !obj[field] });
-    }
+    patchObject(obj.id, { [field]: !obj[field] });
   }
 
-  const toggleRow = (field: "solid" | "movable" | "player" | "controls", label: string) => (
+  function changeKind(kind: ObjectKind) {
+    if (!obj) return;
+    if (kind === "movable") patchObject(obj.id, { kind, solid: true });
+    else if (kind === "player") patchObject(obj.id, { kind });
+    else patchObject(obj.id, { kind, controls: false });
+  }
+
+  const toggleRow = (field: "solid" | "controls", label: string) => (
     <button
       onClick={() => toggle(field)}
       className="flex w-full items-center justify-between rounded-lg border border-surface0 px-3 py-2 text-left"
@@ -84,6 +95,54 @@ export default function InspectorPanel() {
         </p>
       ) : (
         <div className="mt-2 space-y-2">
+          <div className="flex items-center gap-1.5 rounded-lg border border-surface0 px-3 py-2">
+            {(() => {
+              const Icon = KIND_META[obj.kind].icon;
+              return <Icon size={14} className="shrink-0 text-mauve" />;
+            })()}
+            {rename === null ? (
+              <button
+                onClick={() => {
+                  setRename(obj.id);
+                  setRenameError(null);
+                }}
+                title={t(lang, "insp.rename")}
+                className="flex-1 truncate text-left text-[13px] font-semibold hover:text-mauve"
+              >
+                {obj.id}
+              </button>
+            ) : (
+              <input
+                autoFocus
+                value={rename}
+                onChange={(e) => setRename(e.target.value)}
+                onBlur={() => setRename(null)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const err = renameObject(obj.id, rename);
+                    setRenameError(err);
+                    if (!err) setRename(null);
+                  }
+                  if (e.key === "Escape") setRename(null);
+                }}
+                maxLength={24}
+                className="min-w-0 flex-1 bg-transparent font-mono text-xs outline-none"
+              />
+            )}
+            <select
+              aria-label={t(lang, "hier.kind")}
+              value={obj.kind}
+              onChange={(e) => changeKind(e.target.value as ObjectKind)}
+              className="select select-sm"
+            >
+              {(Object.keys(KIND_META) as ObjectKind[]).map((k) => (
+                <option key={k} value={k}>
+                  {t(lang, KIND_META[k].key)}
+                </option>
+              ))}
+            </select>
+          </div>
+          {renameError && <p className="text-[12px] text-red">{t(lang, "insp.rename_err")}</p>}
           {(["x", "y"] as const).map((field) => (
             <div
               key={field}
@@ -103,9 +162,7 @@ export default function InspectorPanel() {
             </div>
           ))}
           {toggleRow("solid", t(lang, "insp.solid"))}
-          {toggleRow("movable", t(lang, "insp.movable"))}
-          {toggleRow("player", t(lang, "insp.player"))}
-          {toggleRow("controls", t(lang, "insp.controls"))}
+          {obj.kind === "player" && toggleRow("controls", t(lang, "insp.controls"))}
           <label className="block">
             <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
               {t(lang, "insp.anim")}

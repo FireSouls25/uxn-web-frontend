@@ -2,6 +2,7 @@ import { useStore } from "@nanostores/react";
 import { motion } from "motion/react";
 import { ArrowRight } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
+import { sceneVar } from "../lib/scene-ui";
 import { projectStore, sceneIdStore } from "../lib/store";
 
 /* General view: every binding that switches scenes, grouped by
@@ -10,9 +11,9 @@ export default function EventsGraph() {
   const lang = useLang();
   const project = useStore(projectStore);
 
-  const edges = project.scenes.flatMap((s) => [
-    ...s.clicks.map((c) => ({ from: s.id, label: `${t(lang, "events.click")} ${c.object}`, to: c.goto })),
-    ...s.keys.map((k) => ({ from: s.id, label: `${t(lang, "events.key")} ${k.key}`, to: k.goto })),
+  const edges = project.scenes.flatMap((s, si) => [
+    ...s.clicks.map((c) => ({ from: s.id, fromColor: sceneVar(si), label: `${t(lang, "events.click")} ${c.object}`, to: c.goto, toColor: sceneVar(project.scenes.findIndex((x) => x.id === c.goto)) })),
+    ...s.keys.map((k) => ({ from: s.id, fromColor: sceneVar(si), label: `${t(lang, "events.key")} ${k.key}`, to: k.goto, toColor: sceneVar(project.scenes.findIndex((x) => x.id === k.goto)) })),
   ]);
 
   return (
@@ -32,13 +33,15 @@ export default function EventsGraph() {
             transition={{ duration: 0.3, delay: Math.min(i * 0.05, 0.4) }}
             className="flex items-center gap-2 rounded-lg border border-surface0 bg-base px-3 py-2 font-mono text-xs"
           >
-            <span className="text-sky">{e.from}</span>
+            <span className="size-2 shrink-0 rounded-full" style={{ background: e.fromColor }} />
+            <span style={{ color: e.fromColor }}>{e.from}</span>
             <span className="text-subtext0">{e.label}</span>
             <ArrowRight size={13} className="text-overlay0" />
             <button
               onClick={() => sceneIdStore.set(e.to)}
               className="rounded-md bg-mauve/15 px-2 py-0.5 text-mauve transition-colors hover:bg-mauve/25"
             >
+              <span className="size-2 mr-1 inline-block rounded-full" style={{ background: e.toColor }} />
               {e.to}
             </button>
           </motion.div>

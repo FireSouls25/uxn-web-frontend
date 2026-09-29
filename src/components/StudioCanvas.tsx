@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
 import { PALETTE } from "../lib/palette";
 import { t, useLang } from "../lib/i18n";
+import { sceneVar } from "../lib/scene-ui";
 import { currentScene, moveObject, projectStore, resizeProject, sceneIdStore, selectionStore } from "../lib/store";
 import type { SceneObject } from "../lib/project";
 
@@ -97,20 +98,23 @@ export default function StudioCanvas() {
 
   return (
     <div>
-      <div className="mb-2 flex items-center gap-1.5">
+      <div className="mb-2 flex flex-wrap items-center gap-1.5">
         <span className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
-          {t(lang, "canvas.scene")}
+          {t(lang, "canvas.switch")}
         </span>
-        {project.scenes.map((s) => (
+        {project.scenes.map((s, si) => (
           <button
             key={s.id}
             onClick={() => {
               sceneIdStore.set(s.id);
               selectionStore.set(null);
             }}
-            className={`rounded-md px-2.5 py-1 font-mono text-[11px] transition-colors ${
-              s.id === scene.id ? "bg-mauve/20 text-mauve" : "text-subtext0 hover:bg-surface0 hover:text-text"
-            }`}
+            className="rounded-md px-2.5 py-1 font-mono text-[11px] transition-all hover:bg-surface0"
+            style={
+              s.id === scene.id
+                ? { background: "color-mix(in srgb, currentColor 14%, transparent)", color: sceneVar(si) }
+                : { color: "var(--ctp-subtext0)" }
+            }
           >
             {s.id}
           </button>

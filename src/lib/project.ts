@@ -25,19 +25,20 @@ export interface Animation {
   loop: boolean;
 }
 
+export type ObjectKind = "player" | "static" | "movable";
+
 export interface SceneObject {
   id: string;
   x: number;
   y: number;
   /** Sprite id from the project library. */
   sprite: string;
-  /** Blocks the player (AABB, 8px). */
+  /** player: hero (at most one per scene, 0 allowed); static: prop;
+      movable: solid + pushable. Chosen at creation, changeable later. */
+  kind: ObjectKind;
+  /** Collides (all kinds can opt in; movable requires it). */
   solid?: boolean;
-  /** Solid + pushable by the player when the landing cell is free. */
-  movable?: boolean;
-  /** Marks the player avatar (one per scene at most). */
-  player?: boolean;
-  /** Keyboard dpad drives this object (requires player). */
+  /** Keyboard dpad drives this object (player kind only). */
   controls?: boolean;
   /** Animation id from the project library. */
   anim?: string;
@@ -112,7 +113,13 @@ export function migrateProject(raw: Record<string, unknown>): Project {
       if (!sprites.some((x) => x.id === spriteId)) sprites.push({ id: spriteId, pixels });
       const next = { ...(o as object) } as Record<string, unknown>;
       delete next["tile"];
-      return { ...next, sprite: spriteId } as SceneObject;
+      const wasMovable = next["movable"] === true;
+      const wasPlayer = next["player"] === true;
+      delete next["movable"];
+      delete next["player"];
+      const kind = wasMovable ? "movable" : wasPlayer ? "player" : "static";
+      if (wasMovable) next["solid"] = true;
+      return { ...next, kind, sprite: spriteId } as SceneObject;
     });
     return { ...(s as object), objects } as Scene;
   });
@@ -179,13 +186,13 @@ export function validateProject(p: Project): string[] {
       if (!u16(o.x) || !u16(o.y)) errs.push(`object '${o.id}': x/y must be 0–65535`);
       if (!spriteIds.has(o.sprite)) errs.push(`object '${o.id}': unknown sprite '${o.sprite}'`);
       if (o.anim && !animIds.has(o.anim)) errs.push(`object '${o.id}': unknown animation '${o.anim}'`);
-      if (o.movable && !o.solid) errs.push(`object '${o.id}': movable requires solid`);
-      if (o.controls && !o.player) errs.push(`object '${o.id}': controls require player`);
-      const tile = o.tile ?? [];
-      if (tile.length !== 0 && tile.length !== 8) errs.push(`object '${o.id}': tile needs 8 rows`);
-      if (tile.some((b) => !Number.isInteger(b) || b < 0 || b > 255))
-        errs.push(`object '${o.id}': tile bytes must be 0–255`);
+      if (o.kind !== "player" && o.kind !== "static" && o.kind !== "movable")
+        errs.push(`object '${o.id}': bad kind '${(o as { kind: unknown }).kind}'`);
+      if (o.kind === "movable" && !o.solid) errs.push(`object '${o.id}': movable requires solid`);
+      if (o.controls && o.kind !== "player") errs.push(`object '${o.id}': controls require player kind`);
     }
+    const players = s.objects.filter((o) => o.kind === "player");
+    if (players.length > 1) errs.push(`scene '${s.id}': at most one player (0 allowed)`);
     const drivers = s.objects.filter((o) => o.controls);
     if (drivers.length > 1) errs.push(`scene '${s.id}': at most one keyboard driver`);
     for (const c of s.clicks) {
@@ -278,7 +285,7 @@ function usedVoices(p: Project): number[] {
 }
 
 function flagsOf(o: SceneObject): number {
-  return 1 | (o.solid ? 2 : 0) | (o.movable ? 4 : 0);
+  return 1 | (o.solid ? 2 : 0) | (o.kind === "movable" ? 4 : 0);
 }
 
 function emitSetup(s: Scene): string {
@@ -461,9 +468,9 @@ export function emitProject(p: Project): Record<string, string> {
   }
   out.push(``);
   for (const s of scenes) {
-    const objs = [...s.objects].sort((a, b) => (a.id < b.id ? -1 : 1));
-    out.push(emitSetup({ ...s, objects: objs }));
-    out.push(emitFrame({ ...s, objects: objs }, p.width, p.height, animMap));
+    // Store order, not sorted: hierarchy drag-reorder defines draw order.
+    out.push(emitSetup(s));
+    out.push(emitFrame(s, p.width, p.height, animMap));
   }
   const arms = scenes.map((s) => `        ${indexOf.get(s.id)} => { ${s.id}_frame(); }`).join("\n");
   out.push(`on_frame :: event() {`);
@@ -537,16 +544,16 @@ export const SAMPLE_PROJECT: Project = {
     {
       id: "title",
       objects: [
-        { id: "hero", x: 16, y: 40, sprite: "hero", player: true, controls: true },
-        { id: "wall", x: 64, y: 64, sprite: "wall", solid: true },
-        { id: "coin", x: 96, y: 96, sprite: "coin", solid: true, movable: true, anim: "spin" },
+        { id: "hero", x: 16, y: 40, sprite: "hero", kind: "player", controls: true },
+        { id: "wall", x: 64, y: 64, sprite: "wall", kind: "static", solid: true },
+        { id: "coin", x: 96, y: 96, sprite: "coin", kind: "movable", solid: true, anim: "spin" },
       ],
       clicks: [{ object: "hero", goto: "play" }],
       keys: [{ key: 32, goto: "play" }],
     },
     {
       id: "play",
-      objects: [{ id: "hero", x: 8, y: 8, sprite: "hero", player: true, controls: true }],
+      objects: [{ id: "hero", x: 8, y: 8, sprite: "hero", kind: "player", controls: true }],
       clicks: [],
       keys: [{ key: 27, goto: "title" }],
     },

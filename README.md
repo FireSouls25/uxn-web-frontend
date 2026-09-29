@@ -13,7 +13,7 @@ re-themes everything.
 | `/` | Hero, workstation features, live export targets (`GET /targets` with static fallback) |
 | `/login`, `/register` | Animated forms backed by `POST /auth/*` (JWT session → `/studio`), with account-required-for-saving notice |
 | `/projects` | Project management: create/open/delete, per-project scene/object stats |
-| `/studio` | Workstation: Godot-like scene hierarchy, canvas (select + drag + size presets), fullscreen sprite editor (gallery, animations, 4 real Uxn colors), scene graph + transition editor, sound mixer (voice list + detail), generated-code preview, physics inspector, export pane — side panels specialize per view |
+| `/studio` | Workstation: Godot-like scene hierarchy (drag-reorder, cross-scene moves, kind icons, per-scene colors), canvas (select + drag + size presets + scene switcher), fullscreen sprite editor (gallery, animations, 4 real Uxn colors), scene graph + transition editor, sound mixer (voice list + detail), generated-code preview, kind-based inspector (rename, physics, bindings), export pane — side panels specialize per view |
 
 ## Studio store + export
 
@@ -40,12 +40,13 @@ two dependency-free files (`devices.ux`, `main.ux`) the backend compiles
 as-is. Deterministic (sorted ids, fixed 16-slot pool), validated up
 front (`validateProject`, legacy 1bpp projects auto-migrate). Objects
 reference a shared 8×8 2bpp sprite library (planar `.chr` layout, blit
-mode 129) with frame animations, and carry physics flags (solid /
-movable → push / player + keyboard controls) lowered to
-collide-and-push frame code; up to 4 sound voices (MIDI 0–107) play
-once on boot through `Audio0–3` with a shared square wave — all
-inside Uxn limits, palette computed from the emulator's own formula
-(`src/lib/palette.ts`).
+mode 129) with frame animations; each object has a kind (player /
+static / movable, at most one player per scene, 0 allowed) plus
+collision and keyboard-drive flags, lowered to collide-and-push frame
+code emitted in hierarchy order (drag-reorder = draw order); up to 4
+sound voices (MIDI 0–107) play once on boot through `Audio0–3` with a
+shared square wave — all inside Uxn limits, palette computed from the
+emulator's own formula (`src/lib/palette.ts`).
 
 ```sh
 npm test          # determinism, validation, dispatch markers…

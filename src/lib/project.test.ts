@@ -24,10 +24,10 @@ describe("validateProject", () => {
         {
           id: "title",
           objects: [
-            ...Array.from({ length: 17 }, (_, i) => ({ id: `o${i}`, x: 0, y: 0, sprite: "hero" })),
-            { id: "floaty", x: 0, y: 0, sprite: "hero", movable: true },
-            { id: "brain", x: 0, y: 0, sprite: "hero", controls: true },
-            { id: "ghost", x: 0, y: 0, sprite: "nope", anim: "nope" },
+            ...Array.from({ length: 17 }, (_, i) => ({ id: `o${i}`, x: 0, y: 0, sprite: "hero", kind: "static" as const })),
+            { id: "floaty", x: 0, y: 0, sprite: "hero", kind: "movable" as const },
+            { id: "brain", x: 0, y: 0, sprite: "hero", kind: "static" as const, controls: true },
+            { id: "ghost", x: 0, y: 0, sprite: "nope", kind: "static" as const, anim: "nope" },
           ],
           clicks: [{ object: "ghost", goto: "nowhere" }],
           keys: [],
@@ -36,6 +36,16 @@ describe("validateProject", () => {
     };
     const errs = validateProject(bad);
     expect(errs.length).toBeGreaterThanOrEqual(7);
+  });
+
+  it("allows zero players but never two", () => {
+    const two = structuredClone(SAMPLE_PROJECT);
+    two.scenes[0].objects.push({ id: "clone", x: 0, y: 0, sprite: "hero", kind: "player" });
+    expect(validateProject(two).some((e) => e.includes("at most one player"))).toBe(true);
+    const none = structuredClone(SAMPLE_PROJECT);
+    none.scenes[0].objects = none.scenes[0].objects.filter((o) => o.kind !== "player");
+    none.scenes[0].clicks = [];
+    expect(validateProject(none)).toEqual([]);
   });
 
   it("rejects bad sound rows", () => {
@@ -71,6 +81,21 @@ describe("emitProject", () => {
     const a = emitProject(SAMPLE_PROJECT);
     const b = emitProject(structuredClone(SAMPLE_PROJECT));
     expect(a).toEqual(b);
+  });
+
+  it("emits slots in hierarchy order, not alphabetical", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.scenes[0].objects = [
+      { id: "zebra", x: 1, y: 2, sprite: "hero", kind: "static" },
+      { id: "apple", x: 3, y: 4, sprite: "hero", kind: "static" },
+    ];
+    p.scenes[0].clicks = [];
+    p.scenes[0].keys = [];
+    const main = emitProject(p)["main.ux"];
+    const zx = main.indexOf("ox[0] = 1;");
+    const ax = main.indexOf("ox[1] = 3;");
+    expect(zx).toBeGreaterThan(-1);
+    expect(ax).toBeGreaterThan(zx);
   });
 
   it("emits the scene dispatch and vector wiring", () => {
