@@ -35,7 +35,23 @@ export default function InspectorPanel() {
   const [newKey, setNewKey] = useState(32);
 
   const scene = currentScene(project, sceneId);
-  const obj = scene.objects.find((o) => o.id === selection) ?? null;
+  const segs = (selection ?? "").split("/").filter(Boolean);
+  const nested = segs.length > 1;
+  // Nested instances are viewed here but edited in their home scene.
+  const homeId = nested
+    ? (() => {
+        let cur = scene.id;
+        for (const seg of segs.slice(0, -1)) {
+          const next = project.scenes.find((s) => s.id === cur)?.nodes.find((n) => n.id === seg);
+          if (!next?.scene) return null;
+          cur = next.scene;
+        }
+        return cur;
+      })()
+    : null;
+  const homeScene = homeId ? (project.scenes.find((s) => s.id === homeId) ?? null) : null;
+  const nestedNode = homeScene?.nodes.find((n) => n.id === segs[segs.length - 1]) ?? null;
+  const obj = nested ? null : (scene.nodes.find((o) => o.id === selection) ?? null);
   const clickIdx = scene.clicks
     .map((c, i) => ({ c, i }))
     .filter(({ c }) => obj && c.object === obj.id);
@@ -90,14 +106,31 @@ export default function InspectorPanel() {
         )}
       </div>
       {!obj ? (
-        <p className="mt-3 rounded-lg border border-dashed border-surface1 px-3 py-4 text-center text-[13px] text-subtext0">
-          {t(lang, "insp.none")}
-        </p>
+        nested && nestedNode && homeScene ? (
+          <div className="mt-3 rounded-lg border border-surface0 p-3">
+            <p className="font-mono text-[11px] text-subtext0">
+              {t(lang, "insp.nested")} <span className="text-mauve">{homeScene.id}/{nestedNode.id}</span>
+            </p>
+            <button
+              onClick={() => {
+                sceneIdStore.set(homeScene.id);
+                selectionStore.set(nestedNode.id);
+              }}
+              className="mt-2 w-full rounded-lg bg-surface0 px-3 py-2 text-[13px] font-medium transition-colors hover:bg-surface1"
+            >
+              {t(lang, "insp.edit_home")}
+            </button>
+          </div>
+        ) : (
+          <p className="mt-3 rounded-lg border border-dashed border-surface1 px-3 py-4 text-center text-[13px] text-subtext0">
+            {t(lang, "insp.none")}
+          </p>
+        )
       ) : (
-        <div className="mt-2 space-y-2">
+        <fieldset disabled={!!project.locked} className="mt-2 space-y-2">
           <div className="flex items-center gap-1.5 rounded-lg border border-surface0 px-3 py-2">
             {(() => {
-              const Icon = KIND_META[obj.kind].icon;
+              const Icon = KIND_META[obj.kind ?? "static"].icon;
               return <Icon size={14} className="shrink-0 text-mauve" />;
             })()}
             {rename === null ? (
@@ -180,6 +213,19 @@ export default function InspectorPanel() {
               ))}
             </select>
           </label>
+          <label className="block">
+            <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
+              {t(lang, "insp.tick")}
+            </span>
+            <textarea
+              value={obj.tick ?? ""}
+              onChange={(e) => patchObject(obj.id, { tick: e.target.value || undefined })}
+              spellCheck={false}
+              rows={3}
+              placeholder={t(lang, "insp.tick_ph")}
+              className="w-full resize-y rounded-lg border border-surface1 bg-base p-2 font-mono text-[11px] leading-relaxed outline-none placeholder:text-overlay0 focus:border-mauve"
+            />
+          </label>
 
           <div className="rounded-lg border border-surface0 p-3">
             <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
@@ -260,7 +306,7 @@ export default function InspectorPanel() {
               </button>
             </div>
           </div>
-        </div>
+        </fieldset>
       )}
     </div>
   );

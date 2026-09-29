@@ -35,9 +35,11 @@ export default function SoundMixer() {
   const voice = useStore(voiceSelStore);
   const voices = [0, 1, 2, 3].map((i) => project.sound?.voices[i] ?? { note: 0, vol: 0 });
 
+  const locked = !!project.locked;
   return (
     <div>
       <p className="mb-3 font-mono text-[11px] text-subtext0">{t(lang, "sound.hint")}</p>
+      <fieldset disabled={locked}>
       <div className="space-y-2">
         {voices.map((v, i) => (
           <div
@@ -69,6 +71,7 @@ export default function SoundMixer() {
           </div>
         ))}
       </div>
+      </fieldset>
     </div>
   );
 }

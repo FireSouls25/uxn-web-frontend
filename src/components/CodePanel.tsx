@@ -29,6 +29,7 @@ export default function CodePanel() {
     }
   }, [project]);
   const custom = project.customCode ?? "";
+  const customEditable = !isCode && !project.locked;
 
   function setCustom(text: string) {
     const id = currentIdStore.get();
@@ -92,7 +93,7 @@ export default function CodePanel() {
           </button>
         </span>
       </div>
-      {!isCode && active === "custom.ux" ? (
+      {!isCode && active === "custom.ux" && customEditable ? (
         <textarea
           value={custom}
           onChange={(e) => setCustom(e.target.value)}

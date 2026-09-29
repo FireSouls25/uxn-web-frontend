@@ -3,7 +3,7 @@
    Persistence is gated on login — guests work purely in memory (see
    SessionBanner), so nothing implies saving that isn't happening. */
 import { atom, computed } from "nanostores";
-import { MAX_OBJECTS, SAMPLE_PROJECT, migrateProject, type ObjectKind, type Project, type SceneObject } from "./project";
+import { SAMPLE_PROJECT, flattenScene, migrateProject, type FlatLeaf, type ObjectKind, type Project, type SceneNode } from "./project";
 import { getSession } from "./session";
 
 const STORE_KEY = "uxn.projects.v1";
@@ -140,7 +140,7 @@ export function createProject(name: string): string {
     id,
     name: clean,
     author: base.author,
-    scenes: [{ id: "main", objects: [], clicks: [], keys: [] }],
+    scenes: [{ id: "main", nodes: [], clicks: [], keys: [] }],
     start: "main",
     updatedAt: Date.now(),
   };
@@ -166,7 +166,8 @@ export function deleteProject(id: string): void {
 function updateCurrent(fn: (p: Project) => Project): void {
   const id = currentIdStore.get();
   const all = projectsStore.get();
-  if (all[id]) projectsStore.set({ ...all, [id]: touch(fn(all[id])) });
+  if (!all[id] || all[id].locked) return; // locked examples are read-only
+  projectsStore.set({ ...all, [id]: touch(fn(all[id])) });
 }
 
 /** Clamp a dragged position so the 8px sprite stays on-canvas. */
@@ -174,8 +175,81 @@ export function clampToCanvas(x: number, y: number, w: number, h: number): [numb
   return [Math.min(Math.max(0, Math.round(x)), Math.max(0, w - 8)), Math.min(Math.max(0, Math.round(y)), Math.max(0, h - 8))];
 }
 
+/** Flattened leaves of a scene; [] when the chain is broken (mid-edit). */
+export function flattenLeaves(p: Project, sceneId: string): FlatLeaf[] {
+  try {
+    return flattenScene(p, sceneId);
+  } catch {
+    return [];
+  }
+}
+
 export function currentScene(p: Project, sceneId: string) {
   return p.scenes.find((s) => s.id === sceneId) ?? p.scenes[0];
+}
+
+/** A node list address: scene + path of branch ids to the list. */
+export interface ListRef {
+  sceneId: string;
+  parent: string[];
+}
+
+/** Resolve which scene DEFINITION owns the list (branch children
+    live in their home scene — editing them edits every instance,
+    Godot-style). Returns null on broken chains. */
+export function resolveHome(p: Project, sceneId: string, parent: string[]): string | null {
+  let current = sceneId;
+  for (const seg of parent) {
+    const scene = p.scenes.find((s) => s.id === current);
+    const branch = scene?.nodes.find((n) => n.id === seg);
+    if (!branch?.scene || !p.scenes.some((s) => s.id === branch.scene)) return null;
+    current = branch.scene;
+  }
+  return current;
+}
+
+/** Read the node list at a ref (top level or inside branches). */
+export function readList(p: Project, ref: ListRef): SceneNode[] {
+  const home = resolveHome(p, ref.sceneId, ref.parent);
+  return p.scenes.find((s) => s.id === home)?.nodes ?? [];
+}
+
+function writeList(p: Project, ref: ListRef, nodes: SceneNode[]): Project {
+  const home = resolveHome(p, ref.sceneId, ref.parent);
+  if (!home) return p;
+  return {
+    ...p,
+    scenes: p.scenes.map((s) => (s.id !== home ? s : { ...s, nodes })),
+  };
+}
+
+/** All scene ids in a branch's subtree (cycle guard for moves). */
+export function subtreeScenes(p: Project, node: SceneNode): Set<string> {
+  const out = new Set<string>();
+  const walk = (n: SceneNode): void => {
+    if (!n.scene) return;
+    if (out.has(n.scene)) return;
+    out.add(n.scene);
+    for (const child of p.scenes.find((s) => s.id === n.scene)?.nodes ?? []) walk(child);
+  };
+  walk(node);
+  return out;
+}
+
+/** Absolute origin of a parent chain (for nested drag math). */
+export function parentOrigin(p: Project, sceneId: string, parent: string[]): [number, number] {
+  let x = 0;
+  let y = 0;
+  let current = sceneId;
+  for (const seg of parent) {
+    const node = p.scenes.find((s) => s.id === current)?.nodes.find((n) => n.id === seg);
+    if (!node) break;
+    x += node.x;
+    y += node.y;
+    if (!node.scene) break;
+    current = node.scene;
+  }
+  return [x, y];
 }
 
 export function moveObject(project: Project, sceneId: string, objectId: string, x: number, y: number): Project {
@@ -187,10 +261,63 @@ export function moveObject(project: Project, sceneId: string, objectId: string, 
         ? s
         : {
             ...s,
-            objects: s.objects.map((o): SceneObject => (o.id === objectId ? { ...o, x: cx, y: cy } : o)),
+            nodes: s.nodes.map((o): SceneNode => (o.id === objectId ? { ...o, x: cx, y: cy } : o)),
           },
     ),
   };
+}
+
+/** Apply fn to the node list addressed by (sceneId, parent),
+    writing through to whichever home scene owns it. */
+function updateListAt(
+  p: Project,
+  sceneId: string,
+  parent: string[],
+  fn: (nodes: SceneNode[]) => SceneNode[],
+): Project {
+  let home = sceneId;
+  for (const seg of parent) {
+    const branch = p.scenes.find((s) => s.id === home)?.nodes.find((n) => n.id === seg);
+    if (!branch?.scene || !p.scenes.some((s) => s.id === branch.scene)) return p;
+    home = branch.scene;
+  }
+  return {
+    ...p,
+    scenes: p.scenes.map((s) => (s.id !== home ? s : { ...s, nodes: fn(s.nodes) })),
+  };
+}
+
+/** Drag any leaf (top-level or nested) to an absolute point. */
+export function moveLeafByPath(sceneId: string, path: string, x: number, y: number): void {
+  const segs = path.split("/");
+  if (segs.length <= 1) {
+    setObjectPos(segs[0], x, y);
+    return;
+  }
+  const p = projectStore.get();
+  const parent = segs.slice(0, -1);
+  const list = readList(p, { sceneId, parent });
+  const index = list.findIndex((n) => n.id === segs[segs.length - 1]);
+  if (index >= 0) moveInstancePos({ sceneId, parent }, index, x, y);
+}
+
+/** Drag a nested instance: convert the absolute drop point back into
+    the instance's parent-relative offset. */
+export function moveInstancePos(ref: ListRef, index: number, absX: number, absY: number): void {
+  const p = projectStore.get();
+  const [ox, oy] = parentOrigin(p, ref.sceneId, ref.parent);
+  // Clamp the absolute landing point, then store the parent-relative
+  // offset (which may legitimately go negative).
+  const [cx, cy] = clampToCanvas(absX, absY, p.width, p.height);
+  const nx = Math.round(cx - ox);
+  const ny = Math.round(cy - oy);
+  updateCurrent((prev) => {
+    const cur = readList(prev, ref);
+    if (index < 0 || index >= cur.length) return prev;
+    return updateListAt(prev, ref.sceneId, ref.parent, (nodes) =>
+      nodes.map((o, i) => (i === index ? { ...o, x: nx, y: ny } : o)),
+    );
+  });
 }
 
 export function setObjectPos(objectId: string, x: number, y: number): void {
@@ -199,7 +326,7 @@ export function setObjectPos(objectId: string, x: number, y: number): void {
   updateCurrent((prev) => moveObject(prev, scene.id, objectId, x, y));
 }
 
-export function patchObject(objectId: string, patch: Partial<SceneObject>): void {
+export function patchObject(objectId: string, patch: Partial<SceneNode>): void {
   const p = projectStore.get();
   const scene = currentScene(p, sceneIdStore.get());
   updateCurrent((prev) => ({
@@ -207,7 +334,7 @@ export function patchObject(objectId: string, patch: Partial<SceneObject>): void
     scenes: prev.scenes.map((s) =>
       s.id !== scene.id
         ? s
-        : { ...s, objects: s.objects.map((o) => (o.id === objectId ? { ...o, ...patch } : o)) },
+        : { ...s, nodes: s.nodes.map((o) => (o.id === objectId ? { ...o, ...patch } : o)) },
     ),
   }));
 }
@@ -216,9 +343,9 @@ export function setTile(objectId: string, tile: number[]): void {
   // Legacy 1bpp paint API: upgrades into the shared sprite.
   const p = projectStore.get();
   const scene = currentScene(p, sceneIdStore.get());
-  const obj = scene.objects.find((o) => o.id === objectId);
+  const obj = scene.nodes.find((o) => o.id === objectId);
   if (!obj) return;
-  setSpritePixels(obj.sprite, tile.flatMap((b) => Array.from({ length: 8 }, (_, c) => (b & (1 << (7 - c)) ? 1 : 0))));
+  setSpritePixels(obj.sprite ?? "", tile.flatMap((b) => Array.from({ length: 8 }, (_, c) => (b & (1 << (7 - c)) ? 1 : 0))));
 }
 
 export function setSpritePixels(spriteId: string, pixels: number[]): void {
@@ -261,7 +388,7 @@ export function addScene(): string {
   while (p.scenes.some((s) => s.id === id)) id = `scene_${n++}`;
   updateCurrent((prev) => ({
     ...prev,
-    scenes: [...prev.scenes, { id, objects: [], clicks: [], keys: [] }],
+    scenes: [...prev.scenes, { id, nodes: [], clicks: [], keys: [] }],
   }));
   sceneIdStore.set(id);
   selectionStore.set(null);
@@ -298,9 +425,9 @@ export function addObject(kind: ObjectKind = "static", name = "", sprite?: strin
   let id = clean && /^[A-Za-z][A-Za-z0-9_]*$/.test(clean) ? clean : "obj";
   let n = 2;
   const base = id;
-  while (scene.objects.some((o) => o.id === id)) id = `${base}_${n++}`;
-  const [cx, cy] = clampToCanvas(8 + scene.objects.length * 12, 8, p.width, p.height);
-  const obj: SceneObject = {
+  while (scene.nodes.some((o) => o.id === id)) id = `${base}_${n++}`;
+  const [cx, cy] = clampToCanvas(8 + scene.nodes.length * 12, 8, p.width, p.height);
+  const obj: SceneNode = {
     id,
     x: cx,
     y: cy,
@@ -309,12 +436,8 @@ export function addObject(kind: ObjectKind = "static", name = "", sprite?: strin
     ...(kind === "player" ? { controls: true } : {}),
     ...(kind === "movable" ? { solid: true } : {}),
   };
-  updateCurrent((prev) => ({
-    ...prev,
-    scenes: prev.scenes.map((s) =>
-      s.id !== scene.id ? s : { ...s, objects: [...s.objects, obj] },
-    ),
-  }));
+  const ref = { sceneId: scene.id, parent: [] as string[] };
+  if (!addNode(ref, obj)) return id;
   selectionStore.set(id);
   return id;
 }
@@ -322,19 +445,9 @@ export function addObject(kind: ObjectKind = "static", name = "", sprite?: strin
 export function deleteObject(objectId: string): void {
   const p = projectStore.get();
   const scene = currentScene(p, sceneIdStore.get());
-  updateCurrent((prev) => ({
-    ...prev,
-    scenes: prev.scenes.map((s) =>
-      s.id !== scene.id
-        ? s
-        : {
-            ...s,
-            objects: s.objects.filter((o) => o.id !== objectId),
-            clicks: s.clicks.filter((c) => c.object !== objectId),
-          },
-    ),
-  }));
-  if (selectionStore.get() === objectId) selectionStore.set(null);
+  const ref = { sceneId: scene.id, parent: [] as string[] };
+  const index = readList(p, ref).findIndex((o) => o.id === objectId);
+  if (index >= 0) deleteNode(ref, index);
 }
 
 /** Rename an object id everywhere it is referenced (click bindings). */
@@ -343,7 +456,7 @@ export function renameObject(oldId: string, newId: string): string | null {
   if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(clean)) return "bad id";
   const p = projectStore.get();
   const scene = currentScene(p, sceneIdStore.get());
-  if (oldId !== clean && scene.objects.some((o) => o.id === clean)) return "duplicate id";
+  if (oldId !== clean && scene.nodes.some((o) => o.id === clean)) return "duplicate id";
   updateCurrent((prev) => ({
     ...prev,
     scenes: prev.scenes.map((s) =>
@@ -351,7 +464,7 @@ export function renameObject(oldId: string, newId: string): string | null {
         ? s
         : {
             ...s,
-            objects: s.objects.map((o) => (o.id === oldId ? { ...o, id: clean } : o)),
+            nodes: s.nodes.map((o) => (o.id === oldId ? { ...o, id: clean } : o)),
             clicks: s.clicks.map((c) => (c.object === oldId ? { ...c, object: clean } : c)),
           },
     ),
@@ -360,47 +473,96 @@ export function renameObject(oldId: string, newId: string): string | null {
   return null;
 }
 
-/** Reorder within a scene (hierarchy drag). Slots — and draw order — follow. */
-export function reorderObject(from: number, to: number): void {
+export function addNode(ref: ListRef, node: SceneNode): boolean {
   const p = projectStore.get();
-  const scene = currentScene(p, sceneIdStore.get());
-  if (from === to || from < 0 || to < 0 || from >= scene.objects.length || to >= scene.objects.length) return;
-  updateCurrent((prev) => ({
-    ...prev,
-    scenes: prev.scenes.map((s) => {
-      if (s.id !== scene.id) return s;
-      const objects = [...s.objects];
-      const [moved] = objects.splice(from, 1);
-      objects.splice(to, 0, moved);
-      return { ...s, objects };
-    }),
-  }));
+  if (readList(p, ref).some((o) => o.id === node.id)) return false;
+  let ok = false;
+  updateCurrent((prev) => {
+    if (readList(prev, ref).some((o) => o.id === node.id)) return prev;
+    ok = true;
+    return updateListAt(prev, ref.sceneId, ref.parent, (nodes) => [...nodes, node]);
+  });
+  return ok;
 }
 
-/** Move an object to another scene (cross-scene hierarchy drop). */
+/** Reorder within one list (hierarchy drag). Slots follow. */
+export function reorderNodes(ref: ListRef, from: number, to: number): void {
+  const p = projectStore.get();
+  const len = readList(p, ref).length;
+  if (from === to || from < 0 || to < 0 || from >= len || to >= len) return;
+  updateCurrent((prev) =>
+    updateListAt(prev, ref.sceneId, ref.parent, (nodes) => {
+      const next = [...nodes];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    }),
+  );
+}
+
+/** Move a node between lists, with cycle guard for branches. */
+export function moveNode(src: ListRef, index: number, dst: ListRef): boolean {
+  const p = projectStore.get();
+  const node = readList(p, src)[index];
+  if (!node) return false;
+  if (node.scene) {
+    // A branch dragged into its own subtree would cycle.
+    const dstHome = resolveHome(p, dst.sceneId, dst.parent);
+    if (dstHome && (dstHome === node.scene || subtreeScenes(p, node).has(dstHome))) return false;
+    // Target budget counts flattened leaves, checked at validation;
+    // refuse only the obviously absurd here.
+    void 0;
+  }
+  let moved = false;
+  updateCurrent((prev) => {
+    const cur = readList(prev, src)[index];
+    if (!cur) return prev;
+    moved = true;
+    const without = updateListAt(prev, src.sceneId, src.parent, (nodes) =>
+      nodes.filter((_, i) => i !== index),
+    );
+    return updateListAt(without, dst.sceneId, dst.parent, (nodes) => [...nodes, cur]);
+  });
+  return moved;
+}
+
+/** Reorder within the current top-level list (compat wrapper). */
+export function reorderObject(from: number, to: number): void {
+  reorderNodes({ sceneId: sceneIdStore.get(), parent: [] }, from, to);
+}
+
+/** Move a top-level object to another scene (compat wrapper). */
 export function moveObjectToScene(objectId: string, targetSceneId: string): void {
   const p = projectStore.get();
   const scene = currentScene(p, sceneIdStore.get());
   if (scene.id === targetSceneId) return;
-  const obj = scene.objects.find((o) => o.id === objectId);
-  const target = p.scenes.find((s) => s.id === targetSceneId);
-  if (!obj || !target || target.objects.length >= MAX_OBJECTS) return;
-  const [cx, cy] = clampToCanvas(obj.x, obj.y, p.width, p.height);
-  updateCurrent((prev) => ({
-    ...prev,
-    scenes: prev.scenes.map((s) => {
-      if (s.id === scene.id)
-        return {
-          ...s,
-          objects: s.objects.filter((o) => o.id !== objectId),
-          clicks: s.clicks.filter((c) => c.object !== objectId),
-        };
-      if (s.id === targetSceneId) return { ...s, objects: [...s.objects, { ...obj, x: cx, y: cy }] };
-      return s;
-    }),
-  }));
-  sceneIdStore.set(targetSceneId);
-  selectionStore.set(objectId);
+  const index = scene.nodes.findIndex((o) => o.id === objectId);
+  if (index < 0) return;
+  if (moveNode({ sceneId: scene.id, parent: [] }, index, { sceneId: targetSceneId, parent: [] })) {
+    sceneIdStore.set(targetSceneId);
+    selectionStore.set(objectId);
+  }
+}
+
+/** Delete a node (click bindings cleaned for top-level leaves). */
+export function deleteNode(ref: ListRef, index: number): void {
+  const p = projectStore.get();
+  const node = readList(p, ref)[index];
+  if (!node) return;
+  updateCurrent((prev) => {
+    const next = updateListAt(prev, ref.sceneId, ref.parent, (nodes) =>
+      nodes.filter((_, i) => i !== index),
+    );
+    if (ref.parent.length > 0) return next;
+    return {
+      ...next,
+      scenes: next.scenes.map((s) =>
+        s.id !== ref.sceneId ? s : { ...s, clicks: s.clicks.filter((c) => c.object !== node.id) },
+      ),
+    };
+  });
+  const sel = selectionStore.get();
+  if (sel === node.id || sel?.endsWith(`/${node.id}`)) selectionStore.set(null);
 }
 
 export function resizeProject(w: number, h: number): void {
@@ -410,7 +572,7 @@ export function resizeProject(w: number, h: number): void {
     height: h,
     scenes: prev.scenes.map((s) => ({
       ...s,
-      objects: s.objects.map((o) => {
+      nodes: s.nodes.map((o) => {
         const [cx, cy] = clampToCanvas(o.x, o.y, w, h);
         return { ...o, x: cx, y: cy };
       }),
@@ -447,6 +609,21 @@ export function removeBinding(kind: "click" | "key", index: number): void {
       return { ...s, keys: s.keys.filter((_, i) => i !== index) };
     }),
   }));
+}
+
+export function setSceneFrameCode(code: string): void {
+  const p = projectStore.get();
+  const scene = currentScene(p, sceneIdStore.get());
+  updateCurrent((prev) => ({
+    ...prev,
+    scenes: prev.scenes.map((s) =>
+      s.id !== scene.id ? s : { ...s, frameCode: code || undefined },
+    ),
+  }));
+}
+
+export function setTheme(theme: { r: number; g: number; b: number }): void {
+  updateCurrent((prev) => ({ ...prev, theme }));
 }
 
 export function setVoice(index: number, note: number, vol: number): void {

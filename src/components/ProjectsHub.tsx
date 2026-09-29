@@ -56,8 +56,8 @@ export default function ProjectsHub() {
         >
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-[15px] font-semibold">Chess</h2>
-            <span className="rounded-full bg-teal/15 px-2 py-0.5 font-mono text-[10px] text-teal">
-              {t(lang, "proj.handwritten")}
+            <span className="rounded-full bg-yellow/15 px-2 py-0.5 font-mono text-[10px] text-yellow">
+              {t(lang, "proj.locked")}
             </span>
           </div>
           <p className="mt-1.5 text-[13px] leading-relaxed text-subtext0">{CHESS_DESCRIPTION}</p>
@@ -117,7 +117,7 @@ export default function ProjectsHub() {
               </div>
               <p className="mt-1 font-mono text-[11px] text-subtext0">
                 {p.scenes.length} {t(lang, "proj.scenes")} ·{" "}
-                {p.scenes.reduce((n, s) => n + s.objects.length, 0)} {t(lang, "proj.objects")} ·{" "}
+                {p.scenes.reduce((n, s) => n + s.nodes.length, 0)} {t(lang, "proj.objects")} ·{" "}
                 {p.width}×{p.height}
               </p>
               <button

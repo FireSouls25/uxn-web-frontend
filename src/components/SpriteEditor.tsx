@@ -1,6 +1,6 @@
 import { useStore } from "@nanostores/react";
 import { Film, Plus } from "lucide-react";
-import { PALETTE } from "../lib/palette";
+import { themeColors } from "../lib/palette";
 import { t, useLang } from "../lib/i18n";
 import {
   addAnimation,
@@ -21,7 +21,9 @@ export default function SpriteEditor() {
   const tool = useStore(paintToolStore);
 
   const sprite = project.sprites.find((s) => s.id === spriteId) ?? project.sprites[0] ?? null;
+  const pal = themeColors(project.theme);
   const pixels = sprite?.pixels ?? Array(64).fill(0);
+  const locked = !!project.locked;
 
   function paint(r: number, c: number) {
     if (!sprite) return;
@@ -44,12 +46,13 @@ export default function SpriteEditor() {
               <button
                 key={i}
                 aria-label={`pixel ${r},${c}`}
+                disabled={locked}
                 onPointerDown={() => paint(r, c)}
                 onPointerEnter={(e) => {
                   if (e.buttons === 1) paint(r, c);
                 }}
                 className="aspect-square rounded-[3px]"
-                style={{ background: PALETTE[v & 3] }}
+                style={{ background: pal[v & 3] }}
               />
             );
           })}
@@ -71,12 +74,14 @@ export default function SpriteEditor() {
           </div>
         ))}
       </div>
-      <button
-        onClick={() => sprite && addAnimation([sprite.id])}
+      {!locked && (
+        <button
+          onClick={() => sprite && addAnimation([sprite.id])}
         className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-surface0 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-surface1"
       >
         <Plus size={13} /> {t(lang, "sprite.new_anim")}
-      </button>
+        </button>
+      )}
     </div>
   );
 }

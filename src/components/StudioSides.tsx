@@ -22,6 +22,16 @@ function CodeNote() {
   );
 }
 
+/* Locked examples browse read-only: no authoring affordances. */
+function LockedNote() {
+  const lang = useLang();
+  return (
+    <p className="rounded-lg border border-dashed border-yellow/30 bg-yellow/5 px-3 py-4 text-center text-[13px] text-yellow">
+      {t(lang, "locked.note")}
+    </p>
+  );
+}
+
 /* Left column follows the view: hierarchy for scenes, sprites for
    sprites, scene jumps for events, voices for sound, files for code. */
 export function StudioLeft() {
@@ -70,7 +80,7 @@ export function StudioRight() {
         <div className="pane rounded-xl p-3">
           {view === "scene" && <InspectorPanel />}
           {view === "sprites" && <SpriteTools />}
-          {view === "events" && <TransitionEditor />}
+          {view === "events" && (project.locked ? <LockedNote /> : <TransitionEditor />)}
           {view === "sound" && <VoiceEditor />}
         </div>
       )}

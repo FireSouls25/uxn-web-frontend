@@ -1,10 +1,18 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
-import { PALETTE } from "../lib/palette";
+import { themeColors } from "../lib/palette";
 import { t, useLang } from "../lib/i18n";
 import { sceneVar } from "../lib/scene-ui";
-import { currentScene, moveObject, projectStore, resizeProject, sceneIdStore, selectionStore } from "../lib/store";
-import type { SceneObject } from "../lib/project";
+import {
+  currentScene,
+  moveLeafByPath,
+  projectStore,
+  resizeProject,
+  sceneIdStore,
+  selectionStore,
+} from "../lib/store";
+import { flattenScene } from "../lib/project";
+import type { FlatLeaf } from "../lib/project";
 
 const TILE = 8;
 
@@ -22,9 +30,9 @@ function cssVar(name: string, fallback: string): string {
   return v || fallback;
 }
 
-function hitTest(objects: SceneObject[], x: number, y: number): SceneObject | null {
-  for (let i = objects.length - 1; i >= 0; i--) {
-    const o = objects[i];
+function hitTest(leaves: FlatLeaf[], x: number, y: number): FlatLeaf | null {
+  for (let i = leaves.length - 1; i >= 0; i--) {
+    const o = leaves[i];
     if (x >= o.x && x < o.x + TILE && y >= o.y && y < o.y + TILE) return o;
   }
   return null;
@@ -38,9 +46,16 @@ export default function StudioCanvas() {
   const sceneId = useStore(sceneIdStore);
   const selection = useStore(selectionStore);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
+  const dragRef = useRef<{ path: string; dx: number; dy: number } | null>(null);
 
   const scene = currentScene(project, sceneId);
+  const leaves: FlatLeaf[] = (() => {
+    try {
+      return flattenScene(project, scene.id);
+    } catch {
+      return [];
+    }
+  })();
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -49,16 +64,17 @@ export default function StudioCanvas() {
     if (!ctx) return;
     ctx.clearRect(0, 0, project.width, project.height);
     const accent = cssVar("--ctp-mauve", "#cba6f7");
+    const pal = themeColors(project.theme);
     const sprites = new Map(project.sprites.map((s) => [s.id, s.pixels]));
-    for (const o of scene.objects) {
+    for (const o of leaves) {
       const pixels = sprites.get(o.sprite) ?? [];
       for (let r = 0; r < TILE; r++) {
         for (let c = 0; c < TILE; c++) {
-          ctx.fillStyle = PALETTE[(pixels[r * 8 + c] ?? 0) & 3];
+          ctx.fillStyle = pal[(pixels[r * 8 + c] ?? 0) & 3];
           ctx.fillRect(o.x + c, o.y + r, 1, 1);
         }
       }
-      if (o.id === selection) {
+      if (o.path === selection) {
         ctx.strokeStyle = accent;
         ctx.lineWidth = 1;
         ctx.strokeRect(o.x - 1.5, o.y - 1.5, TILE + 3, TILE + 3);
@@ -75,12 +91,14 @@ export default function StudioCanvas() {
     ];
   }
 
+  const locked = !!project.locked;
+
   function onDown(e: React.PointerEvent) {
     const [gx, gy] = toGame(e);
-    const hit = hitTest(scene.objects, gx, gy);
-    selectionStore.set(hit ? hit.id : null);
-    if (hit) {
-      dragRef.current = { id: hit.id, dx: gx - hit.x, dy: gy - hit.y };
+    const hit = hitTest(leaves, gx, gy);
+    selectionStore.set(hit ? hit.path : null);
+    if (hit && !locked) {
+      dragRef.current = { path: hit.path, dx: gx - hit.x, dy: gy - hit.y };
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
     }
   }
@@ -89,7 +107,7 @@ export default function StudioCanvas() {
     const drag = dragRef.current;
     if (!drag) return;
     const [gx, gy] = toGame(e);
-    projectStore.set(moveObject(projectStore.get(), scene.id, drag.id, gx - drag.dx, gy - drag.dy));
+    moveLeafByPath(scene.id, drag.path, gx - drag.dx, gy - drag.dy);
   }
 
   function onUp() {

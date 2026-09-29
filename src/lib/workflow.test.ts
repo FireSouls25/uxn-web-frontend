@@ -24,12 +24,12 @@ describe("clampToCanvas", () => {
 describe("moveObject", () => {
   it("moves one object and leaves the rest alone", () => {
     const next = moveObject(SAMPLE_PROJECT, "title", "hero", 200, 200);
-    const hero = next.scenes.find((s) => s.id === "title")?.objects.find((o) => o.id === "hero");
-    const coin = next.scenes.find((s) => s.id === "title")?.objects.find((o) => o.id === "coin");
+    const hero = next.scenes.find((s) => s.id === "title")?.nodes.find((o) => o.id === "hero");
+    const coin = next.scenes.find((s) => s.id === "title")?.nodes.find((o) => o.id === "coin");
     expect(hero).toMatchObject({ x: 120, y: 120 });
     expect(coin).toMatchObject({ x: 96, y: 96 });
     // Input untouched (immutable update).
-    expect(SAMPLE_PROJECT.scenes[0].objects[0]).toMatchObject({ x: 16, y: 40 });
+    expect(SAMPLE_PROJECT.scenes[0].nodes[0]).toMatchObject({ x: 16, y: 40 });
   });
 });
 
@@ -46,7 +46,7 @@ describe("hierarchy ops", () => {
     selectionStore.set("hero");
     expect(renameObject("hero", "champ")).toBeNull();
     const s = projectsStore.get().demo.scenes[0];
-    expect(s.objects.some((o) => o.id === "champ")).toBe(true);
+    expect(s.nodes.some((o) => o.id === "champ")).toBe(true);
     expect(s.clicks).toEqual([{ object: "champ", goto: "play" }]);
     expect(selectionStore.get()).toBe("champ");
   });
@@ -61,8 +61,8 @@ describe("hierarchy ops", () => {
   it("reorders slots within a scene", () => {
     reset();
     reorderObject(0, 2);
-    expect(projectsStore.get().demo.scenes[0].objects.map((o) => o.id)).toEqual(["wall", "coin", "hero"]);
+    expect(projectsStore.get().demo.scenes[0].nodes.map((o) => o.id)).toEqual(["wall", "coin", "hero"]);
     reorderObject(9, 0);
-    expect(projectsStore.get().demo.scenes[0].objects.map((o) => o.id)).toEqual(["wall", "coin", "hero"]);
+    expect(projectsStore.get().demo.scenes[0].nodes.map((o) => o.id)).toEqual(["wall", "coin", "hero"]);
   });
 });

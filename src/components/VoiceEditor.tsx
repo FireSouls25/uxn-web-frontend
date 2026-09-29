@@ -20,8 +20,10 @@ export default function VoiceEditor() {
     );
   }
 
+  const locked = !!project.locked;
   return (
     <div>
+      <fieldset disabled={locked}>
       <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
         {t(lang, "sound.voice")} {voice} · <span className="text-mauve">{noteName(v.note)}</span>
       </p>
@@ -65,6 +67,7 @@ export default function VoiceEditor() {
       {v.vol === 0 && (
         <p className="mt-2 font-mono text-[11px] text-yellow">{t(lang, "sound.silent")}</p>
       )}
+      </fieldset>
     </div>
   );
 }

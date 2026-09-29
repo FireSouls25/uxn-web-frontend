@@ -16,8 +16,8 @@ function memoryBox() {
 describe("guest persistence", () => {
   beforeEach(() => {
     vi.resetModules();
-    (globalThis as Record<string, unknown>).localStorage = memoryBox();
-    (globalThis as Record<string, unknown>).sessionStorage = memoryBox();
+    (globalThis as unknown as Record<string, unknown>).localStorage = memoryBox();
+    (globalThis as unknown as Record<string, unknown>).sessionStorage = memoryBox();
   });
 
   it("guest work survives a full reload in the same tab", async () => {
@@ -36,9 +36,9 @@ describe("guest persistence", () => {
   it("guest data never touches localStorage", async () => {
     const first = await import("./store");
     first.createProject("Private Sketch");
-    const ls = (globalThis as Record<string, { getItem: (k: string) => string | null }>).localStorage;
+    const ls = (globalThis as unknown as Record<string, { getItem: (k: string) => string | null }>).localStorage;
     expect(ls.getItem("uxn.projects.v1")).toBeNull();
-    const ss = (globalThis as Record<string, { getItem: (k: string) => string | null }>).sessionStorage;
+    const ss = (globalThis as unknown as Record<string, { getItem: (k: string) => string | null }>).sessionStorage;
     expect(ss.getItem("uxn.projects.v1")).not.toBeNull();
   });
 
@@ -46,7 +46,7 @@ describe("guest persistence", () => {
     const first = await import("./store");
     first.createProject("Before Login");
     // Log in: session appears, then a fresh tab load adopts the work.
-    (globalThis as Record<string, { setItem: (k: string, v: string) => void }>).localStorage.setItem(
+    (globalThis as unknown as Record<string, { setItem: (k: string, v: string) => void }>).localStorage.setItem(
       "uxn.session",
       JSON.stringify({ name: "u", email: "u@x.yy", access: "a", refresh: "r" }),
     );
@@ -54,7 +54,7 @@ describe("guest persistence", () => {
     const second = await import("./store");
     expect(Object.keys(second.projectsStore.get())).toContain("before-login");
     expect(
-      (globalThis as Record<string, { getItem: (k: string) => string | null }>).localStorage.getItem(
+      (globalThis as unknown as Record<string, { getItem: (k: string) => string | null }>).localStorage.getItem(
         "uxn.projects.v1",
       ),
     ).not.toBeNull();

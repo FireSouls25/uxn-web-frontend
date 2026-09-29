@@ -18,6 +18,11 @@ export default function ProjectBar() {
       >
         {project.kind === "code" ? t(lang, "proj.code_kind") : t(lang, "proj.visual_kind")}
       </span>
+      {project.locked && (
+        <span className="rounded-full bg-yellow/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest text-yellow">
+          {t(lang, "proj.locked")}
+        </span>
+      )}
       <span className="font-mono text-[11px] text-subtext0">
         {project.kind === "code"
           ? `${Object.keys(project.codeFiles ?? {}).length} ${t(lang, "proj.files")}`

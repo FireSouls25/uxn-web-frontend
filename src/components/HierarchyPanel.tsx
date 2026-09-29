@@ -16,47 +16,253 @@ import { t, useLang } from "../lib/i18n";
 import { sceneVar } from "../lib/scene-ui";
 import type { ObjectKind } from "../lib/project";
 import {
-  addObject,
+  addNode,
   addScene,
-  deleteObject,
+  deleteNode,
   deleteScene,
-  moveObjectToScene,
+  moveNode,
   projectStore,
-  reorderObject,
+  readList,
+  reorderNodes,
   sceneIdStore,
   selectionStore,
+  type ListRef,
 } from "../lib/store";
 
 export const KIND_ICON = { player: Gamepad2, static: Box, movable: Move } as const;
 
-/* Godot-like node tree: scenes are roots, objects are children.
-   Click selects (canvas + inspector follow); rows drag to reorder
-   within a scene or move across scenes; plus/minus manage nodes;
-   home marks the start scene. Scene accents + helper text make the
-   active scene unmistakable. */
-export default function HierarchyPanel() {
-  const lang = useLang();
+interface NodeRowsProps {
+  sceneId: string;
+  parent: string[];
+  depth: number;
+  lang: ReturnType<typeof useLang>;
+}
+
+function payload(e: React.DragEvent): { sceneId: string; parent: string[]; index: number } | null {
+  try {
+    return JSON.parse(e.dataTransfer.getData("application/x-node")) as {
+      sceneId: string;
+      parent: string[];
+      index: number;
+    };
+  } catch {
+    return null;
+  }
+}
+
+/* Recursive node list. Drag reorders within a list or moves across
+   lists (cycle-guarded in the store); branches expand into home
+   content one level at a time. */
+function NodeRows({ sceneId, parent, depth, lang }: NodeRowsProps) {
   const project = useStore(projectStore);
-  const sceneId = useStore(sceneIdStore);
   const selection = useStore(selectionStore);
-  const [open, setOpen] = useState<Record<string, boolean>>({ [sceneId]: true });
-  const [dragObj, setDragObj] = useState<{ scene: string; index: number } | null>(null);
-  const [over, setOver] = useState<{ scene: string; index: number | null } | null>(null);
+  const [over, setOver] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [newKind, setNewKind] = useState<ObjectKind>("static");
 
-  function pick(sid: string, oid: string | null) {
-    sceneIdStore.set(sid);
-    selectionStore.set(oid);
-    setOpen((o) => ({ ...o, [sid]: true }));
+  const ref: ListRef = { sceneId, parent };
+  const nodes = readList(project, ref);
+  const locked = !!project.locked;
+  const pathOf = (id: string) => [...parent, id].join("/");
+
+  function pick(path: string | null) {
+    sceneIdStore.set(sceneId);
+    selectionStore.set(path);
   }
 
-  function commitCreate(sid: string) {
-    if (sceneIdStore.get() !== sid) sceneIdStore.set(sid);
-    addObject(newKind, newName);
+  function commitCreate() {
+    const clean = newName.trim().slice(0, 24);
+    let id = clean && /^[A-Za-z][A-Za-z0-9_]*$/.test(clean) ? clean : "obj";
+    let n = 2;
+    const base = id;
+    while (nodes.some((o) => o.id === id)) id = `${base}_${n++}`;
+    if (
+      addNode(ref, {
+        id,
+        x: 8,
+        y: 8,
+        sprite: project.sprites[0]?.id ?? "hero",
+        kind: newKind,
+        ...(newKind === "movable" ? { solid: true } : {}),
+      })
+    ) {
+      pick(pathOf(id));
+    }
     setNewName("");
     setCreating(false);
+  }
+
+  return (
+    <ul className={depth > 0 ? "ml-4 space-y-0.5 border-l border-surface1 pl-1.5" : "space-y-0.5"}>
+      {nodes.map((o, oi) => {
+        const path = pathOf(o.id);
+        const selected = selection === path;
+        const showInsert = over === oi;
+        const Icon = o.scene ? MapIcon : (KIND_ICON[o.kind ?? "static"] ?? Box);
+        return (
+          <li key={o.id}>
+            {showInsert && <div className="h-0.5 rounded bg-mauve" />}
+            <div
+              draggable={!locked}
+              onDragStart={(e) => {
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData(
+                  "application/x-node",
+                  JSON.stringify({ sceneId, parent, index: oi }),
+                );
+              }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setOver(oi);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const src = payload(e);
+                if (src) {
+                  if (src.sceneId === sceneId && JSON.stringify(src.parent) === JSON.stringify(parent)) {
+                    reorderNodes(ref, src.index, oi);
+                  } else {
+                    moveNode(src, src.index, ref);
+                  }
+                }
+                setOver(null);
+              }}
+              onDragEnd={() => setOver(null)}
+              className={`group flex cursor-grab items-center gap-1.5 rounded-md px-1.5 py-1 active:cursor-grabbing ${
+                selected ? "bg-mauve/15" : "hover:bg-surface0"
+              }`}
+            >
+              <Icon size={13} className={selected ? "text-mauve" : "text-subtext0"} />
+              <button
+                onClick={() => pick(path)}
+                className={`flex-1 truncate text-left font-mono text-[11px] ${
+                  selected ? "text-mauve" : "text-subtext0 group-hover:text-text"
+                }`}
+              >
+                {o.id}
+                {!o.scene && (
+                  <span className="text-overlay0">
+                    {" "}
+                    [{o.x},{o.y}]
+                  </span>
+                )}
+              </button>
+              {!locked && (
+                <button
+                  onClick={() => deleteNode(ref, oi)}
+                  aria-label={`${t(lang, "hier.delete")} ${o.id}`}
+                  className="grid size-5 shrink-0 place-items-center text-subtext0 opacity-0 transition-opacity hover:text-red group-hover:opacity-100"
+                >
+                  <Trash2 size={11} />
+                </button>
+              )}
+            </div>
+            {o.scene && (
+              <BranchChildren sceneId={sceneId} parent={[...parent, o.id]} depth={depth + 1} lang={lang} />
+            )}
+          </li>
+        );
+      })}
+      {!locked && (
+        <li>
+          {creating ? (
+            <form
+              className="flex items-center gap-1 rounded-md bg-surface0 px-1.5 py-1"
+              onSubmit={(e) => {
+                e.preventDefault();
+                commitCreate();
+              }}
+            >
+              <input
+                autoFocus
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder={t(lang, "hier.name_ph")}
+                maxLength={24}
+                className="min-w-0 flex-1 bg-transparent font-mono text-[11px] outline-none placeholder:text-overlay0"
+              />
+              <select
+                aria-label={t(lang, "hier.kind")}
+                value={newKind}
+                onChange={(e) => setNewKind(e.target.value as ObjectKind)}
+                className="select select-sm"
+              >
+                <option value="player">{t(lang, "kind.player")}</option>
+                <option value="static">{t(lang, "kind.static")}</option>
+                <option value="movable">{t(lang, "kind.movable")}</option>
+              </select>
+              <button
+                type="submit"
+                className="rounded bg-mauve/20 px-1.5 py-0.5 font-mono text-[11px] text-mauve"
+              >
+                +
+              </button>
+            </form>
+          ) : (
+            <button
+              onClick={() => setCreating(true)}
+              className="flex items-center gap-1 rounded-md px-1.5 py-1 font-mono text-[11px] text-subtext0 hover:text-text"
+            >
+              <Plus size={11} /> {t(lang, "hier.new_object")}
+            </button>
+          )}
+        </li>
+      )}
+    </ul>
+  );
+}
+
+/* Children of a branch instance, read from the home scene. */
+function BranchChildren({
+  sceneId,
+  parent,
+  depth,
+  lang,
+}: {
+  sceneId: string;
+  parent: string[];
+  depth: number;
+  lang: ReturnType<typeof useLang>;
+}) {
+  const [open, setOpen] = useState(depth < 2);
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="ml-4 font-mono text-[10px] text-overlay0 hover:text-subtext0"
+      >
+        <ChevronRight size={11} className="inline" /> …
+      </button>
+    );
+  }
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(false)}
+        className="ml-4 font-mono text-[10px] text-overlay0 hover:text-subtext0"
+      >
+        <ChevronDown size={11} className="inline" /> …
+      </button>
+      <NodeRows sceneId={sceneId} parent={parent} depth={depth} lang={lang} />
+    </div>
+  );
+}
+
+/* Godot-like node tree: scenes are roots, branches expand into home
+   content, leaves carry kind icons. Scene accents + helper text make
+   the active scene unmistakable. */
+export default function HierarchyPanel() {
+  const lang = useLang();
+  const project = useStore(projectStore);
+  const sceneId = useStore(sceneIdStore);
+  const [overScene, setOverScene] = useState<string | null>(null);
+  const locked = !!project.locked;
+
+  function pick(sid: string) {
+    sceneIdStore.set(sid);
+    selectionStore.set(null);
   }
 
   return (
@@ -65,44 +271,37 @@ export default function HierarchyPanel() {
         <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
           {t(lang, "hier.title")}
         </p>
-        <button
-          onClick={() => addScene()}
-          title={t(lang, "hier.new_scene")}
-          aria-label={t(lang, "hier.new_scene")}
-          className="grid size-6 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
-        >
-          <FilePlus2 size={13} />
-        </button>
+        {!locked && (
+          <button
+            onClick={() => addScene()}
+            title={t(lang, "hier.new_scene")}
+            aria-label={t(lang, "hier.new_scene")}
+            className="grid size-6 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
+          >
+            <FilePlus2 size={13} />
+          </button>
+        )}
       </div>
       <ul className="mt-2 space-y-1">
         {project.scenes.map((s, si) => {
-          const expanded = open[s.id] ?? s.id === sceneId;
           const accent = sceneVar(si);
           const active = s.id === sceneId;
           return (
             <li
               key={s.id}
               onDragOver={(e) => {
-                if (dragObj && dragObj.scene !== s.id) {
+                if (e.dataTransfer.types.includes("application/x-node")) {
                   e.preventDefault();
-                  setOver({ scene: s.id, index: null });
+                  setOverScene(s.id);
                 }
               }}
+              onDragLeave={() => setOverScene((o) => (o === s.id ? null : o))}
               onDrop={(e) => {
                 e.preventDefault();
-                if (dragObj && dragObj.scene !== s.id) {
-                  const obj = project.scenes
-                    .find((x) => x.id === dragObj.scene)
-                    ?.objects[dragObj.index];
-                  if (obj) {
-                    sceneIdStore.set(dragObj.scene);
-                    moveObjectToScene(obj.id, s.id);
-                  }
-                }
-                setDragObj(null);
-                setOver(null);
+                const src = payload(e);
+                if (src) moveNode(src, src.index, { sceneId: s.id, parent: [] });
+                setOverScene(null);
               }}
-              onDragLeave={() => setOver((o) => (o?.scene === s.id ? null : o))}
             >
               <div
                 className={`flex items-center gap-1 rounded-md border-l-2 px-1.5 py-1 ${
@@ -110,25 +309,18 @@ export default function HierarchyPanel() {
                 }`}
                 style={{ borderLeftColor: accent }}
               >
-                <button
-                  onClick={() => setOpen((o) => ({ ...o, [s.id]: !expanded }))}
-                  aria-label={s.id}
-                  className="grid size-5 place-items-center text-subtext0 hover:text-text"
-                >
-                  {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                </button>
                 <MapIcon size={13} style={{ color: accent }} className="shrink-0" />
                 <button
-                  onClick={() => pick(s.id, null)}
+                  onClick={() => pick(s.id)}
                   className={`flex-1 truncate text-left font-mono text-xs ${
-                    active && !selection ? "text-text" : "text-subtext0 hover:text-text"
+                    active ? "" : "text-subtext0 hover:text-text"
                   }`}
                   style={active ? { color: accent } : undefined}
                 >
                   {s.id}
                 </button>
                 {project.start === s.id && <Home size={12} className="shrink-0 text-green" />}
-                {project.scenes.length > 1 && (
+                {project.scenes.length > 1 && !locked && (
                   <button
                     onClick={() => deleteScene(s.id)}
                     aria-label={`${t(lang, "hier.delete")} ${s.id}`}
@@ -138,120 +330,17 @@ export default function HierarchyPanel() {
                   </button>
                 )}
               </div>
-              {over?.scene === s.id && over.index === null && (
-                <div className="ml-4 rounded border border-dashed px-2 py-1 text-center font-mono text-[10px]" style={{ borderColor: accent, color: accent }}>
+              {overScene === s.id && (
+                <div
+                  className="ml-4 rounded border border-dashed px-2 py-1 text-center font-mono text-[10px]"
+                  style={{ borderColor: accent, color: accent }}
+                >
                   {t(lang, "hier.drop_here")}
                 </div>
               )}
-              {expanded && (
-                <ul className="ml-4 space-y-0.5 border-l border-surface1 pl-1.5">
-                  {s.objects.map((o, oi) => {
-                    const Icon = KIND_ICON[o.kind] ?? Box;
-                    const selected = selection === o.id && s.id === sceneId;
-                    const showInsert = over?.scene === s.id && over.index === oi;
-                    return (
-                      <li key={o.id}>
-                        {showInsert && <div className="h-0.5 rounded bg-mauve" />}
-                        <div
-                          draggable
-                          onDragStart={(e) => {
-                            e.dataTransfer.effectAllowed = "move";
-                            setDragObj({ scene: s.id, index: oi });
-                          }}
-                          onDragEnd={() => {
-                            setDragObj(null);
-                            setOver(null);
-                          }}
-                          onDragOver={(e) => {
-                            e.preventDefault();
-                            setOver({ scene: s.id, index: oi });
-                          }}
-                          onDrop={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            if (dragObj && dragObj.scene === s.id) reorderObject(dragObj.index, oi);
-                            setDragObj(null);
-                            setOver(null);
-                          }}
-                          className={`group flex cursor-grab items-center gap-1.5 rounded-md px-1.5 py-1 active:cursor-grabbing ${
-                            selected ? "bg-mauve/15" : "hover:bg-surface0"
-                          }`}
-                        >
-                          <Icon size={13} className={selected ? "text-mauve" : "text-subtext0"} />
-                          <button
-                            onClick={() => pick(s.id, o.id)}
-                            className={`flex-1 truncate text-left font-mono text-[11px] ${
-                              selected ? "text-mauve" : "text-subtext0 group-hover:text-text"
-                            }`}
-                          >
-                            {o.id}
-                            <span className="text-overlay0">
-                              {" "}
-                              [{o.x},{o.y}]
-                            </span>
-                          </button>
-                          <button
-                            onClick={() => {
-                              sceneIdStore.set(s.id);
-                              deleteObject(o.id);
-                            }}
-                            aria-label={`${t(lang, "hier.delete")} ${o.id}`}
-                            className="grid size-5 shrink-0 place-items-center text-subtext0 opacity-0 transition-opacity hover:text-red group-hover:opacity-100"
-                          >
-                            <Trash2 size={11} />
-                          </button>
-                        </div>
-                      </li>
-                    );
-                  })}
-                  <li>
-                    {creating && sceneId === s.id ? (
-                      <form
-                        className="flex items-center gap-1 rounded-md bg-surface0 px-1.5 py-1"
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          commitCreate(s.id);
-                        }}
-                      >
-                        <input
-                          autoFocus
-                          value={newName}
-                          onChange={(e) => setNewName(e.target.value)}
-                          placeholder={t(lang, "hier.name_ph")}
-                          maxLength={24}
-                          className="min-w-0 flex-1 bg-transparent font-mono text-[11px] outline-none placeholder:text-overlay0"
-                        />
-                        <select
-                          aria-label={t(lang, "hier.kind")}
-                          value={newKind}
-                          onChange={(e) => setNewKind(e.target.value as ObjectKind)}
-                          className="select select-sm"
-                        >
-                          <option value="player">{t(lang, "kind.player")}</option>
-                          <option value="static">{t(lang, "kind.static")}</option>
-                          <option value="movable">{t(lang, "kind.movable")}</option>
-                        </select>
-                        <button
-                          type="submit"
-                          className="rounded bg-mauve/20 px-1.5 py-0.5 font-mono text-[11px] text-mauve"
-                        >
-                          +
-                        </button>
-                      </form>
-                    ) : (
-                      <button
-                        onClick={() => {
-                          if (sceneId !== s.id) sceneIdStore.set(s.id);
-                          setCreating(true);
-                        }}
-                        className="flex items-center gap-1 rounded-md px-1.5 py-1 font-mono text-[11px] text-subtext0 hover:text-text"
-                      >
-                        <Plus size={11} /> {t(lang, "hier.new_object")}
-                      </button>
-                    )}
-                  </li>
-                </ul>
-              )}
+              <div className="ml-4 border-l border-surface1 pl-1.5">
+                <NodeRows sceneId={s.id} parent={[]} depth={1} lang={lang} />
+              </div>
             </li>
           );
         })}

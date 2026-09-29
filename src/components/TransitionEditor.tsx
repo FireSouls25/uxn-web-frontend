@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useStore } from "@nanostores/react";
 import { Plus } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
-import { addBinding, currentScene, projectStore, sceneIdStore } from "../lib/store";
+import { addBinding, currentScene, flattenLeaves, projectStore, sceneIdStore, setSceneFrameCode } from "../lib/store";
 
 /* Right column of the events view: author a transition out of the
    current scene — click an object, or press a key, to go somewhere. */
@@ -17,6 +17,7 @@ export default function TransitionEditor() {
 
   const scene = currentScene(project, sceneId);
   const target = goto || project.scenes[0]?.id || "";
+  const leaves = flattenLeaves(project, scene.id);
 
   return (
     <div>
@@ -35,13 +36,13 @@ export default function TransitionEditor() {
           <label className="block">
             <span className="mb-1 block font-mono text-[11px] text-subtext0">{t(lang, "events.object")}</span>
             <select
-              value={object || scene.objects[0]?.id || ""}
+              value={object || leaves[0]?.path || ""}
               onChange={(e) => setObject(e.target.value)}
               className="select w-full"
             >
-              {scene.objects.map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.id}
+              {leaves.map((o) => (
+                <option key={o.path} value={o.path}>
+                  {o.path}
                 </option>
               ))}
             </select>
@@ -71,14 +72,25 @@ export default function TransitionEditor() {
         </label>
         <button
           onClick={() => {
-            if (kind === "click") addBinding("click", object || scene.objects[0]?.id || "", target);
+            if (kind === "click") addBinding("click", object || leaves[0]?.path || "", target);
             else addBinding("key", null, target, key);
           }}
-          disabled={kind === "click" && scene.objects.length === 0}
+          disabled={kind === "click" && leaves.length === 0}
           className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-surface0 px-3 py-2 text-[13px] font-medium transition-colors hover:bg-surface1 disabled:opacity-50"
         >
           <Plus size={14} /> {t(lang, "insp.add_binding")}
         </button>
+        <label className="block">
+          <span className="mb-1 block font-mono text-[11px] text-subtext0">{t(lang, "events.code")}</span>
+          <textarea
+            value={scene.frameCode ?? ""}
+            onChange={(e) => setSceneFrameCode(e.target.value)}
+            spellCheck={false}
+            rows={4}
+            placeholder={t(lang, "events.code_ph")}
+            className="w-full resize-y rounded-lg border border-surface1 bg-base p-2 font-mono text-[11px] leading-relaxed outline-none placeholder:text-overlay0 focus:border-mauve"
+          />
+        </label>
       </div>
     </div>
   );

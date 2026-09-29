@@ -1,5 +1,6 @@
 ---
 import SiteHeader from "../components/SiteHeader";
+import AgentChat from "../components/agent/AgentChat";
 import "../styles/theme.css";
 
 interface Props {
@@ -56,6 +57,7 @@ const { titleKey, title, description = "Low-code games for the Uxn virtual machi
     <main>
       <slot />
     </main>
+    <AgentChat client:idle />
   </body>
 </html>
     <script>

@@ -8,7 +8,7 @@
    colors addressable, opaque). Deterministic by construction: sorted
    ids, fixed 16-slot pool, literal everything. */
 
-import { pixelsToPlanar, monoToPixels } from "./palette";
+import { pixelsToPlanar, monoToPixels, THEME_R, THEME_G, THEME_B } from "./palette";
 
 export interface Sprite {
   id: string;
@@ -27,23 +27,6 @@ export interface Animation {
 
 export type ObjectKind = "player" | "static" | "movable";
 
-export interface SceneObject {
-  id: string;
-  x: number;
-  y: number;
-  /** Sprite id from the project library. */
-  sprite: string;
-  /** player: hero (at most one per scene, 0 allowed); static: prop;
-      movable: solid + pushable. Chosen at creation, changeable later. */
-  kind: ObjectKind;
-  /** Collides (all kinds can opt in; movable requires it). */
-  solid?: boolean;
-  /** Keyboard dpad drives this object (player kind only). */
-  controls?: boolean;
-  /** Animation id from the project library. */
-  anim?: string;
-}
-
 export interface ClickBinding {
   object: string;
   goto: string;
@@ -55,11 +38,73 @@ export interface KeyBinding {
   goto: string;
 }
 
+export interface SceneNode {
+  /** Instance id, unique within the parent scene. */
+  id: string;
+  /** Leaf: sprite id. Branch: subscene id. Exactly one is set. */
+  sprite?: string;
+  scene?: string;
+  /** Position (leaves) or origin offset (branches). */
+  x: number;
+  y: number;
+  /** Leaves only; see ObjectKind. */
+  kind?: ObjectKind;
+  /** Leaves only. */
+  solid?: boolean;
+  /** Leaves only (player kind only). */
+  controls?: boolean;
+  /** Leaves only. */
+  anim?: string;
+  /** Leaves only: per-object script, wrapped as tick_<root>_<path>. */
+  tick?: string;
+}
+
 export interface Scene {
   id: string;
-  objects: SceneObject[];
+  /** Godot-like node tree: sprite leaves and subscene branches. */
+  nodes: SceneNode[];
   clicks: ClickBinding[];
   keys: KeyBinding[];
+  /** Per-scene script: statements spliced at the end of this scene's
+      frame fn (after input/drive/ticks, before drawing). Full access
+      to generated state (ox[], ocount, scene fns). */
+  frameCode?: string;
+}
+
+export interface FlatLeaf extends SceneNode {
+  /** Dotted instance path (board/sq_a1), unique per flattening. */
+  path: string;
+  kind: ObjectKind;
+  sprite: string;
+}
+
+/** Leaf node with resolved defaults. */
+export type SceneObject = SceneNode & { sprite: string; kind: ObjectKind };
+
+const MAX_DEPTH = 8;
+
+/** Depth-first flatten with accumulated offsets. Throws on cycles,
+    depth overflow, or slot overflow — validation surfaces these. */
+export function flattenScene(p: Project, sceneId: string): FlatLeaf[] {
+  const scenes = new Map(p.scenes.map((s) => [s.id, s]));
+  const out: FlatLeaf[] = [];
+  const visit = (id: string, ox: number, oy: number, trail: string[], prefix: string[], depth: number): void => {
+    if (trail.includes(id)) throw new Error(`scene cycle: ${[...trail, id].join(" → ")}`);
+    if (depth > MAX_DEPTH) throw new Error(`scene nesting past ${MAX_DEPTH}`);
+    const scene = scenes.get(id);
+    if (!scene) throw new Error(`unknown scene '${id}'`);
+    for (const n of scene.nodes) {
+      const path = [...prefix, n.id].join("/");
+      if (n.scene) {
+        visit(n.scene, ox + n.x, oy + n.y, [...trail, id], [...prefix, n.id], depth + 1);
+      } else {
+        out.push({ ...n, path, x: n.x + ox, y: n.y + oy, kind: n.kind ?? "static", sprite: n.sprite ?? "" });
+      }
+    }
+  };
+  visit(sceneId, 0, 0, [], [], 0);
+  if (out.length > MAX_OBJECTS) throw new Error(`scene '${sceneId}' flattens to ${out.length} slots (max ${MAX_OBJECTS})`);
+  return out;
 }
 
 export interface Voice {
@@ -73,10 +118,14 @@ export interface Project {
   id: string;
   /** visual: scenes lowered by the emitter. code: hand-written files. */
   kind: "visual" | "code";
+  /** Locked examples render every editor read-only. */
+  locked?: boolean;
   name: string;
   author: string;
   width: number;
   height: number;
+  /** System palette theme (12-bit channels). Defaults to the demo theme. */
+  theme?: { r: number; g: number; b: number };
   start: string;
   scenes: Scene[];
   /** Shared 8×8 2bpp sprite library. */
@@ -95,39 +144,83 @@ export interface Project {
   updatedAt: number;
 }
 
-/** Generated identifiers custom code must not redeclare. Anchored
-    narrowly on purpose: the legal hooks custom_setup/custom_frame
-    must pass, and the backend compiler remains the final arbiter
-    (duplicate definitions fail loudly at export). */
-const RESERVED =
-  /\b(ox|oy|ot|oflags|ocount|scene|kb|mb|mouse_last|dpad|draw_all|pt_in_rect|overlap88|scene_go|start|main|sq32)\b|^\s*SC_[A-Za-z0-9_]*|atick_|afr_|spr_|^\s*setup_/m;
+/** Generated identifiers custom code must not redeclare. Only actual
+    top-level declarations are inspected — *uses* like ox[slot] inside
+    tick bodies are the whole point and always pass. The backend
+    compiler remains the final arbiter (duplicates fail loudly). */
+const RESERVED_EXACT = new Set([
+  "ox", "oy", "ot", "oflags", "ocount", "scene", "kb", "mb", "mouse_last",
+  "dpad", "draw_all", "pt_in_rect", "overlap88", "scene_go", "start", "main", "sq32",
+  "custom_setup", "custom_frame",
+]);
+const RESERVED_PREFIX = ["atick_", "afr_", "spr_", "tick_"];
+
+function declaredNames(code: string): string[] {
+  const names: string[] = [];
+  for (const raw of code.split("\n")) {
+    const line = raw.split("( ")[0];
+    // Keyword declarations first: the generic pattern would otherwise
+    // match the keyword itself (`buffer ox` → "buffer", missing ox).
+    let m = line.match(/^\s*(?:buffer|data|device|group|struct|macro|import|meta)\s+([A-Za-z][A-Za-z0-9_]*)/);
+    if (m) {
+      names.push(m[1]);
+      continue;
+    }
+    m = line.match(/^\s*([A-Za-z][A-Za-z0-9_]*)\s*:/);
+    if (m) names.push(m[1]);
+  }
+  return names;
+}
 
 export function validateCustomCode(code: string): string[] {
   const errs: string[] = [];
   if (code.length > 32 * 1024) errs.push("custom code exceeds 32KB");
-  const m = code.match(RESERVED);
-  if (m) errs.push(`custom code collides with generated name '${m[0].trim()}'`);
+  for (const name of declaredNames(code)) {
+    if (name === "custom_setup" || name === "custom_frame") continue;
+    if (
+      RESERVED_EXACT.has(name) ||
+      name.startsWith("SC_") ||
+      RESERVED_PREFIX.some((p) => name.startsWith(p)) ||
+      name.endsWith("_frame")
+    ) {
+      errs.push(`custom code collides with generated name '${name}'`);
+    }
+  }
   return errs;
 }
 
-export const MAX_OBJECTS = 16;
+export const MAX_OBJECTS = 128;
 const IDENT = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 /** Upgrade a pre-library project: inline 1bpp tiles become sprites. */
 export function migrateProject(raw: Record<string, unknown>): Project {
   const p = { ...(raw as object) } as Record<string, unknown>;
   if (Array.isArray(p["sprites"]) && Array.isArray(p["anims"])) {
-    return {
+    const base = {
       kind: "visual",
       sound: { voices: [] },
       updatedAt: 0,
       ...(p as object),
-    } as Project;
+    } as unknown as Record<string, unknown>;
+    // objects: → nodes: rename from the flat era (kind filled in).
+    base["scenes"] = ((base["scenes"] ?? []) as Array<Record<string, unknown>>).map((s) => {
+      if (Array.isArray(s["objects"]) && !Array.isArray(s["nodes"])) {
+        const nodes = (s["objects"] as Array<Record<string, unknown>>).map((o) => ({
+          kind: "static",
+          ...(o as object),
+        }));
+        const { objects: _drop, ...rest } = s;
+        void _drop;
+        return { ...rest, nodes };
+      }
+      return s;
+    });
+    return base as unknown as Project;
   }
   const sprites: Sprite[] = [];
   const scenes = ((p["scenes"] ?? []) as Array<Record<string, unknown>>).map((s) => {
     const sid = String(s["id"] ?? "scene");
-    const objects = ((s["objects"] ?? []) as Array<Record<string, unknown>>).map((o) => {
+    const nodes = ((s["objects"] ?? s["nodes"] ?? []) as Array<Record<string, unknown>>).map((o) => {
       const oid = String(o["id"] ?? "obj");
       const tile = o["tile"];
       const pixels =
@@ -135,18 +228,22 @@ export function migrateProject(raw: Record<string, unknown>): Project {
           ? monoToPixels((tile as unknown[]).map((b) => Number(b)))
           : Array<number>(64).fill(1);
       const spriteId = `${sid}_${oid}`.replace(/[^A-Za-z0-9_]/g, "_");
-      if (!sprites.some((x) => x.id === spriteId)) sprites.push({ id: spriteId, pixels });
+      if (!o["sprite"] && !o["scene"] && !sprites.some((x) => x.id === spriteId))
+        sprites.push({ id: spriteId, pixels });
       const next = { ...(o as object) } as Record<string, unknown>;
       delete next["tile"];
       const wasMovable = next["movable"] === true;
       const wasPlayer = next["player"] === true;
       delete next["movable"];
       delete next["player"];
-      const kind = wasMovable ? "movable" : wasPlayer ? "player" : "static";
+      if (!next["kind"]) next["kind"] = wasMovable ? "movable" : wasPlayer ? "player" : "static";
       if (wasMovable) next["solid"] = true;
-      return { ...next, kind, sprite: spriteId } as SceneObject;
+      if (!next["sprite"] && !next["scene"]) next["sprite"] = spriteId;
+      return next as unknown as SceneNode;
     });
-    return { ...(s as object), objects } as Scene;
+    const nextScene = { ...(s as object) } as Record<string, unknown>;
+    delete nextScene["objects"];
+    return { ...nextScene, nodes } as Scene;
   });
   return {
     id: typeof p["id"] === "string" ? (p["id"] as string) : "demo",
@@ -174,6 +271,10 @@ export function validateProject(p: Project): string[] {
   if (!p.author || /["\\]/.test(p.author)) errs.push("author must be non-empty without quotes/backslashes");
   if (p.kind !== "visual" && p.kind !== "code") errs.push(`bad kind '${(p as { kind: unknown }).kind}'`);
   if (!IDENT.test(p.id)) errs.push(`bad project id '${p.id}'`);
+  const theme = p.theme ?? { r: THEME_R, g: THEME_G, b: THEME_B };
+  for (const [ch, v] of [["r", theme.r], ["g", theme.g], ["b", theme.b]] as const) {
+    if (!Number.isInteger(v) || v < 0 || v > 65535) errs.push(`theme.${ch} must be 0–65535`);
+  }
   if (p.kind === "code") {
     const files = p.codeFiles ?? {};
     const entry = p.entry ?? "main.ux";
@@ -217,32 +318,48 @@ export function validateProject(p: Project): string[] {
   });
   for (const s of p.scenes) {
     if (!IDENT.test(s.id)) errs.push(`bad scene id '${s.id}'`);
-    if (s.objects.length > MAX_OBJECTS) errs.push(`scene '${s.id}' has >${MAX_OBJECTS} objects`);
-    const objIds = new Set(s.objects.map((o) => o.id));
-    if (objIds.size !== s.objects.length) errs.push(`scene '${s.id}': duplicate object id`);
-    for (const o of s.objects) {
-      if (!IDENT.test(o.id)) errs.push(`bad object id '${o.id}'`);
-      if (!u16(o.x) || !u16(o.y)) errs.push(`object '${o.id}': x/y must be 0–65535`);
-      if (!spriteIds.has(o.sprite)) errs.push(`object '${o.id}': unknown sprite '${o.sprite}'`);
-      if (o.anim && !animIds.has(o.anim)) errs.push(`object '${o.id}': unknown animation '${o.anim}'`);
-      if (o.kind !== "player" && o.kind !== "static" && o.kind !== "movable")
-        errs.push(`object '${o.id}': bad kind '${(o as { kind: unknown }).kind}'`);
-      if (o.kind === "movable" && !o.solid) errs.push(`object '${o.id}': movable requires solid`);
-      if (o.controls && o.kind !== "player") errs.push(`object '${o.id}': controls require player kind`);
+    if (s.nodes.length > MAX_OBJECTS) errs.push(`scene '${s.id}' has >${MAX_OBJECTS} nodes`);
+    const nodeIds = new Set(s.nodes.map((o) => o.id));
+    if (nodeIds.size !== s.nodes.length) errs.push(`scene '${s.id}': duplicate node id`);
+    for (const o of s.nodes) {
+      if (!IDENT.test(o.id)) errs.push(`bad node id '${o.id}'`);
+      if (!u16(o.x) || !u16(o.y)) errs.push(`node '${o.id}': x/y must be 0–65535`);
+      const isBranch = !!o.scene;
+      if (isBranch && !o.sprite && !sceneIds.has(o.scene as string))
+        errs.push(`node '${o.id}': unknown subscene '${o.scene}'`);
+      if (isBranch && o.sprite) errs.push(`node '${o.id}': sprite and subscene are exclusive`);
+      if (!isBranch && !o.sprite) errs.push(`node '${o.id}': leaf needs a sprite`);
+      if (!isBranch) {
+        if (!spriteIds.has(o.sprite as string)) errs.push(`node '${o.id}': unknown sprite '${o.sprite}'`);
+        if (o.anim && !animIds.has(o.anim)) errs.push(`node '${o.id}': unknown animation '${o.anim}'`);
+      }
+      if (o.tick) errs.push(...validateCustomCode(o.tick).map((e) => `node '${o.id}' tick: ${e}`));
+      if (o.kind !== undefined && o.kind !== "player" && o.kind !== "static" && o.kind !== "movable")
+        errs.push(`node '${o.id}': bad kind '${(o as { kind: unknown }).kind}'`);
+      if (o.kind === "movable" && !o.solid) errs.push(`node '${o.id}': movable requires solid`);
+      if (o.controls && o.kind !== "player") errs.push(`node '${o.id}': controls require player kind`);
     }
-    const players = s.objects.filter((o) => o.kind === "player");
-    if (players.length > 1) errs.push(`scene '${s.id}': at most one player (0 allowed)`);
-    const drivers = s.objects.filter((o) => o.controls);
-    if (drivers.length > 1) errs.push(`scene '${s.id}': at most one keyboard driver`);
-    for (const c of s.clicks) {
-      if (!objIds.has(c.object)) errs.push(`scene '${s.id}': click on unknown object '${c.object}'`);
-      if (!sceneIds.has(c.goto)) errs.push(`scene '${s.id}': goto unknown scene '${c.goto}'`);
+    // Flattened view: cycles, depth, slot budget, player/driver caps.
+    try {
+      const flat = flattenScene(p, s.id);
+      const players = flat.filter((o) => o.kind === "player");
+      if (players.length > 1) errs.push(`scene '${s.id}': at most one player (0 allowed)`);
+      const drivers = flat.filter((o) => o.controls);
+      if (drivers.length > 1) errs.push(`scene '${s.id}': at most one keyboard driver`);
+      const paths = new Set(flat.map((o) => o.path));
+      for (const c of s.clicks) {
+        if (!paths.has(c.object)) errs.push(`scene '${s.id}': click on unknown node '${c.object}'`);
+        if (!sceneIds.has(c.goto)) errs.push(`scene '${s.id}': goto unknown scene '${c.goto}'`);
+      }
+    } catch (e) {
+      errs.push(`scene '${s.id}': ${(e as Error).message}`);
     }
     for (const k of s.keys) {
       if (!Number.isInteger(k.key) || k.key < 0 || k.key > 255)
         errs.push(`scene '${s.id}': key must be 0–255`);
       if (!sceneIds.has(k.goto)) errs.push(`scene '${s.id}': key goto unknown scene '${k.goto}'`);
     }
+    if (s.frameCode) errs.push(...validateCustomCode(s.frameCode).map((e) => `scene '${s.id}' code: ${e}`));
   }
   return errs;
 }
@@ -327,39 +444,55 @@ function flagsOf(o: SceneObject): number {
   return 1 | (o.solid ? 2 : 0) | (o.kind === "movable" ? 4 : 0);
 }
 
-function emitSetup(s: Scene): string {
-  const lines = [`setup_${s.id} :: fn() {`];
-  for (let i = 0; i < s.objects.length; i++) {
-    const o = s.objects[i];
+/** Per-slot generated prefix: root scene + sanitized instance path. */
+function slotTag(rootId: string, path: string): string {
+  return `${rootId}_${path.replace(/\//g, "_")}`;
+}
+
+function emitSetup(rootId: string, leaves: FlatLeaf[]): string {
+  const lines = [`setup_${rootId} :: fn() {`];
+  for (let i = 0; i < leaves.length; i++) {
+    const o = leaves[i];
     lines.push(`    ox[${i}] = ${o.x}; oy[${i}] = ${o.y}; ot[${i}] = &spr_${o.sprite}; oflags[${i}] = ${flagsOf(o)};`);
   }
-  lines.push(`    ocount = ${s.objects.length};`);
+  lines.push(`    ocount = ${leaves.length};`);
   lines.push(`}`);
   return lines.join("\n") + "\n";
 }
 
-function emitAnim(s: Scene, anims: Map<string, Animation>): string[] {
+function emitTickFn(tag: string, tick: string): string[] {
+  return [
+    `tick_${tag} :: fn(slot: u16) {`,
+    ...String(tick ?? "")
+      .split("\n")
+      .map((line) => `    ${line}`),
+    `}`,
+  ];
+}
+
+function emitAnim(rootId: string, leaves: FlatLeaf[], anims: Map<string, Animation>): string[] {
   const lines: string[] = [];
-  s.objects.forEach((o, i) => {
+  leaves.forEach((o, i) => {
     if (!o.anim) return;
     const a = anims.get(o.anim);
     if (!a) return;
+    const tag = slotTag(rootId, o.path);
     const F = a.frames.length;
-    const hold = a.loop ? `afr_${s.id}_${o.id} = 0;` : `afr_${s.id}_${o.id} = ${F - 1};`;
-    lines.push(`    atick_${s.id}_${o.id} = atick_${s.id}_${o.id} + 1;`);
-    lines.push(`    if atick_${s.id}_${o.id} >= ${a.rate} {`);
-    lines.push(`        atick_${s.id}_${o.id} = 0;`);
-    lines.push(`        afr_${s.id}_${o.id} = afr_${s.id}_${o.id} + 1;`);
-    lines.push(`        if afr_${s.id}_${o.id} >= ${F} { ${hold} }`);
+    const hold = a.loop ? `afr_${tag} = 0;` : `afr_${tag} = ${F - 1};`;
+    lines.push(`    atick_${tag} = atick_${tag} + 1;`);
+    lines.push(`    if atick_${tag} >= ${a.rate} {`);
+    lines.push(`        atick_${tag} = 0;`);
+    lines.push(`        afr_${tag} = afr_${tag} + 1;`);
+    lines.push(`        if afr_${tag} >= ${F} { ${hold} }`);
     lines.push(`    }`);
     a.frames.forEach((f, fi) => {
-      lines.push(`    if afr_${s.id}_${o.id} == ${fi} { ot[${i}] = &spr_${f}; }`);
+      lines.push(`    if afr_${tag} == ${fi} { ot[${i}] = &spr_${f}; }`);
     });
   });
   return lines;
 }
 
-function emitDrive(s: Scene, pi: number, w: number, h: number, n: number): string[] {
+function emitDrive(pi: number, w: number, h: number, n: number): string[] {
   // Keyboard drive + collide-and-push for the player slot.
   const lines = [
     `    dpad: u8 = Controller.button;`,
@@ -402,18 +535,24 @@ function emitDrive(s: Scene, pi: number, w: number, h: number, n: number): strin
   return lines;
 }
 
-function emitFrame(s: Scene, w: number, h: number, anims: Map<string, Animation>, frameHook: boolean): string {
+function emitFrame(s: Scene, leaves: FlatLeaf[], w: number, h: number, anims: Map<string, Animation>, frameHook: boolean): string {
   const lines = [`${s.id}_frame :: fn() {`];
-  lines.push(`    k: u8 = kb[0]; kb[0] = 0;`);
-  lines.push(`    mnow: u8 = Mouse.state | mb[0]; mb[0] = 0;`);
-  lines.push(`    mpressed: u8 = mnow & (mouse_last ^ 255);`);
-  lines.push(`    mouse_last = mnow;`);
-  lines.push(`    mx: u16 = Mouse.x;`);
-  lines.push(`    my: u16 = Mouse.y;`);
-  const driver = s.objects.findIndex((o) => o.controls);
-  if (driver >= 0) lines.push(...emitDrive(s, driver, w, h, s.objects.length));
-  lines.push(...emitAnim(s, anims));
-  const byObject = new Map(s.objects.map((o, i) => [o.id, i]));
+  if (s.keys.length > 0) lines.push(`    k: u8 = kb[0]; kb[0] = 0;`);
+  if (s.clicks.length > 0) {
+    lines.push(`    mnow: u8 = Mouse.state | mb[0]; mb[0] = 0;`);
+    lines.push(`    mpressed: u8 = mnow & (mouse_last ^ 255);`);
+    lines.push(`    mouse_last = mnow;`);
+    lines.push(`    mx: u16 = Mouse.x;`);
+    lines.push(`    my: u16 = Mouse.y;`);
+  }
+  const driver = leaves.findIndex((o) => o.controls);
+  if (driver >= 0) lines.push(...emitDrive(driver, w, h, leaves.length));
+  lines.push(...emitAnim(s.id, leaves, anims));
+  const byObject = new Map<string, number>();
+  leaves.forEach((o, i) => {
+    if (!byObject.has(o.id)) byObject.set(o.id, i);
+    byObject.set(o.path, i);
+  });
   for (const c of [...s.clicks].sort((a, b) => (a.object < b.object ? -1 : 1))) {
     const i = byObject.get(c.object) as number;
     lines.push(`    if mpressed & 1 != 0 {`);
@@ -429,7 +568,14 @@ function emitFrame(s: Scene, w: number, h: number, anims: Map<string, Animation>
     lines.push(`        scene_go(SC_${k.goto.toUpperCase()});`);
     lines.push(`    }`);
   }
+  leaves.forEach((o, i) => {
+    if (o.tick) lines.push(`    tick_${slotTag(s.id, o.path)}(${i});`);
+  });
   if (frameHook) lines.push(`    custom_frame();`);
+  if (s.frameCode) {
+    lines.push(`    ( --- scene script: ${s.id} --- )`);
+    for (const line of s.frameCode.split("\n")) lines.push(`    ${line}`);
+  }
   lines.push(`    draw_all();`);
   lines.push(`}`);
   return lines.join("\n") + "\n";
@@ -458,7 +604,19 @@ export function emitProject(p: Project): Record<string, string> {
   }
   for (const s of scenes) out.push(`SC_${s.id.toUpperCase()} :: ${indexOf.get(s.id)};`);
   out.push(``);
+  const animMap = new Map(p.anims.map((a) => [a.id, a]));
+  // Only referenced sprites become ROM blobs: gallery-only tiles
+  // stay out of the build (and out of unused-data warnings).
+  // Validated projects flatten cleanly, so this never throws here.
+  const usedSprites = new Set<string>();
+  for (const s of p.scenes) {
+    for (const x of flattenScene(p, s.id)) {
+      usedSprites.add(x.sprite);
+      if (x.anim) for (const f of animMap.get(x.anim)?.frames ?? []) usedSprites.add(f);
+    }
+  }
   for (const o of [...p.sprites].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+    if (!usedSprites.has(o.id)) continue;
     out.push(`data spr_${o.id} = [${pixelsToPlanar(o.pixels).join(", ")}];`);
   }
   if (usedVoices(p).length > 0) {
@@ -471,9 +629,13 @@ export function emitProject(p: Project): Record<string, string> {
   out.push(`buffer oflags[${MAX_OBJECTS}]: u8;`);
   out.push(`ocount: u8 = 0;`);
   out.push(`scene: u8 = 0;`);
-  out.push(`kb: [1] u8;`);
-  out.push(`mb: [1] u8;`);
-  out.push(`mouse_last: u8 = 0;`);
+  const needsKey = scenes.some((x) => x.keys.length > 0);
+  const needsMouse = scenes.some((x) => x.clicks.length > 0);
+  if (needsKey) out.push(`kb: [1] u8;`);
+  if (needsMouse) {
+    out.push(`mb: [1] u8;`);
+    out.push(`mouse_last: u8 = 0;`);
+  }
   out.push(``);
   out.push(`scene_go :: fn(id: u8) {`);
   out.push(`    scene = id;`);
@@ -506,20 +668,25 @@ export function emitProject(p: Project): Record<string, string> {
   out.push(`    }`);
   out.push(`}`);
   out.push(``);
-  const animMap = new Map(p.anims.map((a) => [a.id, a]));
+  const flat = new Map(p.scenes.map((s) => [s.id, flattenScene(p, s.id)] as const));
   for (const s of scenes) {
-    for (const o of [...s.objects].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+    for (const o of flat.get(s.id) as FlatLeaf[]) {
       if (o.anim && animMap.has(o.anim)) {
-        out.push(`atick_${s.id}_${o.id}: u8 = 0;`);
-        out.push(`afr_${s.id}_${o.id}: u8 = 0;`);
+        const tag = slotTag(s.id, o.path);
+        out.push(`atick_${tag}: u8 = 0;`);
+        out.push(`afr_${tag}: u8 = 0;`);
       }
     }
   }
   out.push(``);
   for (const s of scenes) {
     // Store order, not sorted: hierarchy drag-reorder defines draw order.
-    out.push(emitSetup(s));
-    out.push(emitFrame(s, p.width, p.height, animMap, hasFrameHook));
+    const leaves = flat.get(s.id) as FlatLeaf[];
+    for (const o of leaves) {
+      if (o.tick) out.push(emitTickFn(slotTag(s.id, o.path), o.tick).join("\n") + "\n");
+    }
+    out.push(emitSetup(s.id, leaves));
+    out.push(emitFrame(s, leaves, p.width, p.height, animMap, hasFrameHook));
   }
   const arms = scenes.map((s) => `        ${indexOf.get(s.id)} => { ${s.id}_frame(); }`).join("\n");
   out.push(`on_frame :: event() {`);
@@ -528,18 +695,23 @@ export function emitProject(p: Project): Record<string, string> {
   out.push(`    }`);
   out.push(`}`);
   out.push(``);
-  out.push(`on_key :: event() {`);
-  out.push(`    kb[0] = Controller.key;`);
-  out.push(`}`);
-  out.push(``);
-  out.push(`on_mouse :: event() {`);
-  out.push(`    mb[0] = mb[0] | Mouse.state;`);
-  out.push(`}`);
-  out.push(``);
+  if (needsKey) {
+    out.push(`on_key :: event() {`);
+    out.push(`    kb[0] = Controller.key;`);
+    out.push(`}`);
+    out.push(``);
+  }
+  if (needsMouse) {
+    out.push(`on_mouse :: event() {`);
+    out.push(`    mb[0] = mb[0] | Mouse.state;`);
+    out.push(`}`);
+    out.push(``);
+  }
   out.push(`start :: fn() {`);
-  out.push(`    System.r = 45163;`);
-  out.push(`    System.g = 32876;`);
-  out.push(`    System.b = 16508;`);
+  const theme = p.theme ?? { r: THEME_R, g: THEME_G, b: THEME_B };
+  out.push(`    System.r = ${theme.r};`);
+  out.push(`    System.g = ${theme.g};`);
+  out.push(`    System.b = ${theme.b};`);
   out.push(`    Screen.width = ${p.width};`);
   out.push(`    Screen.height = ${p.height};`);
   out.push(`    Screen.x = 0;`);
@@ -557,8 +729,8 @@ export function emitProject(p: Project): Record<string, string> {
   if (hasSetupHook) out.push(`    custom_setup();`);
   out.push(`    scene_go(SC_${p.start.toUpperCase()});`);
   out.push(`    Screen.vector = &on_frame;`);
-  out.push(`    Controller.vector = &on_key;`);
-  out.push(`    Mouse.vector = &on_mouse;`);
+  if (needsKey) out.push(`    Controller.vector = &on_key;`);
+  if (needsMouse) out.push(`    Mouse.vector = &on_mouse;`);
   out.push(`}`);
   out.push(``);
   out.push(`main :: event() {`);
@@ -594,7 +766,7 @@ export const SAMPLE_PROJECT: Project = {
   scenes: [
     {
       id: "title",
-      objects: [
+      nodes: [
         { id: "hero", x: 16, y: 40, sprite: "hero", kind: "player", controls: true },
         { id: "wall", x: 64, y: 64, sprite: "wall", kind: "static", solid: true },
         { id: "coin", x: 96, y: 96, sprite: "coin", kind: "movable", solid: true, anim: "spin" },
@@ -604,7 +776,7 @@ export const SAMPLE_PROJECT: Project = {
     },
     {
       id: "play",
-      objects: [{ id: "hero", x: 8, y: 8, sprite: "hero", kind: "player", controls: true }],
+      nodes: [{ id: "hero", x: 8, y: 8, sprite: "hero", kind: "player", controls: true }],
       clicks: [],
       keys: [{ key: 27, goto: "title" }],
     },

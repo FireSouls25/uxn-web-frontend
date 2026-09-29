@@ -36,6 +36,30 @@ export const PALETTE: [string, string, string, string] = [
   paletteColor(3),
 ];
 
+export interface Theme {
+  r: number;
+  g: number;
+  b: number;
+}
+
+/** Live palette for a project theme (defaults to demo theme). */
+export function themeColors(theme?: Theme): [string, string, string, string] {
+  const t = theme ?? { r: THEME_R, g: THEME_G, b: THEME_B };
+  return [paletteColor(0, t.r, t.g, t.b), paletteColor(1, t.r, t.g, t.b), paletteColor(2, t.r, t.g, t.b), paletteColor(3, t.r, t.g, t.b)];
+}
+
+/** Set palette index 0–3 to an RGB hex (quantized to 4-bit nibbles). */
+export function setPaletteIndex(theme: Theme | undefined, index: number, hex: string): Theme {
+  const t = { r: THEME_R, g: THEME_G, b: THEME_B, ...(theme ?? {}) };
+  const m = hex.match(/^#([0-9a-fA-F]{6})$/);
+  if (!m) return t;
+  const rgb = parseInt(m[1], 16);
+  const nibbles = [(rgb >> 20) & 0xf, (rgb >> 12) & 0xf, (rgb >> 4) & 0xf];
+  const shift = (index === 0 || index === 2 ? 4 : 0) + (index < 2 ? 0 : 8);
+  const put = (word: number, n: number) => (word & (~(0xf << shift) & 0xffff)) | ((n & 0xf) << shift);
+  return { r: put(t.r, nibbles[0]), g: put(t.g, nibbles[1]), b: put(t.b, nibbles[2]) };
+}
+
 /** 64 color indices (0–3) → 16 planar bytes (ch1 ×8, ch2 ×8). */
 export function pixelsToPlanar(pixels: number[]): number[] {
   const ch1: number[] = [];

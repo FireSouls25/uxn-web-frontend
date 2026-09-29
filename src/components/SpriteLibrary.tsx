@@ -1,7 +1,7 @@
 import { useStore } from "@nanostores/react";
 import { Plus } from "lucide-react";
 import { useState } from "react";
-import { PALETTE } from "../lib/palette";
+import { themeColors } from "../lib/palette";
 import { t, useLang } from "../lib/i18n";
 import { addSprite, projectStore, spriteSelStore } from "../lib/store";
 
@@ -10,6 +10,7 @@ import { addSprite, projectStore, spriteSelStore } from "../lib/store";
 export default function SpriteLibrary() {
   const lang = useLang();
   const project = useStore(projectStore);
+  const pal = themeColors(project.theme);
   const spriteId = useStore(spriteSelStore);
   const [newName, setNewName] = useState("");
 
@@ -30,7 +31,7 @@ export default function SpriteLibrary() {
           >
             <span className="grid w-full gap-px" style={{ gridTemplateColumns: "repeat(8, 1fr)" }}>
               {s.pixels.map((v, i) => (
-                <span key={i} className="aspect-square" style={{ background: PALETTE[v & 3] }} />
+                <span key={i} className="aspect-square" style={{ background: pal[v & 3] }} />
               ))}
             </span>
             <span className="mt-1 block truncate font-mono text-[10px] text-subtext0">{s.id}</span>
