@@ -1,51 +1,110 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { Bot, Send, X } from "lucide-react";
+import { Bot, KeyRound, Loader2, Send, X } from "lucide-react";
+import type { Agent } from "@mariozechner/pi-agent-core";
 import { t, useLang } from "../../lib/i18n";
-import { AGENT_ENDPOINT, AGENT_PROVIDERS } from "../../lib/agent/providers";
-import { API_URL } from "../../lib/api";
+import {
+  createStudioAgent,
+  getApiKey,
+  listModels,
+  listProviders,
+  setApiKey,
+} from "../../lib/agent/pi";
 
 interface Message {
-  role: "user" | "agent" | "note";
+  role: "user" | "agent" | "note" | "tool";
   text: string;
 }
 
-/* Spawnable agent chat. Without a configured provider + backend
-   endpoint it states that plainly — it never pretends a model
-   answered. Once Pi SDK details land, this panel keeps its shape
-   and only the send path changes. */
+/* Live agent chat: pi-agent-core loop in the browser, tools executing
+   against projectStore, streaming into this panel. Keys are BYOK
+   (localStorage, per provider). Nothing is faked: no key or no
+   network states say so plainly. */
 export default function AgentChat() {
   const lang = useLang();
   const [open, setOpen] = useState(false);
-  const [provider, setProvider] = useState(AGENT_PROVIDERS[0]?.id ?? "");
+  const [providers] = useState<string[]>(() => {
+    const discovered = listProviders();
+    return discovered.length > 0 ? discovered : [];
+  });
+  const [provider, setProvider] = useState("");
+  const [models, setModels] = useState<Array<{ id: string; name: string }>>([]);
+  const [model, setModel] = useState("");
+  const [key, setKey] = useState("");
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     { role: "note", text: t(lang, "agent.welcome") },
   ]);
+  const agentRef = useRef<Agent | null>(null);
+
+  useEffect(() => {
+    if (providers.length > 0 && !provider) setProvider(providers[0]);
+  }, [providers, provider]);
+
+  useEffect(() => {
+    if (!provider) {
+      setModels([]);
+      return;
+    }
+    setModels(listModels(provider));
+    setKey(getApiKey(provider) ?? "");
+  }, [provider]);
+
+  useEffect(() => {
+    if (!model && models.length > 0) setModel(models[0].id);
+  }, [models, model]);
+
+  function push(role: Message["role"], text: string) {
+    setMessages((m) => [...m, { role, text }]);
+  }
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
     const text = input.trim();
     if (!text || busy) return;
-    setMessages((m) => [...m, { role: "user", text }]);
-    setInput("");
-    if (!provider) {
-      setMessages((m) => [...m, { role: "note", text: t(lang, "agent.no_provider") }]);
+    if (!provider || !model) {
+      push("note", t(lang, "agent.no_provider"));
       return;
     }
+    if (!getApiKey(provider)) {
+      push("note", t(lang, "agent.no_key"));
+      return;
+    }
+    push("user", text);
+    setInput("");
     setBusy(true);
     try {
-      const res = await fetch(`${API_URL}${AGENT_ENDPOINT}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider, message: text }),
+      const agent = createStudioAgent({ provider, model });
+      agentRef.current = agent;
+      let current = "";
+      agent.subscribe((event) => {
+        const e = event as unknown as Record<string, unknown>;
+        if (e["type"] === "message_update") {
+          const inner = e["assistantMessageEvent"] as Record<string, unknown> | undefined;
+          if (inner?.["type"] === "text_delta" && typeof inner["delta"] === "string") {
+            current += inner["delta"] as string;
+            const snapshot = current;
+            setMessages((m) => {
+              const last = m[m.length - 1];
+              if (last && last.role === "agent" && (last as { live?: boolean }).live) {
+                return [...m.slice(0, -1), { role: "agent", text: snapshot } as Message];
+              }
+              return [...m, { role: "agent", text: snapshot } as Message];
+            });
+          }
+        } else if (e["type"] === "tool_execution_start") {
+          const name = typeof e["toolName"] === "string" ? (e["toolName"] as string) : "tool";
+          push("tool", `⚙ ${name}`);
+        } else if (e["type"] === "turn_end") {
+          current = "";
+        }
       });
-      if (!res.ok) throw new Error(`agent: ${res.status}`);
-      const data = (await res.json()) as { reply?: string };
-      setMessages((m) => [...m, { role: "agent", text: data.reply ?? "…" }]);
-    } catch {
-      setMessages((m) => [...m, { role: "note", text: t(lang, "agent.offline") }]);
+      await agent.prompt(text);
+      agentRef.current = null;
+    } catch (err) {
+      push("note", err instanceof Error ? err.message : t(lang, "agent.offline"));
+      agentRef.current = null;
     } finally {
       setBusy(false);
     }
@@ -69,52 +128,85 @@ export default function AgentChat() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 16, scale: 0.98 }}
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-            className="pane fixed bottom-20 right-5 z-50 flex h-[420px] w-[330px] flex-col overflow-hidden rounded-2xl"
+            className="pane fixed bottom-20 right-5 z-50 flex h-[460px] w-[340px] flex-col overflow-hidden rounded-2xl"
           >
-            <div className="flex items-center gap-2 border-b border-surface0 px-3.5 py-2.5">
-              <Bot size={15} className="text-mauve" />
+            <div className="flex items-center gap-1.5 border-b border-surface0 px-3 py-2">
+              <Bot size={15} className="shrink-0 text-mauve" />
               <span className="text-[13px] font-semibold">{t(lang, "agent.title")}</span>
-              {AGENT_PROVIDERS.length > 0 ? (
-                <select
-                  aria-label={t(lang, "agent.provider")}
-                  value={provider}
-                  onChange={(e) => setProvider(e.target.value)}
-                  className="select select-sm ml-auto"
-                >
-                  {AGENT_PROVIDERS.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.label}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <span className="ml-auto font-mono text-[10px] text-yellow">
-                  {t(lang, "agent.no_provider_short")}
-                </span>
-              )}
             </div>
-            <div className="flex-1 space-y-2 overflow-y-auto px-3.5 py-3">
+            <div className="flex items-center gap-1.5 border-b border-surface0 px-3 py-2">
+              <select
+                aria-label={t(lang, "agent.provider")}
+                value={provider}
+                onChange={(e) => {
+                  setProvider(e.target.value);
+                  setModel("");
+                }}
+                className="select select-sm min-w-0 flex-1"
+              >
+                <option value="">{t(lang, "agent.provider")}…</option>
+                {providers.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Model"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                className="select select-sm min-w-0 flex-1"
+              >
+                <option value="">model…</option>
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name || m.id}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center gap-1.5 border-b border-surface0 px-3 py-2">
+              <KeyRound size={13} className="shrink-0 text-subtext0" />
+              <input
+                type="password"
+                value={key}
+                onChange={(e) => {
+                  setKey(e.target.value);
+                  setApiKey(provider, e.target.value);
+                }}
+                placeholder={t(lang, "agent.key_ph")}
+                className="min-w-0 flex-1 bg-transparent font-mono text-[11px] outline-none placeholder:text-overlay0"
+              />
+            </div>
+            <div className="flex-1 space-y-2 overflow-y-auto px-3 py-3">
               {messages.map((m, i) => (
                 <div
                   key={i}
-                  className={`max-w-[90%] rounded-lg px-3 py-2 text-[13px] leading-relaxed ${
+                  className={`max-w-[92%] rounded-lg px-3 py-2 text-[13px] leading-relaxed ${
                     m.role === "user"
                       ? "ml-auto bg-mauve/20 text-text"
                       : m.role === "agent"
                         ? "bg-surface0 text-text"
-                        : "mx-auto bg-transparent text-center font-mono text-[11px] text-subtext0"
+                        : m.role === "tool"
+                          ? "bg-transparent font-mono text-[11px] text-teal"
+                          : "mx-auto bg-transparent text-center font-mono text-[11px] text-subtext0"
                   }`}
                 >
                   {m.text}
                 </div>
               ))}
+              {busy && (
+                <div className="flex items-center gap-2 font-mono text-[11px] text-subtext0">
+                  <Loader2 size={12} className="animate-spin" /> …
+                </div>
+              )}
             </div>
             <form onSubmit={send} className="flex gap-1.5 border-t border-surface0 p-2.5">
               <input
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder={t(lang, "agent.placeholder")}
-                maxLength={500}
+                maxLength={2000}
                 className="min-w-0 flex-1 rounded-lg border border-surface1 bg-base px-3 py-2 text-[13px] outline-none placeholder:text-overlay0 focus:border-mauve"
               />
               <button
