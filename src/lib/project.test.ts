@@ -15,21 +15,33 @@ describe("validateProject", () => {
     expect(validateProject(SAMPLE_PROJECT)).toEqual([]);
   });
 
-  it("rejects dangling gotos, dup ids and oversized scenes", () => {
+  it("rejects dangling gotos, dup ids, oversized scenes and bad physics", () => {
     const bad: Project = {
       ...SAMPLE_PROJECT,
       start: "missing",
       scenes: [
         {
           id: "title",
-          objects: Array.from({ length: 17 }, (_, i) => ({ id: `o${i}`, x: 0, y: 0 })),
+          objects: [
+            ...Array.from({ length: 17 }, (_, i) => ({ id: `o${i}`, x: 0, y: 0 })),
+            { id: "floaty", x: 0, y: 0, movable: true },
+            { id: "brain", x: 0, y: 0, controls: true },
+          ],
           clicks: [{ object: "ghost", goto: "nowhere" }],
           keys: [],
         },
       ],
     };
     const errs = validateProject(bad);
-    expect(errs.length).toBeGreaterThanOrEqual(4);
+    expect(errs.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("rejects bad sound rows", () => {
+    const bad: Project = {
+      ...SAMPLE_PROJECT,
+      sound: { voices: [{ note: 200, vol: 0 }, { note: 60, vol: 300 }] },
+    };
+    expect(validateProject(bad).length).toBe(2);
   });
 });
 
@@ -48,6 +60,10 @@ describe("emitProject", () => {
     expect(files["main.ux"]).toContain("on_frame :: event()");
     expect(files["main.ux"]).toContain("Screen.vector = &on_frame;");
     expect(files["main.ux"]).toContain("setup_play();");
+    expect(files["main.ux"]).toContain("overlap88");
+    expect(files["main.ux"]).toContain("oflags[");
+    expect(files["main.ux"]).toContain("Audio0.pitch");
+    expect(files["devices.ux"]).toContain("device Audio0 48");
   });
 
   it("compiles with the real etal when available", () => {

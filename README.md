@@ -11,8 +11,9 @@ re-themes everything.
 | Route | Content |
 |---|---|
 | `/` | Hero, workstation features, live export targets (`GET /targets` with static fallback) |
-| `/login`, `/register` | Animated forms backed by `POST /auth/*` (JWT session → `/studio`) |
-| `/studio` | Workstation shell: project bar, icon rail, hierarchy, pixel canvas (select + drag), event graph, store-bound inspector, export pane, status bar |
+| `/login`, `/register` | Animated forms backed by `POST /auth/*` (JWT session → `/studio`), with account-required-for-saving notice |
+| `/projects` | Project management: create/open/delete, per-project scene/object stats |
+| `/studio` | Workstation: scene canvas (select + drag + size presets), sprite editor, scene graph, sound mixer, generated-code preview, store-bound inspector, export pane, status bar |
 
 ## Studio store + export
 
@@ -37,7 +38,10 @@ the dictionary, never inline.
 `Project` (scenes of 8px objects + click/key → goto bindings) lowers to
 two dependency-free files (`devices.ux`, `main.ux`) the backend compiles
 as-is. Deterministic (sorted ids, fixed 16-slot pool), validated up
-front (`validateProject`), v1 scope is click + key → scene switch.
+front (`validateProject`). Objects carry physics flags (solid / movable
+→ push / player + keyboard controls) lowered to collide-and-push frame
+code; up to 4 sound voices (MIDI 0–107) play once on boot through
+`Audio0–3` with a shared square wave — all inside Uxn limits.
 
 ```sh
 npm test          # determinism, validation, dispatch markers…

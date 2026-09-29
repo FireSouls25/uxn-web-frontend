@@ -25,14 +25,16 @@ const { title, description = "Low-code games for the Uxn virtual machine." } = A
     />
     <script is:inline>
       try {
-        const savedTheme = localStorage.getItem("uxn.theme");
-        document.documentElement.dataset.theme =
+        // Theme: stored choice wins ("auto" = follow the OS, the default).
+        var savedTheme = localStorage.getItem("uxn.theme") || "auto";
+        var eff =
           savedTheme === "latte" || savedTheme === "mocha"
             ? savedTheme
             : matchMedia("(prefers-color-scheme: light)").matches
               ? "latte"
               : "mocha";
-      } catch {
+        document.documentElement.dataset.theme = eff;
+      } catch (e) {
         /* private mode — mocha default stands */
       }
       try {

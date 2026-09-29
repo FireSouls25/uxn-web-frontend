@@ -152,6 +152,9 @@ export default function AuthForm({ mode }: Props) {
       <p className="mt-4 text-center font-mono text-[11px] text-overlay0">
         {t(lang, "auth.foot")}
       </p>
+      <p className="mt-2 rounded-lg bg-yellow/10 px-3 py-2 text-center text-[13px] text-yellow">
+        {t(lang, "auth.save_note")}
+      </p>
     </motion.form>
   );
 }

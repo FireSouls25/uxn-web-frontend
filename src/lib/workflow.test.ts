@@ -26,7 +26,7 @@ describe("moveObject", () => {
     const hero = next.scenes.find((s) => s.id === "title")?.objects.find((o) => o.id === "hero");
     const coin = next.scenes.find((s) => s.id === "title")?.objects.find((o) => o.id === "coin");
     expect(hero).toMatchObject({ x: 120, y: 120 });
-    expect(coin).toMatchObject({ x: 64, y: 64 });
+    expect(coin).toMatchObject({ x: 96, y: 96 });
     // Input untouched (immutable update).
     expect(SAMPLE_PROJECT.scenes[0].objects[0]).toMatchObject({ x: 16, y: 40 });
   });

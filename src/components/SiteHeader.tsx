@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { Box, Menu, X } from "lucide-react";
-import ThemeToggle from "./ThemeToggle";
-import LangToggle from "./LangToggle";
+import ThemeSelect from "./ThemeSelect";
+import LangSelect from "./LangSelect";
 import { t, useLang } from "../lib/i18n";
 import { apiLogout, apiMe } from "../lib/auth";
 import { clearSession, getSession, type Session } from "../lib/session";
@@ -29,6 +29,7 @@ export default function SiteHeader() {
   }
 
   const LINKS = [
+    { href: "/projects", label: t(lang, "nav.projects") },
     { href: "/studio", label: t(lang, "nav.studio") },
     { href: "/#targets", label: t(lang, "nav.targets") },
     { href: "/#features", label: t(lang, "nav.features") },
@@ -59,8 +60,8 @@ export default function SiteHeader() {
         </nav>
 
         <div className="ml-auto hidden items-center gap-1.5 md:flex">
-          <LangToggle />
-          <ThemeToggle />
+          <LangSelect />
+          <ThemeSelect />
           {session ? (
             <>
               <a
@@ -97,8 +98,8 @@ export default function SiteHeader() {
         </div>
 
         <div className="ml-auto flex items-center gap-1 md:hidden">
-          <LangToggle />
-          <ThemeToggle />
+          <LangSelect />
+          <ThemeSelect />
           <button
             onClick={() => setOpen((v) => !v)}
             aria-label={t(lang, "nav.menu")}

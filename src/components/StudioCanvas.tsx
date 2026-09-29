@@ -1,10 +1,19 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
 import { t, useLang } from "../lib/i18n";
-import { currentScene, moveObject, projectStore, sceneIdStore, selectionStore } from "../lib/store";
+import { currentScene, moveObject, projectStore, resizeProject, sceneIdStore, selectionStore } from "../lib/store";
 import type { SceneObject } from "../lib/project";
 
 const TILE = 8;
+
+const SIZE_PRESETS: Array<[string, number, number]> = [
+  ["128×128", 128, 128],
+  ["256×256", 256, 256],
+  ["320×180", 320, 180],
+  ["256×240", 256, 240],
+  ["160×144", 160, 144],
+  ["640×360", 640, 360],
+];
 
 function cssVar(name: string, fallback: string): string {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -106,6 +115,29 @@ export default function StudioCanvas() {
             {s.id}
           </button>
         ))}
+        <label className="ml-auto inline-flex items-center gap-1.5 font-mono text-[11px] text-subtext0">
+          {t(lang, "size.label")}
+          <select
+            aria-label={t(lang, "size.label")}
+            value={`${project.width}×${project.height}`}
+            onChange={(e) => {
+              const preset = SIZE_PRESETS.find(([label]) => label === e.target.value);
+              if (preset) resizeProject(preset[1], preset[2]);
+            }}
+            className="cursor-pointer rounded-md border border-surface1 bg-mantle px-1.5 py-1 font-mono text-[11px] outline-none"
+          >
+            {SIZE_PRESETS.map(([label]) => (
+              <option key={label} value={label}>
+                {label}
+              </option>
+            ))}
+            {!SIZE_PRESETS.some(([, w, h]) => w === project.width && h === project.height) && (
+              <option value={`${project.width}×${project.height}`}>
+                {project.width}×{project.height}
+              </option>
+            )}
+          </select>
+        </label>
       </div>
       <canvas
         ref={canvasRef}

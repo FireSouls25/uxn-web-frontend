@@ -1,17 +1,11 @@
 ---
 import Base from "../layouts/Base.astro";
 import SessionBanner from "../components/SessionBanner";
-import StudioCanvas from "../components/StudioCanvas";
+import StudioRail from "../components/StudioRail";
+import StudioCenter from "../components/StudioCenter";
 import InspectorPanel from "../components/InspectorPanel";
 import ExportPanel from "../components/ExportPanel";
-import { Boxes, Braces, FolderTree, Gamepad2, Rocket } from "lucide-react";
-
-const RAIL = [Boxes, FolderTree, Braces, Gamepad2, Rocket];
-const NODES = [
-  { tag: "InputNode", title: "Keyboard Event", accent: "text-sky", detail: "Keys: [ArrowRight] / [D]" },
-  { tag: "PhysicsEvent", title: "Collision Enter 2D", accent: "text-green", detail: 'Other tag: "Hazard"' },
-  { tag: "CombatAct", title: "Hurt & Sound", accent: "text-red", detail: "Damage: −25 HP" },
-];
+---
 ---
 
 <Base title="Studio">
@@ -21,20 +15,8 @@ const NODES = [
     </div>
 
     <div class="mt-3 grid gap-3 lg:grid-cols-[44px_240px_1fr_280px]">
-      {/* Icon rail */}
-      <div class="pane hidden flex-col items-center gap-1 rounded-xl py-2 lg:flex">
-        {
-          RAIL.map((Icon, i) => (
-            <button
-              class:list={[
-                "grid size-9 place-items-center rounded-lg transition-colors",
-                i === 0 ? "bg-surface0 text-mauve" : "text-subtext0 hover:bg-surface0 hover:text-text",
-              ]}
-            >
-              <Icon size={17} />
-            </button>
-          ))
-        }
+      <div class="hidden lg:block">
+        <StudioRail client:load />
       </div>
 
       {/* Hierarchy */}
@@ -57,28 +39,13 @@ const NODES = [
         </div>
       </div>
 
-      {/* Viewport + event graph */}
-      <div class="flex min-w-0 flex-col gap-3">
-        <div class="pane rounded-xl p-3">
-          <StudioCanvas client:visible />
-        </div>
-        <div class="pane rounded-xl p-3">
-          <p class="font-mono text-[11px] uppercase tracking-widest text-subtext0" data-i18n="st.graph">
-            Visual event &amp; trigger graph
-          </p>
-          <div class="mt-2 grid gap-2 md:grid-cols-3">
-            {
-              NODES.map((n) => (
-                <div class="rounded-lg border border-surface0 bg-base p-3">
-                  <p class={`font-mono text-[10px] uppercase tracking-widest ${n.accent}`}>{n.tag}</p>
-                  <p class="mt-1 text-[13px] font-semibold">{n.title}</p>
-                  <p class="mt-1 font-mono text-[11px] text-subtext0">{n.detail}</p>
-                </div>
-              ))
-            }
-          </div>
-        </div>
+      {/* Center: active view */}
+      <div class="min-w-0">
+        <StudioCenter client:visible />
       </div>
+
+      {/* Event graph lives in the events view now; hierarchy stays static
+          until it binds to the store. */}
 
       {/* Inspector + export */}
       <div class="flex min-w-0 flex-col gap-3">
