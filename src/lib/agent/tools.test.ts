@@ -79,4 +79,20 @@ describe("agent tools", () => {
     const main = (emit.data as { files: Record<string, string> }).files["main.ux"];
     expect(main).toContain("Screen.addr = ot[");
   });
+
+  it("authors shared behavior through object templates", () => {
+    const def = runTool("create_object_def", { name: "crate", sprite: "wall", kind: "movable" });
+    expect(def).toMatchObject({ ok: true, data: { id: "crate" } });
+    expect(runTool("create_object_def", { name: "bad", sprite: "ghost" }).ok).toBe(false);
+    const a = runTool("place_instance", { def: "crate", name: "box", x: 40, y: 40 });
+    const b = runTool("place_instance", { def: "crate", name: "box2", x: 56, y: 40 });
+    expect(a.ok && b.ok).toBe(true);
+    expect(runTool("place_instance", { def: "nope" }).ok).toBe(false);
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+    // extract the inline hero into a template: same game, new structure
+    expect(runTool("extract_object", { object: "coin" })).toMatchObject({ ok: true, data: { id: "coin" } });
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+    const snap = runTool("describe", {}).data as { defs: string[] };
+    expect(snap.defs.sort()).toEqual(["coin", "crate"]);
+  });
 });

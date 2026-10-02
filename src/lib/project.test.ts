@@ -360,6 +360,76 @@ describe("sprite tiles", () => {
   });
 });
 
+describe("object templates", () => {
+  function defProject(): Project {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.objectDefs = [
+      { id: "hero_obj", sprite: "hero", kind: "player", controls: true, tick: "ox[slot] = ox[slot];" },
+      { id: "crate", sprite: "wall", kind: "movable", solid: true },
+    ];
+    p.scenes[0].nodes.push(
+      { id: "hero2", x: 0, y: 0, def: "hero_obj" },
+      { id: "box", x: 32, y: 32, def: "crate", anim: "spin" },
+    );
+    // title already has an inline player: drop it so the fixture is
+    // valid unless a test says otherwise.
+    p.scenes[0].nodes = p.scenes[0].nodes.filter((o) => o.id !== "hero");
+    p.scenes[0].clicks = [];
+    return p;
+  }
+
+  it("resolves defs with local overrides winning", async () => {
+    const { flattenScene } = await import("./project");
+    const flat = flattenScene(defProject(), "title");
+    const hero2 = flat.find((l) => l.path === "hero2")!;
+    expect(hero2).toMatchObject({ sprite: "hero", kind: "player", controls: true });
+    expect(hero2.tick).toContain("ox[slot]");
+    expect(flat.find((l) => l.path === "box")).toMatchObject({
+      sprite: "wall",
+      kind: "movable",
+      solid: true,
+      anim: "spin",
+    });
+  });
+
+  it("applies physics rules to resolved leaves, explicit false included", () => {
+    const p = defProject();
+    // explicit local false beats the def default (??, not ||) — and
+    // the resolved leaf is what the rule sees.
+    p.scenes[0].nodes.find((o) => o.id === "box")!.solid = false;
+    const errs = validateProject(p);
+    expect(errs.some((e) => e.includes("'box' movable requires solid"))).toBe(true);
+  });
+
+  it("validates defs and their instances", () => {
+    expect(validateProject(defProject())).toEqual([]);
+    const badDef = defProject();
+    badDef.objectDefs![1] = { id: "crate", sprite: "ghost", kind: "movable" };
+    const errs = validateProject(badDef);
+    expect(errs.some((e) => e.includes("unknown sprite 'ghost'"))).toBe(true);
+    expect(errs.some((e) => e.includes("movable requires solid"))).toBe(true);
+    const badRef = defProject();
+    badRef.scenes[0].nodes.push({ id: "lost", x: 0, y: 0, def: "nope" });
+    expect(validateProject(badRef).some((e) => e.includes("unknown object 'nope'"))).toBe(true);
+  });
+
+  it("counts players and drivers post-resolution", () => {
+    const p = defProject();
+    expect(validateProject(p)).toEqual([]);
+    // a second player via a second instance of the same def still counts
+    p.scenes[0].nodes.push({ id: "hero3", x: 64, y: 0, def: "hero_obj" });
+    expect(validateProject(p).some((e) => e.includes("at most one player"))).toBe(true);
+  });
+
+  it("emits def-backed leaves like inlines", () => {
+    const p = defProject();
+    expect(validateProject(p)).toEqual([]);
+    const main = emitProject(p)["main.ux"];
+    expect(main).toContain("tick_title_hero2");
+    expect(main).toContain("ox[slot] = ox[slot];");
+  });
+});
+
 describe("named inputs", () => {
   function legacy(): Record<string, unknown> {
     const p = structuredClone(SAMPLE_PROJECT) as unknown as Record<string, unknown>;

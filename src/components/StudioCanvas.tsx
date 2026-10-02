@@ -5,8 +5,10 @@ import { themeColors } from "../lib/palette";
 import { t, useLang } from "../lib/i18n";
 import { sceneVar } from "../lib/scene-ui";
 import {
+  addInstance,
   addObject,
   currentScene,
+  defSelStore,
   moveLeafByPath,
   projectStore,
   resizeProject,
@@ -111,6 +113,7 @@ export default function StudioCanvas() {
   const locked = !!project.locked;
 
   function onDown(e: React.PointerEvent) {
+    defSelStore.set(null);
     if (placing && !locked) {
       // Stamp mode: click empty canvas to place the gallery sprite.
       // Right button (or Esc) leaves the mode; a hit just selects.
@@ -234,6 +237,23 @@ export default function StudioCanvas() {
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
+        onDragOver={(e) => {
+          if (!locked && e.dataTransfer.types.includes("application/x-def")) e.preventDefault();
+        }}
+        onDrop={(e) => {
+          if (locked) return;
+          let defId = "";
+          try {
+            defId = (JSON.parse(e.dataTransfer.getData("application/x-def")) as { defId: string }).defId;
+          } catch {
+            return;
+          }
+          if (!defId) return;
+          e.preventDefault();
+          const [gx, gy] = toGame(e as unknown as React.PointerEvent);
+          sceneIdStore.set(scene.id);
+          addInstance(defId, snapV(gx), snapV(gy));
+        }}
         onContextMenu={(e) => e.preventDefault()}
         onKeyDown={(e) => {
           if (e.key === "Escape") setPlacing(false);

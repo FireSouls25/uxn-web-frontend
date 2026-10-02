@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { artifactFilename } from "./export";
-import { clampToCanvas, moveObject, renameObject, reorderObject } from "./store";
-import { currentIdStore, projectsStore, sceneIdStore, selectionStore } from "./store";
-import { SAMPLE_PROJECT } from "./project";
+import {
+  addDef,
+  addInstance,
+  clampToCanvas,
+  deleteDef,
+  extractObject,
+  moveObject,
+  patchDef,
+  renameDef,
+  renameObject,
+  reorderObject,
+} from "./store";
+import { currentIdStore, defSelStore, projectsStore, sceneIdStore, selectionStore } from "./store";
+import { SAMPLE_PROJECT, validateProject } from "./project";
 
 describe("artifactFilename", () => {
   it("names every target/mode pair", () => {
@@ -64,5 +75,82 @@ describe("hierarchy ops", () => {
     expect(projectsStore.get().demo.scenes[0].nodes.map((o) => o.id)).toEqual(["wall", "coin", "hero"]);
     reorderObject(9, 0);
     expect(projectsStore.get().demo.scenes[0].nodes.map((o) => o.id)).toEqual(["wall", "coin", "hero"]);
+  });
+});
+
+describe("object templates", () => {
+  function reset() {
+    projectsStore.set({ demo: structuredClone(SAMPLE_PROJECT) });
+    currentIdStore.set("demo");
+    sceneIdStore.set("title");
+    selectionStore.set(null);
+    defSelStore.set(null);
+  }
+
+  it("stamps instances and selects the def for editing", () => {
+    reset();
+    const id = addDef("crate", "wall", "movable");
+    expect(id).toBe("crate");
+    expect(defSelStore.get()).toBe("crate");
+    expect(addDef("crate")).not.toBe("crate"); // uniquified
+    const inst = addInstance("crate", 40, 40, "box");
+    expect(inst).toBe("box");
+    const node = projectsStore.get().demo.scenes[0].nodes.find((o) => o.id === "box")!;
+    expect(node).toMatchObject({ x: 40, y: 40, def: "crate" });
+    expect(node.sprite).toBeUndefined();
+    expect(addInstance("nope")).toBe("");
+    expect(validateProject(projectsStore.get().demo)).toEqual([]);
+  });
+
+  it("renames defs across instances and refuses clashes", () => {
+    reset();
+    addDef("crate", "wall");
+    addInstance("crate", 0, 0, "box");
+    expect(renameDef("crate", "9bad")).toBe("bad id");
+    addDef("other");
+    expect(renameDef("crate", "other")).toBe("duplicate id");
+    expect(renameDef("crate", "boxy")).toBeNull();
+    const demo = projectsStore.get().demo;
+    expect(demo.objectDefs?.map((d) => d.id)).toEqual(["boxy", "other"]);
+    expect(demo.scenes[0].nodes.find((o) => o.id === "box")?.def).toBe("boxy");
+  });
+
+  it("extracts an inline leaf and deletes defs by baking", () => {
+    reset();
+    // wall is an inline static solid: extract keeps id/pos, moves the rest.
+    expect(extractObject("wall")).toBe("wall");
+    let demo = projectsStore.get().demo;
+    expect(demo.objectDefs?.map((d) => d.id)).toEqual(["wall"]);
+    expect(demo.scenes[0].nodes.find((o) => o.id === "wall")).toEqual({
+      id: "wall",
+      x: 64,
+      y: 64,
+      def: "wall",
+    });
+    expect(extractObject("wall")).toBeNull(); // already an instance
+    expect(extractObject("missing")).toBeNull();
+    expect(validateProject(demo)).toEqual([]);
+    deleteDef("wall");
+    demo = projectsStore.get().demo;
+    expect(demo.objectDefs ?? []).toEqual([]);
+    // baked back to the exact inline it was extracted from
+    expect(demo.scenes[0].nodes.find((o) => o.id === "wall")).toMatchObject({
+      sprite: "wall",
+      kind: "static",
+      solid: true,
+    });
+    expect(validateProject(demo)).toEqual([]);
+  });
+
+  it("patches defs with ref checks", () => {
+    reset();
+    addDef("crate", "wall");
+    expect(patchDef("crate", { sprite: "ghost" })).toContain("unknown sprite");
+    expect(patchDef("crate", { anim: "ghost" })).toContain("unknown animation");
+    expect(patchDef("crate", { kind: "movable" })).toBeNull();
+    expect(projectsStore.get().demo.objectDefs?.find((d) => d.id === "crate")).toMatchObject({
+      kind: "movable",
+      solid: true,
+    });
   });
 });

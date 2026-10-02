@@ -68,6 +68,26 @@ export interface Animation {
 
 export type ObjectKind = "player" | "static" | "movable";
 
+/** An object template: the GameMaker Object in our Object ≠ Sprite ≠
+    Instance split. A def owns default art, physics flags, animation
+    and tick script; scene leaves either inline all of that (today's
+    behavior) or carry `def` and override per field. Events arrive in
+    Phase 2; the tick default already makes defs useful now. */
+export interface ObjectDef {
+  id: string;
+  sprite: string;
+  kind: ObjectKind;
+  solid?: boolean;
+  controls?: boolean;
+  anim?: string;
+  tick?: string;
+}
+
+/** The def library, legacy-safe: pre-def projects simply have none. */
+export function projectDefs(p: Project): ObjectDef[] {
+  return p.objectDefs ?? [];
+}
+
 export interface ClickBinding {
   object: string;
   goto: string;
@@ -115,6 +135,10 @@ export interface SceneNode {
   anim?: string;
   /** Leaves only: per-object script, wrapped as tick_<root>_<path>. */
   tick?: string;
+  /** Leaves only: instance of ObjectDef. Every field above (except
+      id/x/y, which are always instance state) falls back to the def
+      when locally absent — explicit local values always win. */
+  def?: string;
 }
 
 export interface Scene {
@@ -145,6 +169,7 @@ const MAX_DEPTH = 8;
     depth overflow, or slot overflow — validation surfaces these. */
 export function flattenScene(p: Project, sceneId: string): FlatLeaf[] {
   const scenes = new Map(p.scenes.map((s) => [s.id, s]));
+  const defs = new Map(projectDefs(p).map((d) => [d.id, d]));
   const out: FlatLeaf[] = [];
   const visit = (id: string, ox: number, oy: number, trail: string[], prefix: string[], depth: number): void => {
     if (trail.includes(id)) throw new Error(`scene cycle: ${[...trail, id].join(" → ")}`);
@@ -156,7 +181,24 @@ export function flattenScene(p: Project, sceneId: string): FlatLeaf[] {
       if (n.scene) {
         visit(n.scene, ox + n.x, oy + n.y, [...trail, id], [...prefix, n.id], depth + 1);
       } else {
-        out.push({ ...n, path, x: n.x + ox, y: n.y + oy, kind: n.kind ?? "static", sprite: n.sprite ?? "" });
+        // Def-backed leaves resolve here — local fields over def
+        // defaults — so emitter, canvas and validation all see
+        // effective values from one place. Unknown defs resolve to
+        // nothing (validation reports them); flatten never throws
+        // for data reasons.
+        const def = n.def ? defs.get(n.def) : undefined;
+        out.push({
+          ...n,
+          path,
+          x: n.x + ox,
+          y: n.y + oy,
+          kind: n.kind ?? def?.kind ?? "static",
+          sprite: n.sprite ?? def?.sprite ?? "",
+          solid: n.solid ?? def?.solid,
+          controls: n.controls ?? def?.controls,
+          anim: n.anim ?? def?.anim,
+          tick: n.tick ?? def?.tick,
+        });
       }
     }
   };
@@ -190,6 +232,9 @@ export interface Project {
   inputs: NamedInput[];
   /** Shared sprite library (1×1 up to 4×4 tiles of 8×8 2bpp). */
   sprites: Sprite[];
+  /** Object template library (Phase 1: the GameMaker Object). Absent
+      = pre-def project; leaves then inline everything as before. */
+  objectDefs?: ObjectDef[];
   /** Frame collections over sprite ids. */
   anims: Animation[];
   /** Up to 4 voices, played once on boot. Absent = silent. */
@@ -422,6 +467,19 @@ export function validateProject(p: Project): string[] {
       }
     }
   }
+  const defs = projectDefs(p);
+  const defIds = new Set(defs.map((d) => d.id));
+  if (defIds.size !== defs.length) errs.push("duplicate object id");
+  for (const d of defs) {
+    if (!IDENT.test(d.id)) errs.push(`bad object id '${d.id}'`);
+    if (!spriteIds.has(d.sprite)) errs.push(`object '${d.id}': unknown sprite '${d.sprite}'`);
+    if (d.kind !== "player" && d.kind !== "static" && d.kind !== "movable")
+      errs.push(`object '${d.id}': bad kind '${(d as { kind: unknown }).kind}'`);
+    if (d.kind === "movable" && !d.solid) errs.push(`object '${d.id}': movable requires solid`);
+    if (d.controls && d.kind !== "player") errs.push(`object '${d.id}': controls require player kind`);
+    if (d.anim && !animIds.has(d.anim)) errs.push(`object '${d.id}': unknown animation '${d.anim}'`);
+    if (d.tick) errs.push(...validateCustomCode(d.tick).map((e) => `object '${d.id}' tick: ${e}`));
+  }
   if (sceneIds.size !== p.scenes.length) errs.push("duplicate scene id");
   if (!sceneIds.has(p.start)) errs.push(`start scene '${p.start}' missing`);
   if (!IDENT.test(p.id)) errs.push(`bad project id '${p.id}'`);
@@ -445,32 +503,44 @@ export function validateProject(p: Project): string[] {
       if (isBranch && !o.sprite && !sceneIds.has(o.scene as string))
         errs.push(`node '${o.id}': unknown subscene '${o.scene}'`);
       if (isBranch && o.sprite) errs.push(`node '${o.id}': sprite and subscene are exclusive`);
-      if (!isBranch && !o.sprite) errs.push(`node '${o.id}': leaf needs a sprite`);
+      if (isBranch && o.def) errs.push(`node '${o.id}': objects are leaves only, not branches`);
+      if (!isBranch && !o.sprite && !o.def) errs.push(`node '${o.id}': leaf needs a sprite or an object`);
       if (!isBranch) {
-        if (!spriteIds.has(o.sprite as string)) errs.push(`node '${o.id}': unknown sprite '${o.sprite}'`);
+        if (o.sprite && !spriteIds.has(o.sprite)) errs.push(`node '${o.id}': unknown sprite '${o.sprite}'`);
+        if (o.def && !defIds.has(o.def)) errs.push(`node '${o.id}': unknown object '${o.def}'`);
         if (o.anim && !animIds.has(o.anim)) errs.push(`node '${o.id}': unknown animation '${o.anim}'`);
-        // The emitter draws with the leaf sprite's tile width; an
-        // animation of other-sized frames would tear at the seams.
-        if (o.anim && o.sprite) {
-          const leaf = spriteDims.get(o.sprite as string);
-          const frames = animDims.get(o.anim);
-          if (leaf && frames && (leaf[0] !== frames[0] || leaf[1] !== frames[1]))
-            errs.push(`node '${o.id}': sprite must match animation '${o.anim}' size`);
-        }
       }
       if (o.tick) errs.push(...validateCustomCode(o.tick).map((e) => `node '${o.id}' tick: ${e}`));
       if (o.kind !== undefined && o.kind !== "player" && o.kind !== "static" && o.kind !== "movable")
         errs.push(`node '${o.id}': bad kind '${(o as { kind: unknown }).kind}'`);
-      if (o.kind === "movable" && !o.solid) errs.push(`node '${o.id}': movable requires solid`);
-      if (o.controls && o.kind !== "player") errs.push(`node '${o.id}': controls require player kind`);
     }
-    // Flattened view: cycles, depth, slot budget, player/driver caps.
+    // Flattened view: defs resolved, so physics rules, size matches
+    // and caps all check effective values (a def can supply any of
+    // them). Paths pinpoint nested leaves.
     try {
       const flat = flattenScene(p, s.id);
       const players = flat.filter((o) => o.kind === "player");
       if (players.length > 1) errs.push(`scene '${s.id}': at most one player (0 allowed)`);
       const drivers = flat.filter((o) => o.controls);
       if (drivers.length > 1) errs.push(`scene '${s.id}': at most one keyboard driver`);
+      for (const o of flat) {
+        if (o.kind === "movable" && !o.solid)
+          errs.push(`scene '${s.id}': '${o.path}' movable requires solid`);
+        if (o.controls && o.kind !== "player")
+          errs.push(`scene '${s.id}': '${o.path}' controls require player kind`);
+        if (!spriteIds.has(o.sprite))
+          errs.push(`scene '${s.id}': '${o.path}' unknown sprite '${o.sprite}'`);
+        if (o.anim && !animIds.has(o.anim))
+          errs.push(`scene '${s.id}': '${o.path}' unknown animation '${o.anim}'`);
+        // The emitter draws with the leaf sprite's tile width; an
+        // animation of other-sized frames would tear at the seams.
+        if (o.anim && o.sprite) {
+          const leaf = spriteDims.get(o.sprite);
+          const frames = animDims.get(o.anim);
+          if (leaf && frames && (leaf[0] !== frames[0] || leaf[1] !== frames[1]))
+            errs.push(`scene '${s.id}': '${o.path}' sprite must match animation '${o.anim}' size`);
+        }
+      }
       const paths = new Set(flat.map((o) => o.path));
       for (const c of s.clicks) {
         if (!paths.has(c.object)) errs.push(`scene '${s.id}': click on unknown node '${c.object}'`);

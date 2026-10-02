@@ -1,10 +1,10 @@
 # Engine plan: from scene painter to real engine
 
-Status: **Phase 0 done** (sprite picker, place/snap canvas, named
-inputs, multi-tile sprites). Phases 1+ are still plan only. Each
-phase lists the model change, the emitter change, the UI change, and
-the docs/tests that move with it. Phases are ordered so every one
-ships something usable on its own.
+Status: **Phases 0–1 done** (friction fixes + multi-tile sprites +
+object templates). Phase 2+ is still plan only. Each phase lists
+the model change, the emitter change, the UI change, and the docs/tests
+that move with it. Phases are ordered so every one ships something
+usable on its own.
 
 ## 1. Where we are
 
@@ -198,27 +198,38 @@ everything later needs a picker and named inputs anyway.
   `tools.md` (`create_sprite` w/h), corpus re-synced, chess example
   uses named inputs. Suites: frontend 59, backend 55, `tsc` clean.
 
-### Phase 1 — Object templates (the GameMaker split)
+### Phase 1 — Object templates (the GameMaker split) ✅ DONE
 
-* Model: `ObjectDef[]` library as in §2; `SceneNode.def?` + local
-  overrides (sprite/kind/pos). Inline leaves keep working.
-* Emitter: resolve def → inline at flatten time (overrides win),
-  player-count checked post-resolution.
+* Model: `ObjectDef[]` library as in §2 (incl. default tick — useful
+  already); `SceneNode.def?` + local overrides (sprite/kind/solid/
+  controls/anim/tick; id/x/y always instance state). Inline leaves
+  keep working; `objectDefs` is optional so old projects load
+  untouched, no migration. Deleting a def bakes effective values
+  into instances (non-destructive, game plays identically).
+* Emitter: **no change** — defs resolve in `flattenScene`, so setup,
+  draw, clicks, drive and anims consume effective values untouched.
+  Physics rules, player/driver caps and anim-size matches moved to
+  resolved leaves (paths pinpoint nested leaves).
 * UI:
-  * Left panel gains an **Assets** section (sprites + objects +
-    sounds-as-they-come, search box). New `Object Editor`: sprite
-    picker, kind/flags, default anim — the GameMaker object editor
-    minus physics.
-  * Hierarchy "new object" becomes "place instance of…": pick a def
-    (or inline-blank, today's form). Drag def from Assets → canvas
-    stamps an instance (Alt paints multiples).
-  * Inspector on instance: shows def name + `Open Object` escalation
-    (GameMaker's `Open Editor`), override rows with revert arrows
-    (Godot's affordance), "Extract to new object" for inlines.
+  * Left column: new **AssetBrowser** (search, kind icons, drag to
+    canvas, + templates the gallery sprite) stacked over the
+    hierarchy. Right panel shows **ObjectEditor** when a def is
+    selected (rename with ref updates, sprite/kind/flags/anim/tick,
+    used-by list, two-click delete with bake note).
+  * Hierarchy "new object" gained a template picker (blank form
+    unchanged otherwise). Drag def → canvas stamps a clamped
+    instance (snap-aware). Alt-paint multiples deferred.
+  * Inspector on instances: teal "Instance of" banner + Open Object,
+    effective values everywhere, teal dots on overridden rows, one
+    Reset for all overrides; inline leaves get "Extract to object
+    template". X/Y inputs clamp by effective sprite dims.
 * Agent: `create_object_def`, `place_instance`, `extract_object`
-  tools; old tools keep working on inlines.
-* This phase alone makes the studio feel like an engine: a library
-  you author, scenes you populate.
+  tools; `describe` lists defs; old tools untouched. Corpus mirrors
+  the new tools.
+* Tests: 10 new (resolution incl. explicit-false, def/instance
+  validation, post-resolution caps, emitter passthrough, store
+  add/rename/extract/delete-bake/patch, tool flow). Suites:
+  frontend 69, backend 55, `tsc` clean, production build ok.
 
 ### Phase 2 — Events + blocks (the big one)
 

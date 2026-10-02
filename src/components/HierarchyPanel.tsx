@@ -20,6 +20,7 @@ import {
   addScene,
   deleteNode,
   deleteScene,
+  defSelStore,
   moveNode,
   projectStore,
   readList,
@@ -64,6 +65,7 @@ function NodeRows({ sceneId, parent, depth, lang }: NodeRowsProps) {
   const [newName, setNewName] = useState("");
   const [newKind, setNewKind] = useState<ObjectKind>("static");
   const [newSprite, setNewSprite] = useState<string | null>(null);
+  const [newDef, setNewDef] = useState("");
   const [picking, setPicking] = useState(false);
 
   const ref: ListRef = { sceneId, parent };
@@ -80,6 +82,7 @@ function NodeRows({ sceneId, parent, depth, lang }: NodeRowsProps) {
   function pick(path: string | null) {
     sceneIdStore.set(sceneId);
     selectionStore.set(path);
+    defSelStore.set(null);
   }
 
   function commitCreate() {
@@ -88,20 +91,26 @@ function NodeRows({ sceneId, parent, depth, lang }: NodeRowsProps) {
     let n = 2;
     const base = id;
     while (nodes.some((o) => o.id === id)) id = `${base}_${n++}`;
+    const usingDef = newDef && project.objectDefs?.some((d) => d.id === newDef);
     if (
       addNode(ref, {
         id,
         x: 8,
         y: 8,
-        sprite: chosenSprite,
-        kind: newKind,
-        ...(newKind === "movable" ? { solid: true } : {}),
+        ...(usingDef
+          ? { def: newDef }
+          : {
+              sprite: chosenSprite,
+              kind: newKind,
+              ...(newKind === "movable" ? { solid: true } : {}),
+            }),
       })
     ) {
       pick(pathOf(id));
     }
     setNewName("");
     setNewSprite(null);
+    setNewDef("");
     setCreating(false);
   }
 
@@ -187,6 +196,21 @@ function NodeRows({ sceneId, parent, depth, lang }: NodeRowsProps) {
                 commitCreate();
               }}
             >
+              {(project.objectDefs ?? []).length > 0 && (
+                <select
+                  aria-label={t(lang, "hier.template")}
+                  value={newDef}
+                  onChange={(e) => setNewDef(e.target.value)}
+                  className="select select-sm w-full"
+                >
+                  <option value="">{t(lang, "hier.blank")}</option>
+                  {(project.objectDefs ?? []).map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.id} ({d.kind})
+                    </option>
+                  ))}
+                </select>
+              )}
               <div className="flex items-center gap-1">
                 <input
                   autoFocus
@@ -196,16 +220,18 @@ function NodeRows({ sceneId, parent, depth, lang }: NodeRowsProps) {
                   maxLength={24}
                   className="min-w-0 flex-1 bg-transparent font-mono text-[11px] outline-none placeholder:text-overlay0"
                 />
-                <select
-                  aria-label={t(lang, "hier.kind")}
-                  value={newKind}
-                  onChange={(e) => setNewKind(e.target.value as ObjectKind)}
-                  className="select select-sm"
-                >
-                  <option value="player">{t(lang, "kind.player")}</option>
-                  <option value="static">{t(lang, "kind.static")}</option>
-                  <option value="movable">{t(lang, "kind.movable")}</option>
-                </select>
+                {!newDef && (
+                  <select
+                    aria-label={t(lang, "hier.kind")}
+                    value={newKind}
+                    onChange={(e) => setNewKind(e.target.value as ObjectKind)}
+                    className="select select-sm"
+                  >
+                    <option value="player">{t(lang, "kind.player")}</option>
+                    <option value="static">{t(lang, "kind.static")}</option>
+                    <option value="movable">{t(lang, "kind.movable")}</option>
+                  </select>
+                )}
                 <button
                   type="submit"
                   className="rounded bg-mauve/20 px-1.5 py-0.5 font-mono text-[11px] text-mauve"
@@ -213,25 +239,29 @@ function NodeRows({ sceneId, parent, depth, lang }: NodeRowsProps) {
                   +
                 </button>
               </div>
-              <button
-                type="button"
-                onClick={() => setPicking(true)}
-                title={t(lang, "hier.sprite")}
-                className="flex w-full items-center gap-2 rounded px-1 py-0.5 hover:bg-surface1"
-              >
-                <span className="w-10 shrink-0">
-                  <SpriteThumb id={chosenSprite} dim={40} />
-                </span>
-                <span className="flex-1 truncate text-left font-mono text-[11px] text-subtext0">
-                  {chosenSprite} ·{" "}
-                  {(() => {
-                    const s = project.sprites.find((x) => x.id === chosenSprite);
-                    const [w, h] = s ? spriteTiles(s) : [1, 1];
-                    return `${w}×${h}`;
-                  })()}
-                </span>
-              </button>
-              <SpritePicker open={picking} onPick={setNewSprite} onClose={() => setPicking(false)} />
+              {!newDef && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setPicking(true)}
+                    title={t(lang, "hier.sprite")}
+                    className="flex w-full items-center gap-2 rounded px-1 py-0.5 hover:bg-surface1"
+                  >
+                    <span className="w-10 shrink-0">
+                      <SpriteThumb id={chosenSprite} dim={40} />
+                    </span>
+                    <span className="flex-1 truncate text-left font-mono text-[11px] text-subtext0">
+                      {chosenSprite} ·{" "}
+                      {(() => {
+                        const s = project.sprites.find((x) => x.id === chosenSprite);
+                        const [w, h] = s ? spriteTiles(s) : [1, 1];
+                        return `${w}×${h}`;
+                      })()}
+                    </span>
+                  </button>
+                  <SpritePicker open={picking} onPick={setNewSprite} onClose={() => setPicking(false)} />
+                </>
+              )}
             </form>
           ) : (
             <button

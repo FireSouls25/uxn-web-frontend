@@ -1,8 +1,10 @@
 import { useStore } from "@nanostores/react";
+import AssetBrowser from "./AssetBrowser";
 import ExportPanel from "./ExportPanel";
 import FileList from "./FileList";
 import HierarchyPanel from "./HierarchyPanel";
 import InspectorPanel from "./InspectorPanel";
+import ObjectEditor from "./ObjectEditor";
 import SceneNav from "./SceneNav";
 import SpriteLibrary from "./SpriteLibrary";
 import SpriteTools from "./SpriteTools";
@@ -10,7 +12,7 @@ import TransitionEditor from "./TransitionEditor";
 import VoiceEditor from "./VoiceEditor";
 import VoiceList from "./VoiceList";
 import { t, useLang } from "../lib/i18n";
-import { projectStore, viewStore } from "../lib/store";
+import { defSelStore, projectStore, viewStore } from "../lib/store";
 
 /* Hand-written ETAL has no visual model: sides say so plainly. */
 function CodeNote() {
@@ -44,9 +46,20 @@ export function StudioLeft() {
       </div>
     );
   }
+  if (view === "scene") {
+    return (
+      <div className="flex min-w-0 flex-col gap-3">
+        <div className="pane rounded-xl p-3">
+          <AssetBrowser />
+        </div>
+        <div className="pane rounded-xl p-3">
+          <HierarchyPanel />
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="pane rounded-xl p-3">
-      {view === "scene" && <HierarchyPanel />}
       {view === "sprites" && <SpriteLibrary />}
       {view === "events" && <SceneNav />}
       {view === "sound" && <VoiceList />}
@@ -62,6 +75,7 @@ export function StudioLeft() {
 export function StudioRight() {
   const view = useStore(viewStore);
   const project = useStore(projectStore);
+  const defSel = useStore(defSelStore);
   if (project.kind === "code") {
     return (
       <div className="flex min-w-0 flex-col gap-3">
@@ -78,7 +92,12 @@ export function StudioRight() {
     <div className="flex min-w-0 flex-col gap-3">
       {view !== "code" && (
         <div className="pane rounded-xl p-3">
-          {view === "scene" && <InspectorPanel />}
+          {view === "scene" &&
+            (defSel && (project.objectDefs ?? []).some((d) => d.id === defSel) ? (
+              <ObjectEditor id={defSel} />
+            ) : (
+              <InspectorPanel />
+            ))}
           {view === "sprites" && <SpriteTools />}
           {view === "events" && (project.locked ? <LockedNote /> : <TransitionEditor />)}
           {view === "sound" && <VoiceEditor />}

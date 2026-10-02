@@ -9,14 +9,18 @@
    compiler remains the final arbiter at export. */
 import {
   addBinding,
+  addDef,
+  addInstance,
   addNode,
   addObject,
   addScene,
   addSprite,
   createProject,
   deleteNode,
+  extractObject,
   moveNode,
   openProject,
+  patchDef,
   patchObject,
   projectStore,
   readList,
@@ -30,7 +34,7 @@ import {
   setTheme,
   setVoice,
 } from "../store";
-import { emitProject, validateProject } from "../project";
+import { emitProject, projectDefs, validateProject } from "../project";
 import type { ObjectKind } from "../project";
 
 export interface ToolResult {
@@ -56,6 +60,7 @@ function snapshot(): Record<string, unknown> {
     scene: sceneIdStore.get(),
     scenes: p.scenes.map((s) => s.id),
     sprites: p.sprites.map((s) => s.id),
+    defs: projectDefs(p).map((d) => d.id),
     anims: p.anims.map((a) => a.id),
   };
 }
@@ -113,6 +118,69 @@ export const TOOLS: ToolDef[] = [
     run: () => {
       const id = addScene();
       return { ok: true, message: `scene ${id}`, data: { id } };
+    },
+  },
+  {
+    name: "create_object_def",
+    description:
+      "Create an object template (GameMaker Object: default sprite, kind, flags, animation, tick script). Scenes stamp instances of it; editing the def updates every instance. Kinds: player (at most one per scene, 0 allowed), static, movable (solid + pushable).",
+    params: {
+      name: { type: "string", required: true, description: "Display name, becomes the id when valid" },
+      sprite: { type: "string", description: "Sprite id, default first in the library" },
+      kind: { type: "string", description: "player|static|movable, default static" },
+      anim: { type: "string", description: "Animation id" },
+      tick: { type: "string", description: "Default ETAL tick script" },
+    },
+    run: (args) => {
+      const p = projectStore.get();
+      if (args["sprite"] !== undefined && !p.sprites.some((s) => s.id === args["sprite"]))
+        return { ok: false, message: `unknown sprite ${args["sprite"]}` };
+      const kind = (["player", "static", "movable"].includes(str(args["kind"])) ? str(args["kind"]) : "static") as ObjectKind;
+      const id = addDef(str(args["name"], "object"), str(args["sprite"]) || undefined, kind);
+      if (args["anim"] !== undefined || args["tick"] !== undefined) {
+        const err = patchDef(id, {
+          ...(args["anim"] !== undefined ? { anim: str(args["anim"]) || undefined } : {}),
+          ...(args["tick"] !== undefined ? { tick: str(args["tick"]) || undefined } : {}),
+        });
+        if (err) return { ok: false, message: err };
+      }
+      return { ok: true, message: `object ${id}`, data: { id } };
+    },
+  },
+  {
+    name: "place_instance",
+    description:
+      "Stamp an instance of an object template on a scene (default: current scene). Local fields override the def per instance; position is always instance state.",
+    params: {
+      def: { type: "string", required: true, description: "Object template id" },
+      scene: { type: "string", description: "Scene id, default current" },
+      x: { type: "number", description: "Pixels, default 8" },
+      y: { type: "number", description: "Pixels, default 8" },
+      name: { type: "string", description: "Instance id, default the def id" },
+    },
+    run: (args) => {
+      const id = addInstance(
+        str(args["def"]),
+        num(args["x"], 8),
+        num(args["y"], 8),
+        str(args["name"]),
+        str(args["scene"]) || undefined,
+      );
+      if (!id) return { ok: false, message: `unknown object ${args["def"]}` };
+      return { ok: true, message: `placed ${id}`, data: { id } };
+    },
+  },
+  {
+    name: "extract_object",
+    description:
+      "Convert a top-level inline object into a template + instance pair: effective values become the new def, the leaf keeps id and position. Prefer this over rebuilding shared art by hand.",
+    params: {
+      object: { type: "string", required: true, description: "Top-level object id in current scene" },
+    },
+    run: (args) => {
+      const id = extractObject(str(args["object"]));
+      if (!id) return { ok: false, message: `cannot extract ${args["object"]} (missing, nested, or already an instance)` };
+      return { ok: true, message: `extracted ${id}`, data: { id } };
     },
   },
   {

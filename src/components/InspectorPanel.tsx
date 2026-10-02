@@ -2,12 +2,14 @@ import { useState } from "react";
 import { useStore } from "@nanostores/react";
 import { Box, Gamepad2, Move, Plus, X } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
-import { spriteTiles, type ObjectKind } from "../lib/project";
+import { spritePxOf, spriteTiles, type ObjectKind } from "../lib/project";
 import { keyLabel } from "../lib/keys";
 import {
   addBinding,
   addInput,
   currentScene,
+  defSelStore,
+  extractObject,
   patchObject,
   projectStore,
   removeBinding,
@@ -64,6 +66,30 @@ export default function InspectorPanel() {
   const [renameError, setRenameError] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
 
+  // Def instances edit effective values: the def supplies defaults,
+  // local fields override. Toggles flip the effective value (adding
+  // a local override); Reset clears every local behavior field.
+  const def = obj?.def ? (project.objectDefs ?? []).find((d) => d.id === obj.def) : undefined;
+  const eff = obj
+    ? {
+        sprite: obj.sprite ?? def?.sprite ?? "",
+        kind: obj.kind ?? def?.kind ?? "static",
+        solid: obj.solid ?? def?.solid ?? false,
+        controls: obj.controls ?? def?.controls ?? false,
+        anim: obj.anim ?? def?.anim,
+        tick: obj.tick ?? def?.tick,
+      }
+    : null;
+  const overridden =
+    !!obj &&
+    !!def &&
+    (obj.sprite !== undefined ||
+      obj.kind !== undefined ||
+      obj.solid !== undefined ||
+      obj.controls !== undefined ||
+      obj.anim !== undefined ||
+      obj.tick !== undefined);
+
   function commit(field: "x" | "y", raw: number) {
     if (!obj || Number.isNaN(raw)) return;
     const next = { x: obj.x, y: obj.y, [field]: Math.round(raw) };
@@ -71,8 +97,20 @@ export default function InspectorPanel() {
   }
 
   function toggle(field: "solid" | "controls") {
+    if (!obj || !eff) return;
+    patchObject(obj.id, { [field]: !eff[field] });
+  }
+
+  function resetOverrides() {
     if (!obj) return;
-    patchObject(obj.id, { [field]: !obj[field] });
+    patchObject(obj.id, {
+      sprite: undefined,
+      kind: undefined,
+      solid: undefined,
+      controls: undefined,
+      anim: undefined,
+      tick: undefined,
+    });
   }
 
   function changeKind(kind: ObjectKind) {
@@ -87,12 +125,17 @@ export default function InspectorPanel() {
       onClick={() => toggle(field)}
       className="flex w-full items-center justify-between rounded-lg border border-surface0 px-3 py-2 text-left"
     >
-      <span className="text-[13px]">{label}</span>
+      <span className="text-[13px]">
+        {label}
+        {obj && def && obj[field] !== undefined && (
+          <span className="ml-1 font-mono text-[10px] text-teal">●</span>
+        )}
+      </span>
       <span
-        className={`relative h-5 w-9 rounded-full transition-colors ${obj?.[field] ? "bg-green" : "bg-surface1"}`}
+        className={`relative h-5 w-9 rounded-full transition-colors ${eff?.[field] ? "bg-green" : "bg-surface1"}`}
       >
         <span
-          className={`absolute top-0.5 size-4 rounded-full bg-white transition-all ${obj?.[field] ? "left-[18px]" : "left-0.5"}`}
+          className={`absolute top-0.5 size-4 rounded-full bg-white transition-all ${eff?.[field] ? "left-[18px]" : "left-0.5"}`}
         />
       </span>
     </button>
@@ -135,7 +178,7 @@ export default function InspectorPanel() {
         <fieldset disabled={!!project.locked} className="mt-2 space-y-2">
           <div className="flex items-center gap-1.5 rounded-lg border border-surface0 px-3 py-2">
             {(() => {
-              const Icon = KIND_META[obj.kind ?? "static"].icon;
+              const Icon = KIND_META[eff?.kind ?? "static"].icon;
               return <Icon size={14} className="shrink-0 text-mauve" />;
             })()}
             {rename === null ? (
@@ -169,7 +212,7 @@ export default function InspectorPanel() {
             )}
             <select
               aria-label={t(lang, "hier.kind")}
-              value={obj.kind}
+              value={eff?.kind ?? "static"}
               onChange={(e) => changeKind(e.target.value as ObjectKind)}
               className="select select-sm"
             >
@@ -181,6 +224,36 @@ export default function InspectorPanel() {
             </select>
           </div>
           {renameError && <p className="text-[12px] text-red">{t(lang, "insp.rename_err")}</p>}
+          {def ? (
+            <div className="flex items-center gap-1.5 rounded-lg border border-teal/30 bg-teal/5 px-3 py-2">
+              <span className="flex-1 truncate font-mono text-[11px] text-teal">
+                {t(lang, "insp.instance_of")} {def.id}
+              </span>
+              {overridden && (
+                <button
+                  onClick={resetOverrides}
+                  title={t(lang, "insp.reset_overrides")}
+                  className="rounded-md px-1.5 py-0.5 font-mono text-[11px] text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
+                >
+                  {t(lang, "insp.reset")}
+                </button>
+              )}
+              <button
+                onClick={() => defSelStore.set(def.id)}
+                className="rounded-md bg-teal/15 px-1.5 py-0.5 font-mono text-[11px] text-teal transition-colors hover:bg-teal/25"
+              >
+                {t(lang, "insp.open_object")}
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => extractObject(obj.id)}
+              title={t(lang, "insp.extract_hint")}
+              className="w-full rounded-lg border border-dashed border-surface1 px-3 py-2 text-[13px] text-subtext0 transition-colors hover:border-teal/40 hover:text-text"
+            >
+              {t(lang, "insp.extract")}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setPicking(true)}
@@ -188,16 +261,17 @@ export default function InspectorPanel() {
             className="flex w-full items-center gap-2.5 rounded-lg border border-surface0 px-3 py-2 text-left transition-colors hover:border-mauve/40"
           >
             <span className="w-12 shrink-0">
-              <SpriteThumb id={obj.sprite ?? ""} dim={48} />
+              <SpriteThumb id={eff?.sprite ?? ""} dim={48} />
             </span>
             <span className="min-w-0 flex-1">
               <span className="block font-mono text-[11px] uppercase tracking-widest text-subtext0">
                 {t(lang, "insp.sprite")}
+                {obj.sprite !== undefined && def && <span className="ml-1 text-teal">●</span>}
               </span>
               <span className="block truncate text-[13px] font-medium">
-                {obj.sprite}{" "}
+                {eff?.sprite}{" "}
                 {(() => {
-                  const s = project.sprites.find((x) => x.id === obj.sprite);
+                  const s = project.sprites.find((x) => x.id === eff?.sprite);
                   const [w, h] = s ? spriteTiles(s) : [1, 1];
                   return (
                     <span className="font-mono text-[11px] text-subtext0">
@@ -225,20 +299,25 @@ export default function InspectorPanel() {
                 type="number"
                 value={field === "x" ? obj.x : obj.y}
                 min={0}
-                max={field === "x" ? project.width - 8 : project.height - 8}
+                max={
+                  field === "x"
+                    ? project.width - spritePxOf(project, eff?.sprite ?? "")[0]
+                    : project.height - spritePxOf(project, eff?.sprite ?? "")[1]
+                }
                 onChange={(e) => commit(field, e.target.valueAsNumber)}
                 className="w-20 rounded-md border border-surface1 bg-base px-2 py-1 text-right font-mono text-xs outline-none focus:border-mauve"
               />
             </div>
           ))}
           {toggleRow("solid", t(lang, "insp.solid"))}
-          {obj.kind === "player" && toggleRow("controls", t(lang, "insp.controls"))}
+          {eff?.kind === "player" && toggleRow("controls", t(lang, "insp.controls"))}
           <label className="block">
             <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
               {t(lang, "insp.anim")}
+              {obj.anim !== undefined && def && <span className="ml-1 text-teal">●</span>}
             </span>
             <select
-              value={obj.anim ?? ""}
+              value={eff?.anim ?? ""}
               onChange={(e) => patchObject(obj.id, { anim: e.target.value || undefined })}
               className="select w-full"
             >
@@ -253,9 +332,10 @@ export default function InspectorPanel() {
           <label className="block">
             <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
               {t(lang, "insp.tick")}
+              {obj.tick !== undefined && def && <span className="ml-1 text-teal">●</span>}
             </span>
             <textarea
-              value={obj.tick ?? ""}
+              value={eff?.tick ?? ""}
               onChange={(e) => patchObject(obj.id, { tick: e.target.value || undefined })}
               spellCheck={false}
               rows={3}

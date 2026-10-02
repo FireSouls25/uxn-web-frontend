@@ -8,9 +8,11 @@ import {
   SAMPLE_PROJECT,
   flattenScene,
   migrateProject,
+  projectDefs,
   spritePxOf,
   spriteTiles,
   type FlatLeaf,
+  type ObjectDef,
   type ObjectKind,
   type Project,
   type SceneNode,
@@ -106,6 +108,9 @@ export const projectStore = computed(
 export const sceneIdStore = atom<string>(SAMPLE_PROJECT.start);
 export const selectionStore = atom<string | null>(null);
 export const spriteSelStore = atom<string>("hero");
+/** Selected object template (right panel shows its Object Editor).
+    Mutually exclusive with selectionStore: picking one clears the other. */
+export const defSelStore = atom<string | null>(null);
 export const paintColorStore = atom<number>(1);
 export const paintToolStore = atom<"brush" | "erase">("brush");
 export const voiceSelStore = atom<number>(0);
@@ -359,6 +364,25 @@ export function patchObject(objectId: string, patch: Partial<SceneNode>): void {
   }));
 }
 
+/** Patch a template (unknown sprite/anim/kind refused with a message).
+    Movable implies solid, same as the editors. */
+export function patchDef(defId: string, patch: Partial<ObjectDef>): string | null {
+  const p = projectStore.get();
+  if (patch.sprite !== undefined && !p.sprites.some((s) => s.id === patch.sprite))
+    return `unknown sprite ${patch.sprite}`;
+  if (patch.anim !== undefined && !p.anims.some((a) => a.id === patch.anim))
+    return `unknown animation ${patch.anim}`;
+  if (patch.kind !== undefined && patch.kind !== "player" && patch.kind !== "static" && patch.kind !== "movable")
+    return `bad kind '${(patch as { kind: unknown }).kind}'`;
+  updateCurrent((prev) => ({
+    ...prev,
+    objectDefs: projectDefs(prev).map((d) =>
+      d.id === defId ? { ...d, ...patch, ...(patch.kind === "movable" ? { solid: true } : {}) } : d,
+    ),
+  }));
+  return null;
+}
+
 export function setTile(objectId: string, tile: number[]): void {
   // Legacy 1bpp paint API: upgrades into the shared sprite.
   const p = projectStore.get();
@@ -531,6 +555,131 @@ export function renameObject(oldId: string, newId: string): string | null {
   }));
   if (selectionStore.get() === oldId) selectionStore.set(clean);
   return null;
+}
+
+/* Object templates: the GameMaker Object in our Object ≠ Sprite ≠
+   Instance split. Defs live in their own library; leaves reference
+   them by id and override per field. */
+
+/** Create a template from art + behavior defaults. Selects it for editing. */
+export function addDef(name: string, sprite?: string, kind: ObjectKind = "static"): string {
+  const p = projectStore.get();
+  let base = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24) || "object";
+  if (!/^[A-Za-z]/.test(base)) base = `o_${base}`;
+  let id = base;
+  let n = 2;
+  const defs = projectDefs(p);
+  while (defs.some((d) => d.id === id)) id = `${base}_${n++}`;
+  const spriteId = sprite && p.sprites.some((s) => s.id === sprite) ? sprite : (p.sprites[0]?.id ?? "hero");
+  const def: ObjectDef = { id, sprite: spriteId, kind, ...(kind === "movable" ? { solid: true } : {}) };
+  updateCurrent((prev) => ({ ...prev, objectDefs: [...projectDefs(prev), def] }));
+  defSelStore.set(id);
+  selectionStore.set(null);
+  return id;
+}
+
+/** Rename a template id everywhere it is referenced (instances). */
+export function renameDef(oldId: string, newId: string): string | null {
+  const clean = newId.trim().slice(0, 24);
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(clean)) return "bad id";
+  const p = projectStore.get();
+  if (oldId !== clean && projectDefs(p).some((d) => d.id === clean)) return "duplicate id";
+  updateCurrent((prev) => ({
+    ...prev,
+    objectDefs: projectDefs(prev).map((d) => (d.id === oldId ? { ...d, id: clean } : d)),
+    scenes: prev.scenes.map((s) => ({
+      ...s,
+      nodes: s.nodes.map((o) => (o.def === oldId ? { ...o, def: clean } : o)),
+    })),
+  }));
+  if (defSelStore.get() === oldId) defSelStore.set(clean);
+  return null;
+}
+
+/** Delete a template, baking its effective values into instances so
+    the game plays byte-identically without it (GameMaker deletes
+    placements instead — baking is the non-destructive version). */
+export function deleteDef(defId: string): void {
+  const p = projectStore.get();
+  const def = projectDefs(p).find((d) => d.id === defId);
+  if (!def) return;
+  const bake = (o: SceneNode): SceneNode => {
+    if (o.def !== defId) return o;
+    const { def: _drop, ...rest } = o;
+    void _drop;
+    return {
+      ...rest,
+      sprite: o.sprite ?? def.sprite,
+      kind: o.kind ?? def.kind,
+      solid: o.solid ?? def.solid,
+      controls: o.controls ?? def.controls,
+      anim: o.anim ?? def.anim,
+      tick: o.tick ?? def.tick,
+    };
+  };
+  updateCurrent((prev) => ({
+    ...prev,
+    objectDefs: projectDefs(prev).filter((d) => d.id !== defId),
+    scenes: prev.scenes.map((s) => ({ ...s, nodes: s.nodes.map(bake) })),
+  }));
+  if (defSelStore.get() === defId) defSelStore.set(null);
+}
+
+/** Stamp an instance of a template on a scene (default: current).
+    Returns "" for an unknown def. */
+export function addInstance(defId: string, x = 8, y = 8, name = "", sceneId?: string): string {
+  const p = projectStore.get();
+  const def = projectDefs(p).find((d) => d.id === defId);
+  if (!def) return "";
+  const scene = p.scenes.find((s) => s.id === (sceneId ?? sceneIdStore.get())) ?? currentScene(p, sceneIdStore.get());
+  const clean = name.trim().slice(0, 24);
+  let id = clean && /^[A-Za-z][A-Za-z0-9_]*$/.test(clean) ? clean : defId;
+  let n = 2;
+  const base = id;
+  while (scene.nodes.some((o) => o.id === id)) id = `${base}_${n++}`;
+  const [sw, sh] = spritePxOf(p, def.sprite);
+  const [cx, cy] = clampToCanvas(x, y, p.width, p.height, sw, sh);
+  const ref = { sceneId: scene.id, parent: [] as string[] };
+  if (!addNode(ref, { id, x: cx, y: cy, def: defId })) return "";
+  sceneIdStore.set(scene.id);
+  selectionStore.set(id);
+  defSelStore.set(null);
+  return id;
+}
+
+/** Convert a top-level inline leaf into a template + instance pair.
+    Effective values become the def; the leaf keeps id/x/y and drops
+    the rest (pure overrides from then on). Returns the def id. */
+export function extractObject(objectId: string): string | null {
+  const p = projectStore.get();
+  const scene = currentScene(p, sceneIdStore.get());
+  const node = scene.nodes.find((o) => o.id === objectId);
+  if (!node || node.scene || node.def) return null;
+  const defs = projectDefs(p);
+  let id = node.id;
+  let n = 2;
+  while (defs.some((d) => d.id === id)) id = `${node.id}_${n++}`;
+  const def: ObjectDef = {
+    id,
+    sprite: node.sprite ?? p.sprites[0]?.id ?? "hero",
+    kind: node.kind ?? "static",
+    solid: node.solid,
+    controls: node.controls,
+    anim: node.anim,
+    tick: node.tick,
+  };
+  updateCurrent((prev) => ({
+    ...prev,
+    objectDefs: [...projectDefs(prev), def],
+    scenes: prev.scenes.map((s) =>
+      s.id !== scene.id
+        ? s
+        : { ...s, nodes: s.nodes.map((o) => (o.id === objectId ? { id: o.id, x: o.x, y: o.y, def: id } : o)) },
+    ),
+  }));
+  defSelStore.set(id);
+  selectionStore.set(null);
+  return id;
 }
 
 export function addNode(ref: ListRef, node: SceneNode): boolean {
