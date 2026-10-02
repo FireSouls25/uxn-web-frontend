@@ -121,3 +121,21 @@ npm run build
 Config lives in `.env` (dev defaults, git-ignored; see
 `.env.example`): `PUBLIC_API_URL` points at the backend
 (default `http://localhost:8000`).
+
+## Deploy
+
+Static Astro output, so Vercel needs nothing but a build command and
+one variable — `vercel.json` pins both (`npm run build` → `dist`).
+
+* `PUBLIC_API_URL` is **build-time**: set it per environment in
+  Vercel (Settings → Environment Variables) to the backend's public
+  URL, then redeploy. A `localhost` value ships a site that can only
+  talk to your laptop.
+* The backend must list this site's origin in `CORS_ORIGINS`
+  (including the exact `*.vercel.app` preview domain, or a wildcard
+  for it) or every call fails the preflight.
+* No secrets here: the backend holds the LLM keys and the API keys,
+  and the browser only ever calls `POST /agent/turn`.
+
+Step-by-step, including the Render side, is in
+`../backend/docs/deploy.md`.
