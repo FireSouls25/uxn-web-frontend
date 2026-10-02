@@ -64,13 +64,15 @@ export const TOOLS: ToolDef[] = [
   {
     name: "create_sprite",
     description:
-      "Create an 8x8 sprite in the project library. Pixels are 64 color indices 0-3 (Uxn 2bpp limit); index 0 paints palette 0 (opaque background). Returns the sprite id.",
+      "Create a sprite in the project library (1x1 to 4x4 tiles of 8x8, via the Screen device's per-tile draws). Pixels are 64*w*h color indices 0-3 (Uxn 2bpp limit), tile-major row-major; index 0 paints palette 0 (opaque background). Returns the sprite id.",
     params: {
       name: { type: "string", required: true, description: "Display name, becomes the id when valid" },
-      pixels: { type: "array", description: "64 numbers 0-3, row-major. Omit for a blank tile." },
+      pixels: { type: "array", description: "64*w*h numbers 0-3. Omit for a blank sprite." },
+      w: { type: "number", description: "Tiles wide 1-4, default 1" },
+      h: { type: "number", description: "Tiles tall 1-4, default 1" },
     },
     run: (args) => {
-      const id = addSprite(str(args["name"], "sprite"));
+      const id = addSprite(str(args["name"], "sprite"), num(args["w"], 1), num(args["h"], 1));
       if (Array.isArray(args["pixels"])) {
         setSpritePixels(id, (args["pixels"] as unknown[]).map((v) => num(v)));
       }

@@ -3,7 +3,18 @@
    Persistence is gated on login — guests work purely in memory (see
    SessionBanner), so nothing implies saving that isn't happening. */
 import { atom, computed } from "nanostores";
-import { SAMPLE_PROJECT, flattenScene, migrateProject, type FlatLeaf, type ObjectKind, type Project, type SceneNode } from "./project";
+import {
+  MAX_SPRITE_TILES,
+  SAMPLE_PROJECT,
+  flattenScene,
+  migrateProject,
+  spritePxOf,
+  spriteTiles,
+  type FlatLeaf,
+  type ObjectKind,
+  type Project,
+  type SceneNode,
+} from "./project";
 import { getSession } from "./session";
 
 const STORE_KEY = "uxn.projects.v1";
@@ -171,8 +182,13 @@ function updateCurrent(fn: (p: Project) => Project): void {
 }
 
 /** Clamp a dragged position so the 8px sprite stays on-canvas. */
-export function clampToCanvas(x: number, y: number, w: number, h: number): [number, number] {
-  return [Math.min(Math.max(0, Math.round(x)), Math.max(0, w - 8)), Math.min(Math.max(0, Math.round(y)), Math.max(0, h - 8))];
+/** Clamp a top-left origin so a sw×sh object stays on canvas.
+    Defaults keep the legacy 8px contract (see workflow.test.ts). */
+export function clampToCanvas(x: number, y: number, w: number, h: number, sw = 8, sh = 8): [number, number] {
+  return [
+    Math.min(Math.max(0, Math.round(x)), Math.max(0, w - sw)),
+    Math.min(Math.max(0, Math.round(y)), Math.max(0, h - sh)),
+  ];
 }
 
 /** Flattened leaves of a scene; [] when the chain is broken (mid-edit). */
@@ -253,7 +269,9 @@ export function parentOrigin(p: Project, sceneId: string, parent: string[]): [nu
 }
 
 export function moveObject(project: Project, sceneId: string, objectId: string, x: number, y: number): Project {
-  const [cx, cy] = clampToCanvas(x, y, project.width, project.height);
+  const node = project.scenes.find((s) => s.id === sceneId)?.nodes.find((o) => o.id === objectId);
+  const [sw, sh] = node?.sprite ? spritePxOf(project, node.sprite) : [8, 8];
+  const [cx, cy] = clampToCanvas(x, y, project.width, project.height, sw, sh);
   return {
     ...project,
     scenes: project.scenes.map((s) =>
@@ -306,9 +324,11 @@ export function moveLeafByPath(sceneId: string, path: string, x: number, y: numb
 export function moveInstancePos(ref: ListRef, index: number, absX: number, absY: number): void {
   const p = projectStore.get();
   const [ox, oy] = parentOrigin(p, ref.sceneId, ref.parent);
+  const node = readList(p, ref)[index];
+  const [sw, sh] = node?.sprite ? spritePxOf(p, node.sprite) : [8, 8];
   // Clamp the absolute landing point, then store the parent-relative
   // offset (which may legitimately go negative).
-  const [cx, cy] = clampToCanvas(absX, absY, p.width, p.height);
+  const [cx, cy] = clampToCanvas(absX, absY, p.width, p.height, sw, sh);
   const nx = Math.round(cx - ox);
   const ny = Math.round(cy - oy);
   updateCurrent((prev) => {
@@ -349,24 +369,59 @@ export function setTile(objectId: string, tile: number[]): void {
 }
 
 export function setSpritePixels(spriteId: string, pixels: number[]): void {
-  const clean = pixels.slice(0, 64).map((v) => v & 3);
-  while (clean.length < 64) clean.push(0);
+  const sprite = projectStore.get().sprites.find((s) => s.id === spriteId);
+  const [tw, th] = sprite ? spriteTiles(sprite) : [1, 1];
+  const want = 64 * tw * th;
+  const clean = pixels.slice(0, want).map((v) => v & 3);
+  while (clean.length < want) clean.push(0);
   updateCurrent((prev) => ({
     ...prev,
     sprites: prev.sprites.map((s) => (s.id === spriteId ? { ...s, pixels: clean } : s)),
   }));
 }
 
-export function addSprite(name: string): string {
+export function addSprite(name: string, w = 1, h = 1): string {
   let base = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24) || "sprite";
   if (!/^[A-Za-z]/.test(base)) base = `s_${base}`;
   let id = base;
   let n = 2;
   const p = projectStore.get();
   while (p.sprites.some((s) => s.id === id)) id = `${base}_${n++}`;
-  updateCurrent((prev) => ({ ...prev, sprites: [...prev.sprites, { id, pixels: Array(64).fill(0) }] }));
+  const tw = Number.isInteger(w) && w >= 1 && w <= MAX_SPRITE_TILES ? w : 1;
+  const th = Number.isInteger(h) && h >= 1 && h <= MAX_SPRITE_TILES ? h : 1;
+  updateCurrent((prev) => ({
+    ...prev,
+    sprites: [...prev.sprites, { id, w: tw, h: th, pixels: Array(64 * tw * th).fill(0) }],
+  }));
   spriteSelStore.set(id);
   return id;
+}
+
+/** Resize a sprite, preserving the top-left overlap and clearing new
+    tiles. Objects using it re-clamp on next move; the emitter reads
+    live dims, so nothing else must change. */
+export function setSpriteSize(spriteId: string, w: number, h: number): void {
+  const tw = Math.min(MAX_SPRITE_TILES, Math.max(1, Math.round(w) || 1));
+  const th = Math.min(MAX_SPRITE_TILES, Math.max(1, Math.round(h) || 1));
+  updateCurrent((prev) => ({
+    ...prev,
+    sprites: prev.sprites.map((s) => {
+      if (s.id !== spriteId) return s;
+      const [ow, oh] = spriteTiles(s);
+      if (ow === tw && oh === th) return s;
+      const next: number[] = [];
+      for (let ty = 0; ty < th; ty++) {
+        for (let tx = 0; tx < tw; tx++) {
+          for (let r = 0; r < 8; r++) {
+            for (let c = 0; c < 8; c++) {
+              next.push(tx < ow && ty < oh ? (s.pixels[(tx + ty * ow) * 64 + r * 8 + c] ?? 0) : 0);
+            }
+          }
+        }
+      }
+      return { ...s, w: tw, h: th, pixels: next };
+    }),
+  }));
 }
 
 export function addAnimation(spriteIds: string[]): string {
@@ -418,7 +473,7 @@ export function deleteScene(id: string): void {
   }
 }
 
-export function addObject(kind: ObjectKind = "static", name = "", sprite?: string): string {
+export function addObject(kind: ObjectKind = "static", name = "", sprite?: string, x?: number, y?: number): string {
   const p = projectStore.get();
   const scene = currentScene(p, sceneIdStore.get());
   const clean = name.trim().slice(0, 24);
@@ -426,12 +481,17 @@ export function addObject(kind: ObjectKind = "static", name = "", sprite?: strin
   let n = 2;
   const base = id;
   while (scene.nodes.some((o) => o.id === id)) id = `${base}_${n++}`;
-  const [cx, cy] = clampToCanvas(8 + scene.nodes.length * 12, 8, p.width, p.height);
+  const spriteId = sprite ?? p.sprites[0]?.id ?? "hero";
+  const [sw, sh] = spritePxOf(p, spriteId);
+  const [cx, cy] =
+    x === undefined || y === undefined
+      ? clampToCanvas(8 + scene.nodes.length * 12, 8, p.width, p.height, sw, sh)
+      : clampToCanvas(x, y, p.width, p.height, sw, sh);
   const obj: SceneNode = {
     id,
     x: cx,
     y: cy,
-    sprite: sprite ?? p.sprites[0]?.id ?? "hero",
+    sprite: spriteId,
     kind,
     ...(kind === "player" ? { controls: true } : {}),
     ...(kind === "movable" ? { solid: true } : {}),
@@ -573,11 +633,29 @@ export function resizeProject(w: number, h: number): void {
     scenes: prev.scenes.map((s) => ({
       ...s,
       nodes: s.nodes.map((o) => {
-        const [cx, cy] = clampToCanvas(o.x, o.y, w, h);
+        const [sw, sh] = o.sprite ? spritePxOf(prev, o.sprite) : [8, 8];
+        const [cx, cy] = clampToCanvas(o.x, o.y, w, h, sw, sh);
         return { ...o, x: cx, y: cy };
       }),
     })),
   }));
+}
+
+/** Find-or-create a named input for a key code (shared per code),
+    so the press-a-key picker never duplicates `key_32` five times. */
+export function addInput(key: number, name = ""): string {
+  const code = Math.min(255, Math.max(0, Math.round(key) || 0));
+  const p = projectStore.get();
+  const inputs = p.inputs ?? [];
+  const shared = inputs.find((i) => i.key === code && i.id.startsWith("key_"));
+  if (shared) return shared.id;
+  let base = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24);
+  if (!/^[A-Za-z]/.test(base)) base = `key_${code}`;
+  let id = base;
+  let n = 2;
+  while (inputs.some((i) => i.id === id)) id = `${base}_${n++}`;
+  updateCurrent((prev) => ({ ...prev, inputs: [...(prev.inputs ?? []), { id, key: code }] }));
+  return id;
 }
 
 export function addBinding(
@@ -585,6 +663,7 @@ export function addBinding(
   objectId: string | null,
   goto: string,
   key?: number,
+  inputId?: string,
 ): void {
   const p = projectStore.get();
   const scene = currentScene(p, sceneIdStore.get());
@@ -593,7 +672,8 @@ export function addBinding(
     scenes: prev.scenes.map((s) => {
       if (s.id !== scene.id) return s;
       if (kind === "click" && objectId) return { ...s, clicks: [...s.clicks, { object: objectId, goto }] };
-      return { ...s, keys: [...s.keys, { key: key ?? 32, goto }] };
+      const code = key ?? (prev.inputs ?? []).find((i) => i.id === inputId)?.key ?? 32;
+      return { ...s, keys: [...s.keys, { input: inputId, key: code, goto }] };
     }),
   }));
 }

@@ -2,9 +2,11 @@ import { useState } from "react";
 import { useStore } from "@nanostores/react";
 import { Box, Gamepad2, Move, Plus, X } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
-import type { ObjectKind } from "../lib/project";
+import { spriteTiles, type ObjectKind } from "../lib/project";
+import { keyLabel } from "../lib/keys";
 import {
   addBinding,
+  addInput,
   currentScene,
   patchObject,
   projectStore,
@@ -14,6 +16,8 @@ import {
   selectionStore,
   setObjectPos,
 } from "../lib/store";
+import KeyPicker from "./KeyPicker";
+import SpritePicker, { SpriteThumb } from "./SpritePicker";
 
 const KIND_META: Record<ObjectKind, { icon: typeof Box; key: string }> = {
   player: { icon: Gamepad2, key: "kind.player" },
@@ -32,7 +36,7 @@ export default function InspectorPanel() {
   const selection = useStore(selectionStore);
   const [newKind, setNewKind] = useState<"click" | "key">("click");
   const [newGoto, setNewGoto] = useState(project.scenes[0]?.id ?? "");
-  const [newKey, setNewKey] = useState(32);
+  const [newInput, setNewInput] = useState("");
 
   const scene = currentScene(project, sceneId);
   const segs = (selection ?? "").split("/").filter(Boolean);
@@ -58,6 +62,7 @@ export default function InspectorPanel() {
   const keyIdx = scene.keys.map((k, i) => ({ k, i }));
   const [rename, setRename] = useState<string | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
 
   function commit(field: "x" | "y", raw: number) {
     if (!obj || Number.isNaN(raw)) return;
@@ -176,6 +181,38 @@ export default function InspectorPanel() {
             </select>
           </div>
           {renameError && <p className="text-[12px] text-red">{t(lang, "insp.rename_err")}</p>}
+          <button
+            type="button"
+            onClick={() => setPicking(true)}
+            title={t(lang, "insp.change_sprite")}
+            className="flex w-full items-center gap-2.5 rounded-lg border border-surface0 px-3 py-2 text-left transition-colors hover:border-mauve/40"
+          >
+            <span className="w-12 shrink-0">
+              <SpriteThumb id={obj.sprite ?? ""} dim={48} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block font-mono text-[11px] uppercase tracking-widest text-subtext0">
+                {t(lang, "insp.sprite")}
+              </span>
+              <span className="block truncate text-[13px] font-medium">
+                {obj.sprite}{" "}
+                {(() => {
+                  const s = project.sprites.find((x) => x.id === obj.sprite);
+                  const [w, h] = s ? spriteTiles(s) : [1, 1];
+                  return (
+                    <span className="font-mono text-[11px] text-subtext0">
+                      · {w}×{h}
+                    </span>
+                  );
+                })()}
+              </span>
+            </span>
+          </button>
+          <SpritePicker
+            open={picking}
+            onPick={(id) => patchObject(obj.id, { sprite: id })}
+            onClose={() => setPicking(false)}
+          />
           {(["x", "y"] as const).map((field) => (
             <div
               key={field}
@@ -250,7 +287,9 @@ export default function InspectorPanel() {
               ))}
               {keyIdx.map(({ k, i }) => (
                 <div key={`k${i}`} className="flex items-center gap-2 font-mono text-[11px]">
-                  <span className="text-sky">{t(lang, "events.key")} {k.key}</span>
+                  <span className="text-sky">
+                    {t(lang, "events.key")} {k.input ?? keyLabel(k.key, (kk) => t(lang, kk))}
+                  </span>
                   <span className="text-mauve">→ {k.goto}</span>
                   <button
                     onClick={() => removeBinding("key", i)}
@@ -272,17 +311,7 @@ export default function InspectorPanel() {
                 <option value="click">{t(lang, "events.click")}</option>
                 <option value="key">{t(lang, "events.key")}</option>
               </select>
-              {newKind === "key" && (
-                <input
-                  type="number"
-                  aria-label={t(lang, "events.key")}
-                  value={newKey}
-                  min={0}
-                  max={255}
-                  onChange={(e) => setNewKey(Math.min(255, Math.max(0, Math.round(e.target.valueAsNumber || 0))))}
-                  className="w-14 rounded-md border border-surface1 bg-base px-1.5 py-1 font-mono text-[11px] outline-none"
-                />
-              )}
+              {newKind === "key" && <KeyPicker value={newInput} onChange={setNewInput} />}
               <select
                 aria-label={t(lang, "insp.goto")}
                 value={newGoto}
@@ -298,7 +327,8 @@ export default function InspectorPanel() {
               <button
                 onClick={() => {
                   if (newKind === "click" && obj) addBinding("click", obj.id, newGoto);
-                  else if (newKind === "key") addBinding("key", null, newGoto, newKey);
+                  else if (newKind === "key")
+                    addBinding("key", null, newGoto, undefined, newInput || project.inputs[0]?.id || addInput(32));
                 }}
                 className="inline-flex items-center gap-1 rounded-md bg-surface0 px-2 py-1 font-mono text-[11px] transition-colors hover:bg-surface1"
               >

@@ -2,18 +2,59 @@
    A low-code project (scenes of 8px objects + click/key bindings that
    switch scenes, physics flags, sprite-library animations, boot jingle)
    lowers to dependency-free ETAL: two files, no imports beyond siblings,
-   only constructs the backend compiler accepts. Sprites are 8×8 2bpp
-   (16 planar bytes, channel one then channel two — the .chr layout),
-   blitted with mode 129 (2bpp, blend-1 identity: all four palette
-   colors addressable, opaque). Deterministic by construction: sorted
-   ids, fixed 16-slot pool, literal everything. */
+   only constructs the backend compiler accepts. Sprites are 1×1 to
+   4×4 tiles of 8×8 2bpp (16 planar bytes per tile, channel one then
+   channel two — the .chr layout), drawn tile by tile with mode 129
+   (2bpp, blend-1 identity: all four palette colors addressable,
+   opaque). Deterministic by construction: sorted ids, fixed slot
+   pool, literal everything. */
 
 import { pixelsToPlanar, monoToPixels, THEME_R, THEME_G, THEME_B } from "./palette";
 
+/** One sprite → ROM blob: each 8×8 tile becomes 16 planar bytes
+    (channel one, then two), tiles concatenated in row-major order so
+    tile (tx + ty*w) starts at blob offset (tx + ty*w)*16 — the layout
+    the per-scene draw fns assume for addr arithmetic. */
+export function spriteToPlanar(s: Sprite): number[] {
+  const [w, h] = spriteTiles(s);
+  const out: number[] = [];
+  for (let t = 0; t < w * h; t++) out.push(...pixelsToPlanar(s.pixels.slice(t * 64, (t + 1) * 64)));
+  return out;
+}
+
+export const TILE_PX = 8;
+/** Max sprite extent per axis, in tiles (32px). The Screen device
+    draws 8×8 tiles; bigger sprites are consecutive tiles (see
+    spriteToPlanar + per-scene draw fns). Beyond 4×4 the ROM and
+    per-frame port writes stop being worth it on Uxn screens. */
+export const MAX_SPRITE_TILES = 4;
+
 export interface Sprite {
   id: string;
-  /** 64 color indices 0–3, row-major. */
+  /** Width/height in 8px tiles. Absent = 1×1 (every pre-size project). */
+  w?: number;
+  h?: number;
+  /** 64*w*h color indices 0–3, row-major; tile (tx + ty*w) lives at
+      offset (tx + ty*w)*64, matching blob order for auto-addr draws. */
   pixels: number[];
+}
+
+/** Sprite dimensions in tiles, legacy-safe. */
+export function spriteTiles(s: Sprite): [number, number] {
+  return [s.w ?? 1, s.h ?? 1];
+}
+
+/** Sprite dimensions in pixels. */
+export function spritePx(s: Sprite): [number, number] {
+  const [w, h] = spriteTiles(s);
+  return [w * TILE_PX, h * TILE_PX];
+}
+
+/** Pixel dims for a sprite id; unknown id → 8×8 so mid-edit states
+    (deleted sprite, typing id) still render instead of crashing. */
+export function spritePxOf(p: Project, id: string): [number, number] {
+  const s = p.sprites.find((x) => x.id === id);
+  return s ? spritePx(s) : [TILE_PX, TILE_PX];
 }
 
 export interface Animation {
@@ -32,10 +73,27 @@ export interface ClickBinding {
   goto: string;
 }
 
+/** A named keyboard input: the GameMaker key-picker / Godot input-map
+    equivalent. Bindings reference the id; the emitter resolves it to
+    the raw Controller.key code, so renaming never breaks wiring. */
+export interface NamedInput {
+  id: string;
+  /** Raw key code (32 = space, 27 = escape). */
+  key: number;
+}
+
 export interface KeyBinding {
+  /** Named input id (preferred). Absent = legacy raw code below. */
+  input?: string;
   /** Controller.key code (32 = space, 27 = escape). */
   key: number;
   goto: string;
+}
+
+/** Effective key code for a binding: named input wins, legacy raw
+    code is the fallback. Unknown input id → raw code (validated). */
+export function bindingKey(p: Project, k: KeyBinding): number {
+  return (p.inputs ?? []).find((i) => i.id === k.input)?.key ?? k.key;
 }
 
 export interface SceneNode {
@@ -128,7 +186,9 @@ export interface Project {
   theme?: { r: number; g: number; b: number };
   start: string;
   scenes: Scene[];
-  /** Shared 8×8 2bpp sprite library. */
+  /** Named keyboard inputs (Phase 0: press-a-key picker + migration). */
+  inputs: NamedInput[];
+  /** Shared sprite library (1×1 up to 4×4 tiles of 8×8 2bpp). */
   sprites: Sprite[];
   /** Frame collections over sprite ids. */
   anims: Animation[];
@@ -215,6 +275,8 @@ export function migrateProject(raw: Record<string, unknown>): Project {
       }
       return s;
     });
+    const modernScenes = (base["scenes"] ?? []) as Scene[];
+    base["inputs"] = migrateInputs(modernScenes, base["inputs"]);
     return base as unknown as Project;
   }
   const sprites: Sprite[] = [];
@@ -254,11 +316,40 @@ export function migrateProject(raw: Record<string, unknown>): Project {
     height: typeof p["height"] === "number" ? (p["height"] as number) : 128,
     start: typeof p["start"] === "string" ? (p["start"] as string) : (scenes[0]?.id ?? "main"),
     scenes,
+    inputs: migrateInputs(scenes, p["inputs"]),
     sprites,
     anims: [],
     sound: (p["sound"] as Project["sound"]) ?? { voices: [] },
     updatedAt: 0,
   };
+}
+
+/** Phase 0 migration: every raw-code key binding gets a named input
+    (`key_<code>`, shared per code), so the UI can store input ids
+    while old projects keep byte-identical behavior. Deterministic:
+    scenes in order, codes in encounter order. */
+function migrateInputs(scenes: Scene[], existing: unknown): NamedInput[] {
+  const inputs: NamedInput[] = Array.isArray(existing)
+    ? (existing as NamedInput[]).filter((i) => i && typeof i.id === "string" && Number.isInteger(i.key))
+    : [];
+  const byKey = new Map<number, NamedInput>();
+  for (const i of inputs) if (!byKey.has(i.key)) byKey.set(i.key, i);
+  for (const s of scenes) {
+    for (const k of s.keys ?? []) {
+      if (k.input) continue;
+      let found = byKey.get(k.key);
+      if (!found) {
+        const id = `key_${k.key}`;
+        found = inputs.some((i) => i.id === id)
+          ? { id: `${id}_${inputs.length}`, key: k.key }
+          : { id, key: k.key };
+        inputs.push(found);
+        byKey.set(k.key, found);
+      }
+      k.input = found.id;
+    }
+  }
+  return inputs;
 }
 
 function u16(n: number): boolean {
@@ -291,19 +382,45 @@ export function validateProject(p: Project): string[] {
   const sceneIds = new Set(p.scenes.map((s) => s.id));
   const spriteIds = new Set(p.sprites.map((s) => s.id));
   if (spriteIds.size !== p.sprites.length) errs.push("duplicate sprite id");
+  const spriteDims = new Map<string, [number, number]>();
   for (const s of p.sprites) {
     if (!IDENT.test(s.id)) errs.push(`bad sprite id '${s.id}'`);
-    if (s.pixels.length !== 64 || s.pixels.some((v) => v !== 0 && v !== 1 && v !== 2 && v !== 3))
-      errs.push(`sprite '${s.id}': needs 64 pixels of 0–3`);
+    const w = s.w ?? 1;
+    const h = s.h ?? 1;
+    if (!Number.isInteger(w) || w < 1 || w > MAX_SPRITE_TILES)
+      errs.push(`sprite '${s.id}': width must be 1–${MAX_SPRITE_TILES} tiles`);
+    if (!Number.isInteger(h) || h < 1 || h > MAX_SPRITE_TILES)
+      errs.push(`sprite '${s.id}': height must be 1–${MAX_SPRITE_TILES} tiles`);
+    spriteDims.set(s.id, [w, h]);
+    if (s.pixels.length !== 64 * w * h || s.pixels.some((v) => v !== 0 && v !== 1 && v !== 2 && v !== 3))
+      errs.push(`sprite '${s.id}': needs ${64 * w * h} pixels of 0–3`);
+  }
+  const inputIds = new Set((p.inputs ?? []).map((i) => i.id));
+  if (inputIds.size !== (p.inputs ?? []).length) errs.push("duplicate input id");
+  for (const i of p.inputs ?? []) {
+    if (!IDENT.test(i.id)) errs.push(`bad input id '${i.id}'`);
+    if (!Number.isInteger(i.key) || i.key < 0 || i.key > 255) errs.push(`input '${i.id}': key must be 0–255`);
   }
   const animIds = new Set(p.anims.map((a) => a.id));
   if (animIds.size !== p.anims.length) errs.push("duplicate animation id");
+  const animDims = new Map<string, [number, number]>();
   for (const a of p.anims) {
     if (!IDENT.test(a.id)) errs.push(`bad animation id '${a.id}'`);
     if (a.frames.length === 0 || a.frames.length > 16) errs.push(`animation '${a.id}': 1–16 frames`);
     for (const f of a.frames) if (!spriteIds.has(f)) errs.push(`animation '${a.id}': unknown sprite '${f}'`);
     if (!Number.isInteger(a.rate) || a.rate < 1 || a.rate > 255)
       errs.push(`animation '${a.id}': rate must be 1–255`);
+    // Frames swap the whole sprite address at runtime, so mixed-size
+    // frames would shear: every frame shares the first frame's tiles.
+    const first = spriteDims.get(a.frames[0] ?? "");
+    if (first) {
+      animDims.set(a.id, first);
+      for (const f of a.frames.slice(1)) {
+        const d = spriteDims.get(f);
+        if (d && (d[0] !== first[0] || d[1] !== first[1]))
+          errs.push(`animation '${a.id}': frame '${f}' must match ${first[0]}×${first[1]} tiles`);
+      }
+    }
   }
   if (sceneIds.size !== p.scenes.length) errs.push("duplicate scene id");
   if (!sceneIds.has(p.start)) errs.push(`start scene '${p.start}' missing`);
@@ -332,6 +449,14 @@ export function validateProject(p: Project): string[] {
       if (!isBranch) {
         if (!spriteIds.has(o.sprite as string)) errs.push(`node '${o.id}': unknown sprite '${o.sprite}'`);
         if (o.anim && !animIds.has(o.anim)) errs.push(`node '${o.id}': unknown animation '${o.anim}'`);
+        // The emitter draws with the leaf sprite's tile width; an
+        // animation of other-sized frames would tear at the seams.
+        if (o.anim && o.sprite) {
+          const leaf = spriteDims.get(o.sprite as string);
+          const frames = animDims.get(o.anim);
+          if (leaf && frames && (leaf[0] !== frames[0] || leaf[1] !== frames[1]))
+            errs.push(`node '${o.id}': sprite must match animation '${o.anim}' size`);
+        }
       }
       if (o.tick) errs.push(...validateCustomCode(o.tick).map((e) => `node '${o.id}' tick: ${e}`));
       if (o.kind !== undefined && o.kind !== "player" && o.kind !== "static" && o.kind !== "movable")
@@ -357,6 +482,8 @@ export function validateProject(p: Project): string[] {
     for (const k of s.keys) {
       if (!Number.isInteger(k.key) || k.key < 0 || k.key > 255)
         errs.push(`scene '${s.id}': key must be 0–255`);
+      if (k.input !== undefined && !inputIds.has(k.input))
+        errs.push(`scene '${s.id}': key binding on unknown input '${k.input}'`);
       if (!sceneIds.has(k.goto)) errs.push(`scene '${s.id}': key goto unknown scene '${k.goto}'`);
     }
     if (s.frameCode) errs.push(...validateCustomCode(s.frameCode).map((e) => `scene '${s.id}' code: ${e}`));
@@ -449,13 +576,49 @@ function slotTag(rootId: string, path: string): string {
   return `${rootId}_${path.replace(/\//g, "_")}`;
 }
 
-function emitSetup(rootId: string, leaves: FlatLeaf[]): string {
+function emitSetup(rootId: string, leaves: FlatLeaf[], dims: Map<string, [number, number]>, withDims: boolean): string {
   const lines = [`setup_${rootId} :: fn() {`];
   for (let i = 0; i < leaves.length; i++) {
     const o = leaves[i];
-    lines.push(`    ox[${i}] = ${o.x}; oy[${i}] = ${o.y}; ot[${i}] = &spr_${o.sprite}; oflags[${i}] = ${flagsOf(o)};`);
+    let line = `    ox[${i}] = ${o.x}; oy[${i}] = ${o.y}; ot[${i}] = &spr_${o.sprite}; oflags[${i}] = ${flagsOf(o)};`;
+    // Dims ride along only where collision can read them (solid or
+    // driven slots — the drive loop guards every read with the solid
+    // flag, and the driver's own dims are literals). Besides saving
+    // ROM, this keeps setup fns far under the assembler's
+    // per-function reference budget (measured: 1200 OK, 1400 fails).
+    if (withDims && (o.solid || o.kind === "movable" || o.controls)) {
+      const [pw, ph] = dims.get(o.sprite) ?? [TILE_PX, TILE_PX];
+      line += ` ow[${i}] = ${pw}; oh[${i}] = ${ph};`;
+    }
+    lines.push(line);
   }
   lines.push(`    ocount = ${leaves.length};`);
+  lines.push(`}`);
+  return lines.join("\n") + "\n";
+}
+
+/** Per-scene draw: one straight-line tile write per 8×8 tile
+    (Screen.sprite = 129 each), row-major, tile (tx, ty) at
+    addr + (ty*w + tx)*16. Literals everywhere — no new ETAL
+    features, no auto-port dependency, identical bytes for 1×1
+    sprites. Animation frames share the leaf's tile width
+    (validated), so ot swaps stay aligned.
+    dims maps sprite id → [tiles wide, tiles tall] (NOT pixels). */
+function emitDrawScene(s: Scene, leaves: FlatLeaf[], dims: Map<string, [number, number]>): string {
+  const lines = [`draw_${s.id} :: fn() {`];
+  leaves.forEach((o, i) => {
+    const [tw, th] = dims.get(o.sprite) ?? [1, 1];
+    const px = (v: number): string => (v === 0 ? "" : ` + ${v}`);
+    for (let ty = 0; ty < th; ty++) {
+      for (let tx = 0; tx < tw; tx++) {
+        const off = (ty * tw + tx) * 16;
+        lines.push(`    Screen.x = ox[${i}]${px(tx * TILE_PX)};`);
+        lines.push(`    Screen.y = oy[${i}]${px(ty * TILE_PX)};`);
+        lines.push(`    Screen.addr = ot[${i}]${px(off)};`);
+        lines.push(`    Screen.sprite = 129;`);
+      }
+    }
+  });
   lines.push(`}`);
   return lines.join("\n") + "\n";
 }
@@ -492,34 +655,36 @@ function emitAnim(rootId: string, leaves: FlatLeaf[], anims: Map<string, Animati
   return lines;
 }
 
-function emitDrive(pi: number, w: number, h: number, n: number): string[] {
-  // Keyboard drive + collide-and-push for the player slot.
+function emitDrive(pi: number, w: number, h: number, n: number, pw: number, ph: number): string[] {
+  // Keyboard drive + collide-and-push for the player slot. The
+  // player's own bounds are literals (static slot); pushed objects
+  // read their pixel dims from ow/oh (dynamic slot).
   const lines = [
     `    dpad: u8 = Controller.button;`,
     `    nx: u16 = ox[${pi}]; ny: u16 = oy[${pi}];`,
     `    if dpad & 64 != 0 { if nx >= 1 { nx = nx - 1; } }`,
-    `    if dpad & 128 != 0 { if nx < ${w - 8} { nx = nx + 1; } }`,
+    `    if dpad & 128 != 0 { if nx < ${Math.max(1, w - pw)} { nx = nx + 1; } }`,
     `    if dpad & 16 != 0 { if ny >= 1 { ny = ny - 1; } }`,
-    `    if dpad & 32 != 0 { if ny < ${h - 8} { ny = ny + 1; } }`,
+    `    if dpad & 32 != 0 { if ny < ${Math.max(1, h - ph)} { ny = ny + 1; } }`,
     `    ox_old: u16 = ox[${pi}]; oy_old: u16 = oy[${pi}];`,
     `    ox[${pi}] = nx; oy[${pi}] = ny;`,
     `    blocked: u8 = 0;`,
     `    for j in 0..${n} {`,
     `        if j != ${pi} {`,
     `            if oflags[j] & 2 != 0 {`,
-    `                if overlap88(ox[${pi}], oy[${pi}], ox[j], oy[j]) {`,
+    `                if overlapwh(ox[${pi}], oy[${pi}], ${pw}, ${ph}, ox[j], oy[j], ow[j], oh[j]) {`,
     `                    if oflags[j] & 4 != 0 {`,
     `                        jx: u16 = ox[j]; jy: u16 = oy[j];`,
     `                        if dpad & 64 != 0 { if jx >= 1 { jx = jx - 1; } }`,
-    `                        if dpad & 128 != 0 { if jx < ${w - 8} { jx = jx + 1; } }`,
+    `                        if dpad & 128 != 0 { if jx + ow[j] < ${w + 1} { jx = jx + 1; } }`,
     `                        if dpad & 16 != 0 { if jy >= 1 { jy = jy - 1; } }`,
-    `                        if dpad & 32 != 0 { if jy < ${h - 8} { jy = jy + 1; } }`,
+    `                        if dpad & 32 != 0 { if jy + oh[j] < ${h + 1} { jy = jy + 1; } }`,
     `                        free: u8 = 1;`,
     `                        for k in 0..${n} {`,
     `                            if k != ${pi} {`,
     `                                if k != j {`,
     `                                    if oflags[k] & 2 != 0 {`,
-    `                                        if overlap88(jx, jy, ox[k], oy[k]) { free = 0; }`,
+    `                                        if overlapwh(jx, jy, ow[j], oh[j], ox[k], oy[k], ow[k], oh[k]) { free = 0; }`,
     `                                    }`,
     `                                }`,
     `                            }`,
@@ -535,7 +700,16 @@ function emitDrive(pi: number, w: number, h: number, n: number): string[] {
   return lines;
 }
 
-function emitFrame(s: Scene, leaves: FlatLeaf[], w: number, h: number, anims: Map<string, Animation>, frameHook: boolean): string {
+function emitFrame(
+  s: Scene,
+  leaves: FlatLeaf[],
+  w: number,
+  h: number,
+  anims: Map<string, Animation>,
+  frameHook: boolean,
+  p: Project,
+  dims: Map<string, [number, number]>,
+): string {
   const lines = [`${s.id}_frame :: fn() {`];
   if (s.keys.length > 0) lines.push(`    k: u8 = kb[0]; kb[0] = 0;`);
   if (s.clicks.length > 0) {
@@ -546,7 +720,10 @@ function emitFrame(s: Scene, leaves: FlatLeaf[], w: number, h: number, anims: Ma
     lines.push(`    my: u16 = Mouse.y;`);
   }
   const driver = leaves.findIndex((o) => o.controls);
-  if (driver >= 0) lines.push(...emitDrive(driver, w, h, leaves.length));
+  if (driver >= 0) {
+    const [pw, ph] = dims.get(leaves[driver].sprite) ?? [TILE_PX, TILE_PX];
+    lines.push(...emitDrive(driver, w, h, leaves.length, pw, ph));
+  }
   lines.push(...emitAnim(s.id, leaves, anims));
   const byObject = new Map<string, number>();
   leaves.forEach((o, i) => {
@@ -555,15 +732,16 @@ function emitFrame(s: Scene, leaves: FlatLeaf[], w: number, h: number, anims: Ma
   });
   for (const c of [...s.clicks].sort((a, b) => (a.object < b.object ? -1 : 1))) {
     const i = byObject.get(c.object) as number;
+    const [cw, ch] = dims.get(leaves[i].sprite) ?? [TILE_PX, TILE_PX];
     lines.push(`    if mpressed & 1 != 0 {`);
-    lines.push(`        if pt_in_rect(mx, my, ox[${i}], oy[${i}], 8, 8) {`);
+    lines.push(`        if pt_in_rect(mx, my, ox[${i}], oy[${i}], ${cw}, ${ch}) {`);
     lines.push(`            setup_${c.goto}();`);
     lines.push(`            scene_go(SC_${c.goto.toUpperCase()});`);
     lines.push(`        }`);
     lines.push(`    }`);
   }
-  for (const k of [...s.keys].sort((a, b) => a.key - b.key)) {
-    lines.push(`    if k == ${k.key} {`);
+  for (const k of [...s.keys].sort((a, b) => bindingKey(p, a) - bindingKey(p, b))) {
+    lines.push(`    if k == ${bindingKey(p, k)} {`);
     lines.push(`        setup_${k.goto}();`);
     lines.push(`        scene_go(SC_${k.goto.toUpperCase()});`);
     lines.push(`    }`);
@@ -576,7 +754,8 @@ function emitFrame(s: Scene, leaves: FlatLeaf[], w: number, h: number, anims: Ma
     lines.push(`    ( --- scene script: ${s.id} --- )`);
     for (const line of s.frameCode.split("\n")) lines.push(`    ${line}`);
   }
-  lines.push(`    draw_all();`);
+  // Empty scenes have no draw fn: the shared loop draws zero slots.
+  lines.push(leaves.length > 0 ? `    draw_${s.id}();` : `    draw_all();`);
   lines.push(`}`);
   return lines.join("\n") + "\n";
 }
@@ -617,16 +796,35 @@ export function emitProject(p: Project): Record<string, string> {
   }
   for (const o of [...p.sprites].sort((a, b) => (a.id < b.id ? -1 : 1))) {
     if (!usedSprites.has(o.id)) continue;
-    out.push(`data spr_${o.id} = [${pixelsToPlanar(o.pixels).join(", ")}];`);
+    out.push(`data spr_${o.id} = [${spriteToPlanar(o).join(", ")}];`);
   }
   if (usedVoices(p).length > 0) {
     out.push(`data sq32 = [${SQ32.join(", ")}];`);
   }
   out.push(``);
+  // Flattened once up front: setup/draw/frame all read it, and the
+  // dims decision below needs every leaf's driver flag.
+  const flat = new Map(p.scenes.map((s) => [s.id, flattenScene(p, s.id)] as const));
+  // Dims buffers exist only when something reads them (a keyboard
+  // driver, or custom code naming them): unreferenced globals warn,
+  // and warning-free assembly is a tested property.
+  const customAll = [
+    custom,
+    ...p.scenes.flatMap((s) => [s.frameCode ?? "", ...s.nodes.map((o) => o.tick ?? "")]),
+  ].join("\n");
+  const needsDims =
+    [...flat.values()].some((leaves) => leaves.some((o) => o.controls)) ||
+    customAll.includes("ow[") ||
+    customAll.includes("oh[") ||
+    customAll.includes("overlapwh");
   out.push(`buffer ox[${MAX_OBJECTS}]: u16;`);
   out.push(`buffer oy[${MAX_OBJECTS}]: u16;`);
   out.push(`buffer ot[${MAX_OBJECTS}]: u16;`);
   out.push(`buffer oflags[${MAX_OBJECTS}]: u8;`);
+  if (needsDims) {
+    out.push(`buffer ow[${MAX_OBJECTS}]: u16;`);
+    out.push(`buffer oh[${MAX_OBJECTS}]: u16;`);
+  }
   out.push(`ocount: u8 = 0;`);
   out.push(`scene: u8 = 0;`);
   const needsKey = scenes.some((x) => x.keys.length > 0);
@@ -655,6 +853,15 @@ export function emitProject(p: Project): Record<string, string> {
   out.push(`    return 0;`);
   out.push(`}`);
   out.push(``);
+  if (needsDims) {
+    out.push(`overlapwh :: fn(ax: u16, ay: u16, aw: u16, ah: u16, bx: u16, by: u16, bw: u16, bh: u16) -> u8 {`);
+    out.push(`    if ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah {`);
+    out.push(`        return 1;`);
+    out.push(`    }`);
+    out.push(`    return 0;`);
+    out.push(`}`);
+    out.push(``);
+  }
   out.push(`draw_all :: fn() {`);
   out.push(`    for i in 0..${MAX_OBJECTS} {`);
   out.push(`        if i < ocount {`);
@@ -668,7 +875,6 @@ export function emitProject(p: Project): Record<string, string> {
   out.push(`    }`);
   out.push(`}`);
   out.push(``);
-  const flat = new Map(p.scenes.map((s) => [s.id, flattenScene(p, s.id)] as const));
   for (const s of scenes) {
     for (const o of flat.get(s.id) as FlatLeaf[]) {
       if (o.anim && animMap.has(o.anim)) {
@@ -679,14 +885,18 @@ export function emitProject(p: Project): Record<string, string> {
     }
   }
   out.push(``);
+  // tiles for draw fns, pixels for setup/collide/click/drive.
+  const tileDims = new Map(p.sprites.map((x) => [x.id, spriteTiles(x)] as const));
+  const pxDims = new Map(p.sprites.map((x) => [x.id, spritePx(x)] as const));
   for (const s of scenes) {
     // Store order, not sorted: hierarchy drag-reorder defines draw order.
     const leaves = flat.get(s.id) as FlatLeaf[];
     for (const o of leaves) {
       if (o.tick) out.push(emitTickFn(slotTag(s.id, o.path), o.tick).join("\n") + "\n");
     }
-    out.push(emitSetup(s.id, leaves));
-    out.push(emitFrame(s, leaves, p.width, p.height, animMap, hasFrameHook));
+    out.push(emitSetup(s.id, leaves, pxDims, needsDims));
+    if (leaves.length > 0) out.push(emitDrawScene(s, leaves, tileDims));
+    out.push(emitFrame(s, leaves, p.width, p.height, animMap, hasFrameHook, p, pxDims));
   }
   const arms = scenes.map((s) => `        ${indexOf.get(s.id)} => { ${s.id}_frame(); }`).join("\n");
   out.push(`on_frame :: event() {`);
@@ -755,6 +965,10 @@ export const SAMPLE_PROJECT: Project = {
   height: 128,
   start: "title",
   updatedAt: 0,
+  inputs: [
+    { id: "jump", key: 32 },
+    { id: "back", key: 27 },
+  ],
   sound: { voices: [{ note: 72, vol: 120 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }] },
   sprites: [
     { id: "hero", pixels: BLOCK },
@@ -772,13 +986,13 @@ export const SAMPLE_PROJECT: Project = {
         { id: "coin", x: 96, y: 96, sprite: "coin", kind: "movable", solid: true, anim: "spin" },
       ],
       clicks: [{ object: "hero", goto: "play" }],
-      keys: [{ key: 32, goto: "play" }],
+      keys: [{ input: "jump", key: 32, goto: "play" }],
     },
     {
       id: "play",
       nodes: [{ id: "hero", x: 8, y: 8, sprite: "hero", kind: "player", controls: true }],
       clicks: [],
-      keys: [{ key: 27, goto: "title" }],
+      keys: [{ input: "back", key: 27, goto: "title" }],
     },
   ],
 };

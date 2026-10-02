@@ -297,3 +297,101 @@ describe("emitProject", () => {
     expect(existsSync(join(dir, "chess.rom"))).toBe(true);
   });
 });
+
+describe("sprite tiles", () => {
+  function wideProject(): Project {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.sprites.push({ id: "wide", w: 2, h: 1, pixels: [...Array(64).fill(1), ...Array(64).fill(2)] });
+    p.scenes[0].nodes.push({ id: "banner", x: 0, y: 0, sprite: "wide", kind: "static" });
+    return p;
+  }
+
+  it("validates tile dimensions and pixel counts", () => {
+    expect(validateProject(wideProject())).toEqual([]);
+    const short = wideProject();
+    short.sprites.find((s) => s.id === "wide")!.pixels.length = 64;
+    expect(validateProject(short).some((e) => e.includes("needs 128 pixels"))).toBe(true);
+    const big = wideProject();
+    big.sprites.find((s) => s.id === "wide")!.w = 5;
+    expect(validateProject(big).some((e) => e.includes("width must be 1–4"))).toBe(true);
+  });
+
+  it("rejects mixed-size animation frames and mismatched leaves", () => {
+    const p = wideProject();
+    p.sprites.push({ id: "tall", w: 1, h: 2, pixels: Array(128).fill(3) });
+    p.anims.push({ id: "wobble", frames: ["wide", "tall"], rate: 30, loop: true });
+    expect(validateProject(p).some((e) => e.includes("must match 2×1 tiles"))).toBe(true);
+    const same = wideProject();
+    same.scenes[0].nodes.push({ id: "morph", x: 0, y: 0, sprite: "hero", kind: "static", anim: "spin" });
+    expect(validateProject(same)).toEqual([]);
+    const mixed = wideProject();
+    mixed.scenes[0].nodes.push({ id: "morph", x: 0, y: 0, sprite: "wide", kind: "static", anim: "spin" });
+    expect(validateProject(mixed).some((e) => e.includes("must match animation"))).toBe(true);
+  });
+
+  it("emits multi-tile draws with literal offsets", () => {
+    const main = emitProject(wideProject())["main.ux"];
+    const blob = main.match(/data spr_wide = \[(.*?)\];/)?.[1].split(",") ?? [];
+    expect(blob.length).toBe(32);
+    // banner is leaf index 3 of title: second tile at +8px, +16 bytes.
+    expect(main).toContain("Screen.x = ox[3] + 8;");
+    expect(main).toContain("Screen.addr = ot[3] + 16;");
+    // 1x1 leaves keep single straight-line writes.
+    expect(main).toContain("Screen.x = ox[0];");
+    // a driver exists, so dims machinery is present.
+    expect(main).toContain("buffer ow[128]");
+    expect(main).toContain("overlapwh");
+    expect(main).toContain("overlap88");
+  });
+
+  it("sizes click rects by sprite dims", () => {
+    const p = wideProject();
+    p.scenes[0].clicks.push({ object: "banner", goto: "play" });
+    expect(emitProject(p)["main.ux"]).toContain("pt_in_rect(mx, my, ox[3], oy[3], 16, 8)");
+  });
+
+  it("skips dims machinery without a driver", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.scenes.forEach((s) => s.nodes.forEach((o) => delete o.controls));
+    const main = emitProject(p)["main.ux"];
+    expect(main).not.toContain("buffer ow[128]");
+    expect(main).not.toContain("overlapwh");
+    expect(main).toContain("overlap88");
+  });
+});
+
+describe("named inputs", () => {
+  function legacy(): Record<string, unknown> {
+    const p = structuredClone(SAMPLE_PROJECT) as unknown as Record<string, unknown>;
+    delete p["inputs"];
+    for (const s of p["scenes"] as Array<Record<string, unknown>>) {
+      for (const k of s["keys"] as Array<Record<string, unknown>>) delete k["input"];
+    }
+    return p;
+  }
+
+  it("migrates legacy key codes to shared key_* inputs", () => {
+    const p = migrateProject(legacy());
+    expect(p.inputs).toEqual([
+      { id: "key_32", key: 32 },
+      { id: "key_27", key: 27 },
+    ]);
+    expect(p.scenes[0].keys[0].input).toBe("key_32");
+    expect(p.scenes[1].keys[0].input).toBe("key_27");
+    expect(validateProject(p)).toEqual([]);
+    expect(emitProject(p)["main.ux"]).toContain("if k == 32");
+  });
+
+  it("rejects bindings on unknown inputs", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.scenes[0].keys.push({ input: "nope", key: 32, goto: "play" });
+    expect(validateProject(p).some((e) => e.includes("unknown input"))).toBe(true);
+  });
+
+  it("resolves renamed inputs at emit time", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.inputs.push({ id: "jump2", key: 32 });
+    p.scenes[0].keys[0].input = "jump2";
+    expect(emitProject(p)["main.ux"]).toContain("if k == 32");
+  });
+});

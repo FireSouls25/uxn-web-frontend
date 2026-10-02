@@ -1,20 +1,23 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
+import { Grid3x3, Stamp } from "lucide-react";
 import { themeColors } from "../lib/palette";
 import { t, useLang } from "../lib/i18n";
 import { sceneVar } from "../lib/scene-ui";
 import {
+  addObject,
   currentScene,
   moveLeafByPath,
   projectStore,
   resizeProject,
   sceneIdStore,
   selectionStore,
+  spriteSelStore,
 } from "../lib/store";
-import { flattenScene } from "../lib/project";
+import { TILE_PX, flattenScene, spritePxOf } from "../lib/project";
 import type { FlatLeaf } from "../lib/project";
 
-const TILE = 8;
+const TILE = TILE_PX;
 
 const SIZE_PRESETS: Array<[string, number, number]> = [
   ["128×128", 128, 128],
@@ -30,10 +33,16 @@ function cssVar(name: string, fallback: string): string {
   return v || fallback;
 }
 
-function hitTest(leaves: FlatLeaf[], x: number, y: number): FlatLeaf | null {
+function hitTest(
+  project: ReturnType<typeof projectStore.get>,
+  leaves: FlatLeaf[],
+  x: number,
+  y: number,
+): FlatLeaf | null {
   for (let i = leaves.length - 1; i >= 0; i--) {
     const o = leaves[i];
-    if (x >= o.x && x < o.x + TILE && y >= o.y && y < o.y + TILE) return o;
+    const [w, h] = spritePxOf(project, o.sprite);
+    if (x >= o.x && x < o.x + w && y >= o.y && y < o.y + h) return o;
   }
   return null;
 }
@@ -49,6 +58,9 @@ export default function StudioCanvas() {
   const dragRef = useRef<{ path: string; dx: number; dy: number } | null>(null);
 
   const scene = currentScene(project, sceneId);
+  const spriteSel = useStore(spriteSelStore);
+  const [snap, setSnap] = useState(true);
+  const [placing, setPlacing] = useState(false);
   const leaves: FlatLeaf[] = (() => {
     try {
       return flattenScene(project, scene.id);
@@ -56,6 +68,11 @@ export default function StudioCanvas() {
       return [];
     }
   })();
+
+  /** Snap a game pixel to the 8px tile grid (top-left origin). */
+  function snapV(v: number): number {
+    return snap ? Math.round(v / TILE) * TILE : v;
+  }
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -94,8 +111,28 @@ export default function StudioCanvas() {
   const locked = !!project.locked;
 
   function onDown(e: React.PointerEvent) {
+    if (placing && !locked) {
+      // Stamp mode: click empty canvas to place the gallery sprite.
+      // Right button (or Esc) leaves the mode; a hit just selects.
+      if (e.button === 2) {
+        setPlacing(false);
+        return;
+      }
+      const [gx, gy] = toGame(e);
+      const hit = hitTest(project, leaves, gx, gy);
+      if (hit) {
+        selectionStore.set(hit.path);
+        return;
+      }
+      sceneIdStore.set(scene.id);
+      const art = project.sprites.some((s) => s.id === spriteSel)
+        ? spriteSel
+        : (project.sprites[0]?.id ?? "hero");
+      addObject("static", "", art, snapV(gx), snapV(gy));
+      return;
+    }
     const [gx, gy] = toGame(e);
-    const hit = hitTest(leaves, gx, gy);
+    const hit = hitTest(project, leaves, gx, gy);
     selectionStore.set(hit ? hit.path : null);
     if (hit && !locked) {
       dragRef.current = { path: hit.path, dx: gx - hit.x, dy: gy - hit.y };
@@ -107,7 +144,7 @@ export default function StudioCanvas() {
     const drag = dragRef.current;
     if (!drag) return;
     const [gx, gy] = toGame(e);
-    moveLeafByPath(scene.id, drag.path, gx - drag.dx, gy - drag.dy);
+    moveLeafByPath(scene.id, drag.path, snapV(gx - drag.dx), snapV(gy - drag.dy));
   }
 
   function onUp() {
@@ -137,7 +174,31 @@ export default function StudioCanvas() {
             {s.id}
           </button>
         ))}
-        <label className="ml-auto inline-flex items-center gap-1.5 font-mono text-[11px] text-subtext0">
+        <span className="ml-auto inline-flex items-center gap-1">
+          <button
+            onClick={() => setSnap((v) => !v)}
+            title={t(lang, "canvas.snap")}
+            aria-label={t(lang, "canvas.snap")}
+            aria-pressed={snap}
+            className={`grid size-7 place-items-center rounded-md transition-colors ${
+              snap ? "bg-mauve/20 text-mauve" : "text-subtext0 hover:bg-surface0 hover:text-text"
+            }`}
+          >
+            <Grid3x3 size={14} />
+          </button>
+          <button
+            onClick={() => setPlacing((v) => !v)}
+            title={t(lang, "canvas.place")}
+            aria-label={t(lang, "canvas.place")}
+            aria-pressed={placing}
+            className={`grid size-7 place-items-center rounded-md transition-colors ${
+              placing ? "bg-mauve/20 text-mauve" : "text-subtext0 hover:bg-surface0 hover:text-text"
+            }`}
+          >
+            <Stamp size={14} />
+          </button>
+        </span>
+        <label className="inline-flex items-center gap-1.5 font-mono text-[11px] text-subtext0">
           {t(lang, "size.label")}
           <select
             aria-label={t(lang, "size.label")}
@@ -161,6 +222,11 @@ export default function StudioCanvas() {
           </select>
         </label>
       </div>
+      {placing && !locked && (
+        <p className="mb-2 rounded-lg border border-dashed border-mauve/40 px-3 py-1.5 text-center font-mono text-[11px] text-mauve">
+          {t(lang, "canvas.placing")}
+        </p>
+      )}
       <canvas
         ref={canvasRef}
         width={project.width}
@@ -168,6 +234,11 @@ export default function StudioCanvas() {
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
+        onContextMenu={(e) => e.preventDefault()}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") setPlacing(false);
+        }}
+        tabIndex={0}
         className="aspect-auto w-full cursor-crosshair rounded-lg border border-surface0"
         style={{
           imageRendering: "pixelated",

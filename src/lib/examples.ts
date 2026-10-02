@@ -105,6 +105,10 @@ export function chessProject(): Project {
     height: 128,
     start: "menu",
     updatedAt: Date.now(),
+    inputs: [
+      { id: "select", key: 32 },
+      { id: "pause", key: 27 },
+    ],
     sound: { voices: [{ note: 72, vol: 200 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }] },
     sprites,
     anims: [],
@@ -114,7 +118,7 @@ export function chessProject(): Project {
         id: "menu",
         nodes: [{ id: "knight", x: 92, y: 48, sprite: "wknight", kind: "static" }],
         clicks: [{ object: "knight", goto: "play" }],
-        keys: [{ key: 32, goto: "play" }],
+        keys: [{ input: "select", key: 32, goto: "play" }],
       },
       {
         id: "play",
@@ -125,7 +129,7 @@ export function chessProject(): Project {
           ...backRank("w", 80),
         ],
         clicks: [],
-        keys: [{ key: 27, goto: "pause" }],
+        keys: [{ input: "pause", key: 27, goto: "pause" }],
         frameCode: "tick = tick + 1;",
       },
       {

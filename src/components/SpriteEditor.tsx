@@ -1,6 +1,7 @@
 import { useStore } from "@nanostores/react";
 import { Film, Plus } from "lucide-react";
 import { themeColors } from "../lib/palette";
+import { spriteTiles } from "../lib/project";
 import { t, useLang } from "../lib/i18n";
 import {
   addAnimation,
@@ -22,13 +23,15 @@ export default function SpriteEditor() {
 
   const sprite = project.sprites.find((s) => s.id === spriteId) ?? project.sprites[0] ?? null;
   const pal = themeColors(project.theme);
+  const [tw, th] = sprite ? spriteTiles(sprite) : [1, 1];
   const pixels = sprite?.pixels ?? Array(64).fill(0);
   const locked = !!project.locked;
 
-  function paint(r: number, c: number) {
+  /** Paint one pixel of tile (tx, ty) at row r, col c. */
+  function paint(tx: number, ty: number, r: number, c: number) {
     if (!sprite) return;
     const next = [...pixels];
-    next[r * 8 + c] = tool === "brush" ? color : 0;
+    next[(tx + ty * tw) * 64 + r * 8 + c] = tool === "brush" ? color : 0;
     setSpritePixels(sprite.id, next);
   }
 
@@ -37,22 +40,29 @@ export default function SpriteEditor() {
       {sprite ? (
         <div
           className="grid w-fit gap-px rounded-lg border border-surface0 bg-surface0 p-2"
-          style={{ gridTemplateColumns: "repeat(8, min(34px, 7vw))" }}
+          style={{ gridTemplateColumns: `repeat(${tw * 8}, min(34px, 7vw))` }}
         >
           {pixels.map((v, i) => {
-            const r = Math.floor(i / 8);
+            const tile = Math.floor(i / 64);
+            const tx = tile % tw;
+            const ty = Math.floor(tile / tw);
+            const r = Math.floor((i % 64) / 8);
             const c = i % 8;
             return (
               <button
                 key={i}
-                aria-label={`pixel ${r},${c}`}
+                aria-label={`pixel ${tx * 8 + c},${ty * 8 + r}`}
                 disabled={locked}
-                onPointerDown={() => paint(r, c)}
+                onPointerDown={() => paint(tx, ty, r, c)}
                 onPointerEnter={(e) => {
-                  if (e.buttons === 1) paint(r, c);
+                  if (e.buttons === 1) paint(tx, ty, r, c);
                 }}
                 className="aspect-square rounded-[3px]"
-                style={{ background: pal[v & 3] }}
+                style={{
+                  background: pal[v & 3],
+                  marginLeft: c === 0 && tx > 0 ? 4 : undefined,
+                  marginTop: r === 0 && ty > 0 ? 4 : undefined,
+                }}
               />
             );
           })}

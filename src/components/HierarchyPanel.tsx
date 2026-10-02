@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
 import { sceneVar } from "../lib/scene-ui";
-import type { ObjectKind } from "../lib/project";
+import { spriteTiles, type ObjectKind } from "../lib/project";
 import {
   addNode,
   addScene,
@@ -26,8 +26,10 @@ import {
   reorderNodes,
   sceneIdStore,
   selectionStore,
+  spriteSelStore,
   type ListRef,
 } from "../lib/store";
+import SpritePicker, { SpriteThumb } from "./SpritePicker";
 
 export const KIND_ICON = { player: Gamepad2, static: Box, movable: Move } as const;
 
@@ -56,15 +58,24 @@ function payload(e: React.DragEvent): { sceneId: string; parent: string[]; index
 function NodeRows({ sceneId, parent, depth, lang }: NodeRowsProps) {
   const project = useStore(projectStore);
   const selection = useStore(selectionStore);
+  const spriteSel = useStore(spriteSelStore);
   const [over, setOver] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [newKind, setNewKind] = useState<ObjectKind>("static");
+  const [newSprite, setNewSprite] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
 
   const ref: ListRef = { sceneId, parent };
   const nodes = readList(project, ref);
   const locked = !!project.locked;
   const pathOf = (id: string) => [...parent, id].join("/");
+  // The picker's choice, else the gallery selection, else the first tile.
+  const chosenSprite =
+    (newSprite && project.sprites.some((s) => s.id === newSprite) ? newSprite : null) ??
+    (project.sprites.some((s) => s.id === spriteSel) ? spriteSel : null) ??
+    project.sprites[0]?.id ??
+    "hero";
 
   function pick(path: string | null) {
     sceneIdStore.set(sceneId);
@@ -82,7 +93,7 @@ function NodeRows({ sceneId, parent, depth, lang }: NodeRowsProps) {
         id,
         x: 8,
         y: 8,
-        sprite: project.sprites[0]?.id ?? "hero",
+        sprite: chosenSprite,
         kind: newKind,
         ...(newKind === "movable" ? { solid: true } : {}),
       })
@@ -90,6 +101,7 @@ function NodeRows({ sceneId, parent, depth, lang }: NodeRowsProps) {
       pick(pathOf(id));
     }
     setNewName("");
+    setNewSprite(null);
     setCreating(false);
   }
 
@@ -169,36 +181,57 @@ function NodeRows({ sceneId, parent, depth, lang }: NodeRowsProps) {
         <li>
           {creating ? (
             <form
-              className="flex items-center gap-1 rounded-md bg-surface0 px-1.5 py-1"
+              className="space-y-1 rounded-md bg-surface0 px-1.5 py-1"
               onSubmit={(e) => {
                 e.preventDefault();
                 commitCreate();
               }}
             >
-              <input
-                autoFocus
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                placeholder={t(lang, "hier.name_ph")}
-                maxLength={24}
-                className="min-w-0 flex-1 bg-transparent font-mono text-[11px] outline-none placeholder:text-overlay0"
-              />
-              <select
-                aria-label={t(lang, "hier.kind")}
-                value={newKind}
-                onChange={(e) => setNewKind(e.target.value as ObjectKind)}
-                className="select select-sm"
-              >
-                <option value="player">{t(lang, "kind.player")}</option>
-                <option value="static">{t(lang, "kind.static")}</option>
-                <option value="movable">{t(lang, "kind.movable")}</option>
-              </select>
+              <div className="flex items-center gap-1">
+                <input
+                  autoFocus
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  placeholder={t(lang, "hier.name_ph")}
+                  maxLength={24}
+                  className="min-w-0 flex-1 bg-transparent font-mono text-[11px] outline-none placeholder:text-overlay0"
+                />
+                <select
+                  aria-label={t(lang, "hier.kind")}
+                  value={newKind}
+                  onChange={(e) => setNewKind(e.target.value as ObjectKind)}
+                  className="select select-sm"
+                >
+                  <option value="player">{t(lang, "kind.player")}</option>
+                  <option value="static">{t(lang, "kind.static")}</option>
+                  <option value="movable">{t(lang, "kind.movable")}</option>
+                </select>
+                <button
+                  type="submit"
+                  className="rounded bg-mauve/20 px-1.5 py-0.5 font-mono text-[11px] text-mauve"
+                >
+                  +
+                </button>
+              </div>
               <button
-                type="submit"
-                className="rounded bg-mauve/20 px-1.5 py-0.5 font-mono text-[11px] text-mauve"
+                type="button"
+                onClick={() => setPicking(true)}
+                title={t(lang, "hier.sprite")}
+                className="flex w-full items-center gap-2 rounded px-1 py-0.5 hover:bg-surface1"
               >
-                +
+                <span className="w-10 shrink-0">
+                  <SpriteThumb id={chosenSprite} dim={40} />
+                </span>
+                <span className="flex-1 truncate text-left font-mono text-[11px] text-subtext0">
+                  {chosenSprite} ·{" "}
+                  {(() => {
+                    const s = project.sprites.find((x) => x.id === chosenSprite);
+                    const [w, h] = s ? spriteTiles(s) : [1, 1];
+                    return `${w}×${h}`;
+                  })()}
+                </span>
               </button>
+              <SpritePicker open={picking} onPick={setNewSprite} onClose={() => setPicking(false)} />
             </form>
           ) : (
             <button

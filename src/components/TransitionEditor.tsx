@@ -2,7 +2,16 @@ import { useState } from "react";
 import { useStore } from "@nanostores/react";
 import { Plus } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
-import { addBinding, currentScene, flattenLeaves, projectStore, sceneIdStore, setSceneFrameCode } from "../lib/store";
+import {
+  addBinding,
+  addInput,
+  currentScene,
+  flattenLeaves,
+  projectStore,
+  sceneIdStore,
+  setSceneFrameCode,
+} from "../lib/store";
+import KeyPicker from "./KeyPicker";
 
 /* Right column of the events view: author a transition out of the
    current scene — click an object, or press a key, to go somewhere. */
@@ -12,7 +21,7 @@ export default function TransitionEditor() {
   const sceneId = useStore(sceneIdStore);
   const [kind, setKind] = useState<"click" | "key">("click");
   const [object, setObject] = useState("");
-  const [key, setKey] = useState(32);
+  const [input, setInput] = useState("");
   const [goto, setGoto] = useState("");
 
   const scene = currentScene(project, sceneId);
@@ -50,14 +59,7 @@ export default function TransitionEditor() {
         ) : (
           <label className="block">
             <span className="mb-1 block font-mono text-[11px] text-subtext0">{t(lang, "events.key")}</span>
-            <input
-              type="number"
-              value={key}
-              min={0}
-              max={255}
-              onChange={(e) => setKey(Math.min(255, Math.max(0, Math.round(e.target.valueAsNumber || 0))))}
-              className="w-full rounded-lg border border-surface1 bg-base px-2.5 py-1.5 font-mono text-xs outline-none focus:border-mauve"
-            />
+            <KeyPicker value={input} onChange={setInput} />
           </label>
         )}
         <label className="block">
@@ -73,7 +75,7 @@ export default function TransitionEditor() {
         <button
           onClick={() => {
             if (kind === "click") addBinding("click", object || leaves[0]?.path || "", target);
-            else addBinding("key", null, target, key);
+            else addBinding("key", null, target, undefined, input || project.inputs[0]?.id || addInput(32));
           }}
           disabled={kind === "click" && leaves.length === 0}
           className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-surface0 px-3 py-2 text-[13px] font-medium transition-colors hover:bg-surface1 disabled:opacity-50"

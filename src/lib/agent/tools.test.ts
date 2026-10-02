@@ -69,4 +69,14 @@ describe("agent tools", () => {
     const d = runTool("describe", {});
     expect(d.data).toMatchObject({ project: "demo", scene: "title" });
   });
+
+  it("creates multi-tile sprites and places them", () => {
+    expect(runTool("create_sprite", { name: "wide", w: 2, h: 1 }).ok).toBe(true);
+    const put = runTool("put_on_scene", { sprite: "wide", name: "banner", x: 0, y: 0 });
+    expect(put.ok).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+    const emit = runTool("emit_files", {});
+    const main = (emit.data as { files: Record<string, string> }).files["main.ux"];
+    expect(main).toContain("Screen.addr = ot[");
+  });
 });

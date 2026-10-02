@@ -11,7 +11,7 @@ import {
   PaintBucket,
 } from "lucide-react";
 import { themeColors, setPaletteIndex } from "../lib/palette";
-import { flattenScene } from "../lib/project";
+import { flattenScene, spriteTiles } from "../lib/project";
 import { t, useLang } from "../lib/i18n";
 import { paintColorStore, paintToolStore, projectStore, setSpritePixels, setTheme, spriteSelStore } from "../lib/store";
 
@@ -68,19 +68,41 @@ export default function SpriteTools() {
   }
   function paintAll(value: number[] | number) {
     if (!sprite) return;
-    setSpritePixels(sprite.id, typeof value === "number" ? Array(64).fill(value) : value);
+    const [w, h] = spriteTiles(sprite);
+    setSpritePixels(sprite.id, typeof value === "number" ? Array(64 * w * h).fill(value) : value);
   }
 
-  function transform(fn: (px: number[]) => number[]) {
+  function transform(fn: (px: number[], w: number, h: number) => number[]) {
     if (!sprite) return;
-    setSpritePixels(sprite.id, fn([...sprite.pixels]));
+    const [w, h] = spriteTiles(sprite);
+    setSpritePixels(sprite.id, fn([...sprite.pixels], w, h));
   }
-  const flipH = (px: number[]) => px.map((_, i) => px[Math.floor(i / 8) * 8 + (7 - (i % 8))]);
-  const flipV = (px: number[]) => px.map((_, i) => px[(7 - Math.floor(i / 8)) * 8 + (i % 8)]);
-  const shift = (dx: number, dy: number) => (px: number[]) => {
-    const out = Array(64).fill(0);
-    for (let r = 0; r < 8; r++)
-      for (let c = 0; c < 8; c++) out[((r + dy + 8) % 8) * 8 + ((c + dx + 8) % 8)] = px[r * 8 + c];
+  // Whole-sprite transforms over the w×h tile grid (per-tile math
+  // would mirror tiles in place instead of moving them).
+  const flipH = (px: number[], w: number) =>
+    px.map((_, i) => {
+      const t = Math.floor(i / 64);
+      const tx = t % w;
+      const ty = (t - tx) / w;
+      const r = Math.floor((i % 64) / 8);
+      const c = i % 8;
+      return px[(w - 1 - tx + ty * w) * 64 + r * 8 + (7 - c)];
+    });
+  const flipV = (px: number[], w: number, h: number) =>
+    px.map((_, i) => {
+      const t = Math.floor(i / 64);
+      const tx = t % w;
+      const ty = (t - tx) / w;
+      const r = Math.floor((i % 64) / 8);
+      const c = i % 8;
+      return px[(tx + (h - 1 - ty) * w) * 64 + (7 - r) * 8 + c];
+    });
+  const shift = (dx: number, dy: number) => (px: number[], w: number, h: number) => {
+    const W = w * 8;
+    const H = h * 8;
+    const out = Array(px.length).fill(0);
+    for (let r = 0; r < H; r++)
+      for (let c = 0; c < W; c++) out[((r + dy + H) % H) * W + ((c + dx + W) % W)] = px[r * W + c];
     return out;
   };
 
@@ -117,10 +139,10 @@ export default function SpriteTools() {
         <button onClick={() => paintToolStore.set("erase")} title={t(lang, "sprite.erase")} className={tool === "erase" ? active : iconBtn}>
           <Eraser size={15} />
         </button>
-        <button onClick={() => sprite && paintAll(Array(64).fill(color))} title={t(lang, "sprite.fill")} className={iconBtn}>
+        <button onClick={() => sprite && paintAll(color)} title={t(lang, "sprite.fill")} className={iconBtn}>
           <PaintBucket size={15} />
         </button>
-        <button onClick={() => paintAll(Array(64).fill(0))} title={t(lang, "sprite.clear")} className={`${iconBtn} font-mono text-[11px]`}>
+        <button onClick={() => paintAll(0)} title={t(lang, "sprite.clear")} className={`${iconBtn} font-mono text-[11px]`}>
           ∅
         </button>
         <button onClick={() => transform(flipH)} title="flip ↔" className={iconBtn}>
