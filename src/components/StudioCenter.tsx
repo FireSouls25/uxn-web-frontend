@@ -1,5 +1,6 @@
 import { useStore } from "@nanostores/react";
 import CodePanel from "./CodePanel";
+import EventPanel from "./EventPanel";
 import EventsGraph from "./EventsGraph";
 import SoundMixer from "./SoundMixer";
 import SpriteEditor from "./SpriteEditor";
@@ -14,10 +15,15 @@ export default function StudioCenter() {
   const effective = project.kind === "code" ? "code" : view;
 
   return (
-    <div className="pane rounded-xl p-3">
+    <div className="pane space-y-4 rounded-xl p-3">
       {effective === "scene" && <StudioCanvas />}
       {effective === "sprites" && <SpriteEditor />}
-      {effective === "events" && <EventsGraph />}
+      {effective === "events" && (
+        <>
+          <EventPanel />
+          <EventsGraph />
+        </>
+      )}
       {effective === "sound" && <SoundMixer />}
       {effective === "code" && <CodePanel />}
     </div>

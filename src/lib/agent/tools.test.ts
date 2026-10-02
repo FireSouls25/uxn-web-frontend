@@ -80,6 +80,27 @@ describe("agent tools", () => {
     expect(main).toContain("Screen.addr = ot[");
   });
 
+  it("authors behavior through events and blocks", () => {
+    expect(runTool("create_object_def", { name: "coin_obj", sprite: "coin" }).ok).toBe(true);
+    const ev = runTool("add_event", { def: "coin_obj", trigger: "click" });
+    expect(ev).toMatchObject({ ok: true, data: { id: "ev_1" } });
+    expect(runTool("add_block", { def: "coin_obj", event: "ev_1", op: "play", voice: 1, note: 72, vol: 100 }).ok).toBe(true);
+    expect(runTool("add_block", { def: "coin_obj", event: "ev_1", op: "frobnicate" }).ok).toBe(false);
+    expect(runTool("place_instance", { def: "coin_obj", name: "bonus", x: 0, y: 0 }).ok).toBe(true);
+    expect(runTool("add_event", { object: "coin", trigger: "collide", target: "def:coin_obj" }).ok).toBe(true);
+    expect(runTool("add_block", { object: "coin", event: "ev_1", op: "destroy" }).ok).toBe(true);
+    const preview = runTool("preview_event", { object: "coin", event: "ev_1" });
+    expect(preview.ok).toBe(true);
+    expect(preview.message as string).toContain("oflags[slot] = oflags[slot] & 247;");
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+    const emit = runTool("emit_files", {});
+    const main = (emit.data as { files: Record<string, string> }).files["main.ux"];
+    expect(main).toContain("collide_title_coin_0");
+    expect(runTool("delete_block", { object: "coin", event: "ev_1", index: 0 }).ok).toBe(true);
+    expect(runTool("delete_event", { object: "coin", event: "ev_1" }).ok).toBe(true);
+    expect(runTool("preview_event", { object: "coin", event: "ev_1" }).ok).toBe(false);
+  });
+
   it("authors shared behavior through object templates", () => {
     const def = runTool("create_object_def", { name: "crate", sprite: "wall", kind: "movable" });
     expect(def).toMatchObject({ ok: true, data: { id: "crate" } });

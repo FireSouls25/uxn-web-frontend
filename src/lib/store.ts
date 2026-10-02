@@ -11,8 +11,11 @@ import {
   projectDefs,
   spritePxOf,
   spriteTiles,
+  type Block,
+  type EventTrigger,
   type FlatLeaf,
   type ObjectDef,
+  type ObjectEvent,
   type ObjectKind,
   type Project,
   type SceneNode,
@@ -362,6 +365,147 @@ export function patchObject(objectId: string, patch: Partial<SceneNode>): void {
         : { ...s, nodes: s.nodes.map((o) => (o.id === objectId ? { ...o, ...patch } : o)) },
     ),
   }));
+}
+
+/* Object events: GameMaker-style trigger lists on defs and inline
+   leaves. Owners address a def or a top-level leaf of the current
+   scene; nested leaves inherit home-leaf events (edit them there). */
+
+/** An event owner: a template, or a top-level leaf of the current scene. */
+export type EventOwner = { def: string } | { leaf: string };
+
+function readOwnerEvents(p: Project, owner: EventOwner): ObjectEvent[] | null {
+  if ("def" in owner) {
+    const def = projectDefs(p).find((d) => d.id === owner.def);
+    return def ? (def.events ?? []) : null;
+  }
+  const scene = currentScene(p, sceneIdStore.get());
+  const node = scene.nodes.find((o) => o.id === owner.leaf && !o.scene);
+  if (!node || node.def) return null;
+  return node.events ?? [];
+}
+
+function writeOwnerEvents(owner: EventOwner, fn: (events: ObjectEvent[]) => ObjectEvent[]): boolean {
+  const p = projectStore.get();
+  if (readOwnerEvents(p, owner) === null) return false;
+  updateCurrent((prev) => {
+    if ("def" in owner) {
+      return {
+        ...prev,
+        objectDefs: projectDefs(prev).map((d) => (d.id === owner.def ? { ...d, events: fn(d.events ?? []) } : d)),
+      };
+    }
+    const scene = currentScene(prev, sceneIdStore.get());
+    return {
+      ...prev,
+      scenes: prev.scenes.map((s) =>
+        s.id !== scene.id
+          ? s
+          : { ...s, nodes: s.nodes.map((o) => (o.id === owner.leaf ? { ...o, events: fn(o.events ?? []) } : o)) },
+      ),
+    };
+  });
+  return true;
+}
+
+const EVENT_ID = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+/** Add an event; returns its id (ev_N). Unknown owner, bad trigger
+    or dangling key/target refs are refused. */
+export function addEvent(owner: EventOwner, trigger: EventTrigger, params?: { key?: string; target?: string }): string | null {
+  const p = projectStore.get();
+  const cur = readOwnerEvents(p, owner);
+  if (!cur) return null;
+  if (trigger !== "create" && trigger !== "step" && trigger !== "destroy" && trigger !== "key" && trigger !== "collide" && trigger !== "click" && trigger !== "alarm")
+    return null;
+  if (trigger === "key" && (params?.key === undefined || !p.inputs.some((i) => i.id === params.key))) return null;
+  if (trigger === "collide") {
+    const t = params?.target ?? "";
+    const ok =
+      t === "any" || t === "solid" || t === "player" || t === "movable" ||
+      (t.startsWith("def:") && projectDefs(p).some((d) => d.id === t.slice(4)));
+    if (!ok) return null;
+  }
+  let id = "ev_1";
+  let n = 2;
+  while (cur.some((e) => e.id === id)) id = `ev_${n++}`;
+  const event: ObjectEvent = {
+    id,
+    trigger,
+    ...(trigger === "key" ? { key: params?.key } : {}),
+    ...(trigger === "collide" ? { target: params?.target } : {}),
+    blocks: [],
+  };
+  return writeOwnerEvents(owner, (events) => [...events, event]) ? id : null;
+}
+
+export function deleteEvent(owner: EventOwner, eventId: string): boolean {
+  const p = projectStore.get();
+  const cur = readOwnerEvents(p, owner);
+  if (!cur || !cur.some((e) => e.id === eventId)) return false;
+  return writeOwnerEvents(owner, (events) => events.filter((e) => e.id !== eventId));
+}
+
+const BLOCK_OPS = ["move", "set_pos", "play", "goto", "destroy", "wait"];
+
+/** Append (or insert) a block. The op and required fields are
+    checked; value ranges are validation's job (same gate as export). */
+export function addBlock(owner: EventOwner, eventId: string, block: Block, index?: number): boolean {
+  if (!block || !BLOCK_OPS.includes(block.op)) return false;
+  const p = projectStore.get();
+  const cur = readOwnerEvents(p, owner);
+  if (!cur || !cur.some((e) => e.id === eventId)) return false;
+  return writeOwnerEvents(owner, (events) =>
+    events.map((e) => {
+      if (e.id !== eventId) return e;
+      const blocks = [...e.blocks];
+      const at = index === undefined ? blocks.length : Math.min(Math.max(0, index), blocks.length);
+      blocks.splice(at, 0, block);
+      return { ...e, blocks };
+    }),
+  );
+}
+
+/** Merge fields into one block (same op shape assumed; ranges are
+    validation's job). Powers the per-op editors. */
+export function patchBlock(owner: EventOwner, eventId: string, index: number, patch: Record<string, number | string>): boolean {
+  const p = projectStore.get();
+  const cur = readOwnerEvents(p, owner);
+  const ev = cur?.find((e) => e.id === eventId);
+  if (!ev || index < 0 || index >= ev.blocks.length) return false;
+  return writeOwnerEvents(owner, (events) =>
+    events.map((e) =>
+      e.id === eventId
+        ? { ...e, blocks: e.blocks.map((b, i) => (i === index ? ({ ...b, ...patch } as Block) : b)) }
+        : e,
+    ),
+  );
+}
+
+export function deleteBlock(owner: EventOwner, eventId: string, index: number): boolean {
+  const p = projectStore.get();
+  const cur = readOwnerEvents(p, owner);
+  const ev = cur?.find((e) => e.id === eventId);
+  if (!ev || index < 0 || index >= ev.blocks.length) return false;
+  return writeOwnerEvents(owner, (events) =>
+    events.map((e) => (e.id === eventId ? { ...e, blocks: e.blocks.filter((_, i) => i !== index) } : e)),
+  );
+}
+
+export function moveBlock(owner: EventOwner, eventId: string, from: number, to: number): boolean {
+  const p = projectStore.get();
+  const cur = readOwnerEvents(p, owner);
+  const ev = cur?.find((e) => e.id === eventId);
+  if (!ev || from < 0 || from >= ev.blocks.length || to < 0 || to >= ev.blocks.length) return false;
+  return writeOwnerEvents(owner, (events) =>
+    events.map((e) => {
+      if (e.id !== eventId) return e;
+      const blocks = [...e.blocks];
+      const [b] = blocks.splice(from, 1);
+      blocks.splice(to, 0, b);
+      return { ...e, blocks };
+    }),
+  );
 }
 
 /** Patch a template (unknown sprite/anim/kind refused with a message).

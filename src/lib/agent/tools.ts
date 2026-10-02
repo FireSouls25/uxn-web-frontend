@@ -9,13 +9,17 @@
    compiler remains the final arbiter at export. */
 import {
   addBinding,
+  addBlock,
   addDef,
+  addEvent,
   addInstance,
   addNode,
   addObject,
   addScene,
   addSprite,
   createProject,
+  deleteBlock,
+  deleteEvent,
   deleteNode,
   extractObject,
   moveNode,
@@ -34,8 +38,9 @@ import {
   setTheme,
   setVoice,
 } from "../store";
-import { emitProject, projectDefs, validateProject } from "../project";
-import type { ObjectKind } from "../project";
+import { emitProject, previewOwnerEvent, projectDefs, validateProject } from "../project";
+import type { Block, EventTrigger, ObjectKind } from "../project";
+import type { EventOwner } from "../store";
 
 export interface ToolResult {
   ok: boolean;
@@ -181,6 +186,112 @@ export const TOOLS: ToolDef[] = [
       const id = extractObject(str(args["object"]));
       if (!id) return { ok: false, message: `cannot extract ${args["object"]} (missing, nested, or already an instance)` };
       return { ok: true, message: `extracted ${id}`, data: { id } };
+    },
+  },
+  {
+    name: "add_event",
+    description:
+      "Add an event to a template ({def}) or an inline leaf ({object}, top-level of current scene). Triggers: create (scene enter), step (every frame), destroy, key (named input), collide (overlap vs any|solid|player|movable|def:<id>), click (press on it), alarm (slot countdown hits 0, set by wait blocks). One event per trigger+key/target.",
+    params: {
+      def: { type: "string", description: "Object template id (exactly one of def/object)" },
+      object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
+      trigger: { type: "string", required: true, description: "create|step|destroy|key|collide|click|alarm" },
+      key: { type: "string", description: "Named input id (key trigger)" },
+      target: { type: "string", description: "any|solid|player|movable|def:<id> (collide trigger)" },
+    },
+    run: (args) => {
+      const owner = ownerOf(args);
+      if (!owner) return { ok: false, message: "name exactly one of def/object" };
+      const id = addEvent(owner, str(args["trigger"]) as EventTrigger, {
+        key: str(args["key"]) || undefined,
+        target: str(args["target"]) || undefined,
+      });
+      if (!id) return { ok: false, message: "event refused (unknown owner, trigger, key, or target)" };
+      return { ok: true, message: `event ${id}`, data: { id } };
+    },
+  },
+  {
+    name: "add_block",
+    description:
+      "Append a visual action to an event (see add_event). Ops: move {dx,dy} (pixels, clamped), set_pos {x,y}, play {voice 0-3, note 0-107, vol 0-255} (one-shot SFX), goto {scene}, destroy (self), wait {ticks 1-255} (arms the alarm event). Every op lowers to fixed ETAL — use preview_event to see it.",
+    params: {
+      def: { type: "string", description: "Object template id (exactly one of def/object)" },
+      object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
+      event: { type: "string", required: true, description: "Event id from add_event" },
+      op: { type: "string", required: true, description: "move|set_pos|play|goto|destroy|wait" },
+      dx: { type: "number", description: "move: pixels" },
+      dy: { type: "number", description: "move: pixels" },
+      x: { type: "number", description: "set_pos: pixels" },
+      y: { type: "number", description: "set_pos: pixels" },
+      voice: { type: "number", description: "play: 0-3" },
+      note: { type: "number", description: "play: MIDI 0-107" },
+      vol: { type: "number", description: "play: 0-255" },
+      scene: { type: "string", description: "goto: target scene" },
+      ticks: { type: "number", description: "wait: 1-255" },
+      index: { type: "number", description: "Insert position, default append" },
+    },
+    run: (args) => {
+      const owner = ownerOf(args);
+      if (!owner) return { ok: false, message: "name exactly one of def/object" };
+      const block = blockOf(args);
+      if (!block) return { ok: false, message: `bad op or missing fields for '${args["op"]}'` };
+      const ok = addBlock(owner, str(args["event"]), block, args["index"] === undefined ? undefined : num(args["index"]));
+      if (!ok) return { ok: false, message: "block refused (unknown owner or event)" };
+      return { ok: true, message: `${(block as Block).op} added`, data: {} };
+    },
+  },
+  {
+    name: "delete_event",
+    description: "Delete an event (and its blocks) from a template or inline leaf.",
+    params: {
+      def: { type: "string", description: "Object template id (exactly one of def/object)" },
+      object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
+      event: { type: "string", required: true, description: "Event id" },
+    },
+    run: (args) => {
+      const owner = ownerOf(args);
+      if (!owner) return { ok: false, message: "name exactly one of def/object" };
+      if (!deleteEvent(owner, str(args["event"]))) return { ok: false, message: "unknown owner or event" };
+      return { ok: true, message: "event deleted" };
+    },
+  },
+  {
+    name: "delete_block",
+    description: "Delete one block of an event by index.",
+    params: {
+      def: { type: "string", description: "Object template id (exactly one of def/object)" },
+      object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
+      event: { type: "string", required: true, description: "Event id" },
+      index: { type: "number", required: true, description: "Block index" },
+    },
+    run: (args) => {
+      const owner = ownerOf(args);
+      if (!owner) return { ok: false, message: "name exactly one of def/object" };
+      if (!deleteBlock(owner, str(args["event"]), num(args["index"]))) return { ok: false, message: "unknown owner, event, or index" };
+      return { ok: true, message: "block deleted" };
+    },
+  },
+  {
+    name: "preview_event",
+    description:
+      "Show the exact ETAL an event lowers to (same function the emitter calls — preview and build cannot disagree).",
+    params: {
+      def: { type: "string", description: "Object template id (exactly one of def/object)" },
+      object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
+      event: { type: "string", required: true, description: "Event id" },
+    },
+    run: (args) => {
+      const p = projectStore.get();
+      const owner = ownerOf(args);
+      if (!owner) return { ok: false, message: "name exactly one of def/object", data: {} };
+      const lines = previewOwnerEvent(
+        p,
+        sceneIdStore.get(),
+        "def" in owner ? { def: owner.def } : { leaf: owner.leaf },
+        str(args["event"]),
+      );
+      if (!lines) return { ok: false, message: "unknown owner or event", data: {} };
+      return { ok: true, message: lines.join("\n") || "(no blocks)", data: { etal: lines } };
     },
   },
   {
@@ -412,6 +523,31 @@ export const TOOLS: ToolDef[] = [
     run: () => ({ ok: true, message: "snapshot", data: snapshot() }),
   },
 ];
+
+/** One of {def} (template) or {object} (top-level leaf of the
+    current scene) must name the event owner. */
+function ownerOf(args: Record<string, unknown>): EventOwner | null {
+  const def = str(args["def"]);
+  const object = str(args["object"]);
+  if (def && object) return null;
+  if (def) return { def };
+  if (object) return { leaf: object };
+  return null;
+}
+
+function blockOf(args: Record<string, unknown>): Block | null {
+  const op = str(args["op"]);
+  if (op === "move") return { op, dx: num(args["dx"]), dy: num(args["dy"]) };
+  if (op === "set_pos") return { op, x: num(args["x"]), y: num(args["y"]) };
+  if (op === "play") return { op, voice: num(args["voice"]), note: num(args["note"], 60), vol: num(args["vol"], 120) };
+  if (op === "goto") {
+    if (!str(args["scene"])) return null;
+    return { op, scene: str(args["scene"]) };
+  }
+  if (op === "destroy") return { op };
+  if (op === "wait") return { op, ticks: num(args["ticks"], 30) };
+  return null;
+}
 
 export function runTool(name: string, args: Record<string, unknown>): ToolResult {
   const tool = TOOLS.find((t) => t.name === name);

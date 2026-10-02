@@ -68,6 +68,56 @@ export interface Animation {
 
 export type ObjectKind = "player" | "static" | "movable";
 
+/** Loop moments an object can react to (GameMaker events, Uxn-sized).
+    create runs on scene enter; step every frame; key/click/collide on
+    input and overlap; alarm when the slot countdown hits 0; destroy
+    runs its statements when a destroy block fires. */
+export type EventTrigger = "create" | "step" | "destroy" | "key" | "collide" | "click" | "alarm";
+
+export interface BlockMove {
+  op: "move";
+  dx: number;
+  dy: number;
+}
+export interface BlockPos {
+  op: "set_pos";
+  x: number;
+  y: number;
+}
+export interface BlockPlay {
+  op: "play";
+  voice: number;
+  note: number;
+  vol: number;
+}
+export interface BlockGoto {
+  op: "goto";
+  scene: string;
+}
+export interface BlockDestroy {
+  op: "destroy";
+}
+export interface BlockWait {
+  op: "wait";
+  ticks: number;
+}
+
+/** One visual action = one ETAL lowering (see previewBlocks). No
+    `if`, no variables in v1: events ARE the conditionals, and the
+    tick textarea remains the code hatch for the rest. */
+export type Block = BlockMove | BlockPos | BlockPlay | BlockGoto | BlockDestroy | BlockWait;
+
+export interface ObjectEvent {
+  /** Stable id for agent/UI targeting (ev_N). */
+  id: string;
+  trigger: EventTrigger;
+  /** key trigger: named input id. */
+  key?: string;
+  /** collide trigger: any|solid|player|movable|def:<id>. */
+  target?: string;
+  blocks: Block[];
+}
+
 /** An object template: the GameMaker Object in our Object ≠ Sprite ≠
     Instance split. A def owns default art, physics flags, animation
     and tick script; scene leaves either inline all of that (today's
@@ -81,6 +131,8 @@ export interface ObjectDef {
   controls?: boolean;
   anim?: string;
   tick?: string;
+  /** The def's events; instances inherit them whole. */
+  events?: ObjectEvent[];
 }
 
 /** The def library, legacy-safe: pre-def projects simply have none. */
@@ -139,6 +191,9 @@ export interface SceneNode {
       id/x/y, which are always instance state) falls back to the def
       when locally absent — explicit local values always win. */
   def?: string;
+  /** Inline leaves only: this leaf's events (instances use their
+      def's — a local list on an instance is a validation error). */
+  events?: ObjectEvent[];
 }
 
 export interface Scene {
@@ -158,6 +213,9 @@ export interface FlatLeaf extends SceneNode {
   path: string;
   kind: ObjectKind;
   sprite: string;
+  /** Effective events: the def's for instances, the leaf's own for
+      inlines. The emitter, validation and tools all read this. */
+  events: ObjectEvent[];
 }
 
 /** Leaf node with resolved defaults. */
@@ -198,6 +256,7 @@ export function flattenScene(p: Project, sceneId: string): FlatLeaf[] {
           controls: n.controls ?? def?.controls,
           anim: n.anim ?? def?.anim,
           tick: n.tick ?? def?.tick,
+          events: def ? (def.events ?? []) : (n.events ?? []),
         });
       }
     }
@@ -401,6 +460,81 @@ function u16(n: number): boolean {
   return Number.isInteger(n) && n >= 0 && n <= 65535;
 }
 
+/** Max static collide pairs per scene (see the pair counting below).
+    Keeps generated frame fns far under the assembler reference
+    budget (~1200) no matter how the statements stack. */
+export const MAX_COLLIDE_PAIRS = 48;
+
+const TRIGGERS: EventTrigger[] = ["create", "step", "destroy", "key", "collide", "click", "alarm"];
+
+function validateBlocks(blocks: Block[], label: string, sceneIds: Set<string>): string[] {
+  const errs: string[] = [];
+  (blocks ?? []).forEach((b, i) => {
+    const at = `${label} block ${i}`;
+    if (b.op === "move") {
+      if (!Number.isInteger(b.dx) || !Number.isInteger(b.dy)) errs.push(`${at}: dx/dy must be integers`);
+    } else if (b.op === "set_pos") {
+      if (!u16(b.x) || !u16(b.y)) errs.push(`${at}: x/y must be 0–65535`);
+    } else if (b.op === "play") {
+      if (!Number.isInteger(b.voice) || b.voice < 0 || b.voice > 3) errs.push(`${at}: voice must be 0–3`);
+      if (!Number.isInteger(b.note) || b.note < 0 || b.note > 107) errs.push(`${at}: note must be 0–107`);
+      if (!Number.isInteger(b.vol) || b.vol < 0 || b.vol > 255) errs.push(`${at}: vol must be 0–255`);
+    } else if (b.op === "goto") {
+      if (!sceneIds.has(b.scene)) errs.push(`${at}: goto unknown scene '${b.scene}'`);
+    } else if (b.op === "destroy") {
+      void b;
+    } else if (b.op === "wait") {
+      if (!Number.isInteger(b.ticks) || b.ticks < 1 || b.ticks > 255)
+        errs.push(`${at}: ticks must be 1–255`);
+    } else {
+      errs.push(`${label} block ${i}: unknown op '${(b as { op: unknown }).op}'`);
+    }
+  });
+  return errs;
+}
+
+function validTarget(target: string, defIds: Set<string>): boolean {
+  if (target === "any" || target === "solid" || target === "player" || target === "movable") return true;
+  return target.startsWith("def:") && defIds.has(target.slice(4));
+}
+
+function validateEvents(
+  events: ObjectEvent[],
+  label: string,
+  sceneIds: Set<string>,
+  inputIds: Set<string>,
+  defIds: Set<string>,
+): string[] {
+  const errs: string[] = [];
+  const ids = new Set((events ?? []).map((e) => e.id));
+  if (ids.size !== (events ?? []).length) errs.push(`${label}: duplicate event id`);
+  const seen = new Set<string>();
+  for (const e of events ?? []) {
+    if (!IDENT.test(e.id)) errs.push(`${label}: bad event id '${e.id}'`);
+    if (!TRIGGERS.includes(e.trigger)) errs.push(`${label} '${e.id}': bad trigger '${(e as { trigger: unknown }).trigger}'`);
+    if (e.trigger === "key" && (e.key === undefined || !inputIds.has(e.key)))
+      errs.push(`${label} '${e.id}': key event needs a known input`);
+    if (e.trigger === "collide" && (e.target === undefined || !validTarget(e.target, defIds)))
+      errs.push(`${label} '${e.id}': collide target must be any|solid|player|movable|def:<id>`);
+    const sig = `${e.trigger}|${e.key ?? ""}|${e.target ?? ""}`;
+    if (seen.has(sig)) errs.push(`${label}: duplicate ${e.trigger} event`);
+    seen.add(sig);
+    errs.push(...validateBlocks(e.blocks ?? [], `${label} '${e.id}'`, sceneIds));
+  }
+  return errs;
+}
+
+/** Static collide matching: kinds and def identity are all known at
+    emit time (leaves carry resolved kind + raw def ref), so pairs
+    unroll without any runtime tags. */
+export function matchTarget(t: FlatLeaf, index: number, self: number, target: string): boolean {
+  if (index === self) return false;
+  if (target === "any") return true;
+  if (target === "solid") return !!t.solid;
+  if (target === "player" || target === "movable") return t.kind === target;
+  return target.startsWith("def:") && t.def === target.slice(4);
+}
+
 export function validateProject(p: Project): string[] {
   const errs: string[] = [];
   if (!p.name || /["\\]/.test(p.name)) errs.push("name must be non-empty without quotes/backslashes");
@@ -479,6 +613,7 @@ export function validateProject(p: Project): string[] {
     if (d.controls && d.kind !== "player") errs.push(`object '${d.id}': controls require player kind`);
     if (d.anim && !animIds.has(d.anim)) errs.push(`object '${d.id}': unknown animation '${d.anim}'`);
     if (d.tick) errs.push(...validateCustomCode(d.tick).map((e) => `object '${d.id}' tick: ${e}`));
+    errs.push(...validateEvents(d.events ?? [], `object '${d.id}'`, sceneIds, inputIds, defIds));
   }
   if (sceneIds.size !== p.scenes.length) errs.push("duplicate scene id");
   if (!sceneIds.has(p.start)) errs.push(`start scene '${p.start}' missing`);
@@ -504,6 +639,11 @@ export function validateProject(p: Project): string[] {
         errs.push(`node '${o.id}': unknown subscene '${o.scene}'`);
       if (isBranch && o.sprite) errs.push(`node '${o.id}': sprite and subscene are exclusive`);
       if (isBranch && o.def) errs.push(`node '${o.id}': objects are leaves only, not branches`);
+      if (isBranch && o.events?.length) errs.push(`node '${o.id}': events are leaves only, not branches`);
+      if (!isBranch && o.def && (o.events?.length ?? 0) > 0)
+        errs.push(`node '${o.id}': instances carry no events — edit object '${o.def}'`);
+      if (!isBranch && !o.def)
+        errs.push(...validateEvents(o.events ?? [], `node '${o.id}'`, sceneIds, inputIds, defIds));
       if (!isBranch && !o.sprite && !o.def) errs.push(`node '${o.id}': leaf needs a sprite or an object`);
       if (!isBranch) {
         if (o.sprite && !spriteIds.has(o.sprite)) errs.push(`node '${o.id}': unknown sprite '${o.sprite}'`);
@@ -523,11 +663,23 @@ export function validateProject(p: Project): string[] {
       if (players.length > 1) errs.push(`scene '${s.id}': at most one player (0 allowed)`);
       const drivers = flat.filter((o) => o.controls);
       if (drivers.length > 1) errs.push(`scene '${s.id}': at most one keyboard driver`);
+      let pairs = 0;
       for (const o of flat) {
         if (o.kind === "movable" && !o.solid)
           errs.push(`scene '${s.id}': '${o.path}' movable requires solid`);
         if (o.controls && o.kind !== "player")
           errs.push(`scene '${s.id}': '${o.path}' controls require player kind`);
+        const hasWait = o.events.some((e) => e.blocks.some((b) => b.op === "wait"));
+        const hasAlarm = o.events.some((e) => e.trigger === "alarm" && e.blocks.length > 0);
+        if (hasWait && !hasAlarm)
+          errs.push(`scene '${s.id}': '${o.path}' waits with no alarm event to fire`);
+        for (const e of o.events) {
+          if (e.trigger !== "collide" || e.blocks.length === 0) continue;
+          const hits = flat.filter((t, j) => matchTarget(t, j, flat.indexOf(o), e.target ?? ""));
+          if (hits.length === 0)
+            errs.push(`scene '${s.id}': '${o.path}' collide '${e.target}' matches nothing`);
+          pairs += hits.length;
+        }
         if (!spriteIds.has(o.sprite))
           errs.push(`scene '${s.id}': '${o.path}' unknown sprite '${o.sprite}'`);
         if (o.anim && !animIds.has(o.anim))
@@ -541,6 +693,10 @@ export function validateProject(p: Project): string[] {
             errs.push(`scene '${s.id}': '${o.path}' sprite must match animation '${o.anim}' size`);
         }
       }
+      if (pairs > MAX_COLLIDE_PAIRS)
+        errs.push(
+          `scene '${s.id}': ${pairs} collide pairs (max ${MAX_COLLIDE_PAIRS}) — narrow targets or split the scene`,
+        );
       const paths = new Set(flat.map((o) => o.path));
       for (const c of s.clicks) {
         if (!paths.has(c.object)) errs.push(`scene '${s.id}': click on unknown node '${c.object}'`);
@@ -628,17 +784,30 @@ function emitDevices(p: Project): string {
   return s;
 }
 
-/** Voice indices with vol > 0 (max 4, validated). */
+/** Voice indices with vol > 0 (max 4, validated), plus every voice
+    a play block names: one-shot SFX reuse the boot sample. Runs after
+    validation, so flattening never throws here. */
 function usedVoices(p: Project): number[] {
-  const out: number[] = [];
+  const out = new Set<number>();
   (p.sound?.voices ?? []).forEach((v, i) => {
-    if (i < 4 && v.vol > 0) out.push(i);
+    if (i < 4 && v.vol > 0) out.add(i);
   });
-  return out;
+  for (const s of p.scenes) {
+    for (const o of flattenScene(p, s.id)) {
+      for (const e of o.events) {
+        for (const b of e.blocks) {
+          if (b.op === "play" && Number.isInteger(b.voice) && b.voice >= 0 && b.voice < 4) out.add(b.voice);
+        }
+      }
+    }
+  }
+  return [...out].sort((a, b) => a - b);
 }
 
 function flagsOf(o: SceneObject): number {
-  return 1 | (o.solid ? 2 : 0) | (o.kind === "movable" ? 4 : 0);
+  // bit0 present, bit1 solid, bit2 movable, bit3 alive (destroy clears
+  // it; draw/drive/collide/handlers all honor it — see Phase 2).
+  return 1 | (o.solid ? 2 : 0) | (o.kind === "movable" ? 4 : 0) | 8;
 }
 
 /** Per-slot generated prefix: root scene + sanitized instance path. */
@@ -646,21 +815,34 @@ function slotTag(rootId: string, path: string): string {
   return `${rootId}_${path.replace(/\//g, "_")}`;
 }
 
-function emitSetup(rootId: string, leaves: FlatLeaf[], dims: Map<string, [number, number]>, withDims: boolean): string {
+function emitSetup(
+  rootId: string,
+  leaves: FlatLeaf[],
+  dims: Map<string, [number, number]>,
+  withDims: boolean,
+  withAlarm: boolean,
+): string {
   const lines = [`setup_${rootId} :: fn() {`];
   for (let i = 0; i < leaves.length; i++) {
     const o = leaves[i];
     let line = `    ox[${i}] = ${o.x}; oy[${i}] = ${o.y}; ot[${i}] = &spr_${o.sprite}; oflags[${i}] = ${flagsOf(o)};`;
-    // Dims ride along only where collision can read them (solid or
-    // driven slots — the drive loop guards every read with the solid
-    // flag, and the driver's own dims are literals). Besides saving
-    // ROM, this keeps setup fns far under the assembler's
-    // per-function reference budget (measured: 1200 OK, 1400 fails).
-    if (withDims && (o.solid || o.kind === "movable" || o.controls)) {
+    // Dims ride along for every leaf when anything reads them: move
+    // clamps and overlap address arbitrary (often non-solid) slots,
+    // so the solid-only shortcut from Phase 0 had to go. Uniform
+    // lines keep setup fns around 7 refs/leaf — under the assembler
+    // budget (~1200) with room to spare at realistic scene sizes.
+    if (withDims) {
       const [pw, ph] = dims.get(o.sprite) ?? [TILE_PX, TILE_PX];
       line += ` ow[${i}] = ${pw}; oh[${i}] = ${ph};`;
     }
+    if (withAlarm && o.events.some((e) => e.trigger === "alarm" && e.blocks.length > 0))
+      line += ` oat[${i}] = 0;`;
     lines.push(line);
+  }
+  for (let i = 0; i < leaves.length; i++) {
+    const o = leaves[i];
+    if (o.events.some((e) => e.trigger === "create" && e.blocks.length > 0))
+      lines.push(`    create_${slotTag(rootId, o.path)}(${i});`);
   }
   lines.push(`    ocount = ${leaves.length};`);
   lines.push(`}`);
@@ -679,28 +861,213 @@ function emitDrawScene(s: Scene, leaves: FlatLeaf[], dims: Map<string, [number, 
   leaves.forEach((o, i) => {
     const [tw, th] = dims.get(o.sprite) ?? [1, 1];
     const px = (v: number): string => (v === 0 ? "" : ` + ${v}`);
+    // Destroyed leaves go quiet (alive bit); the guard costs one
+    // reference per leaf — nothing next to the tile writes.
+    lines.push(`    if oflags[${i}] & 8 != 0 {`);
     for (let ty = 0; ty < th; ty++) {
       for (let tx = 0; tx < tw; tx++) {
         const off = (ty * tw + tx) * 16;
-        lines.push(`    Screen.x = ox[${i}]${px(tx * TILE_PX)};`);
-        lines.push(`    Screen.y = oy[${i}]${px(ty * TILE_PX)};`);
-        lines.push(`    Screen.addr = ot[${i}]${px(off)};`);
-        lines.push(`    Screen.sprite = 129;`);
+        lines.push(`        Screen.x = ox[${i}]${px(tx * TILE_PX)};`);
+        lines.push(`        Screen.y = oy[${i}]${px(ty * TILE_PX)};`);
+        lines.push(`        Screen.addr = ot[${i}]${px(off)};`);
+        lines.push(`        Screen.sprite = 129;`);
       }
     }
+    lines.push(`    }`);
   });
   lines.push(`}`);
   return lines.join("\n") + "\n";
 }
 
-function emitTickFn(tag: string, tick: string): string[] {
-  return [
-    `tick_${tag} :: fn(slot: u16) {`,
-    ...String(tick ?? "")
-      .split("\n")
-      .map((line) => `    ${line}`),
-    `}`,
-  ];
+export interface BlockCtx {
+  /** Slot variable (`slot`) or literal index. */
+  slot: string;
+  /** Canvas size for move clamps. */
+  w: number;
+  h: number;
+  /** Destroy-event fn to call first, when the leaf has one. */
+  destroyFn?: string;
+}
+
+/** One block = fixed ETAL lines. THE lowering: the UI live preview
+    and the emitter both call this, so what you see is what assembles.
+    Move clamps read ow/oh (emitted whenever blocks need them); every
+    other op is literals. No locals, no globals — leaf fns stay
+    dependency-free and far under the assembler reference budget. */
+export function previewBlocks(blocks: Block[], ctx: BlockCtx): string[] {
+  const { slot, w, h } = ctx;
+  const lines: string[] = [];
+  for (const b of blocks) {
+    if (b.op === "move") {
+      if (b.dx > 0) lines.push(`if ox[${slot}] + ow[${slot}] < ${w + 1} { ox[${slot}] = ox[${slot}] + ${b.dx}; }`);
+      else if (b.dx < 0) lines.push(`if ox[${slot}] >= ${-b.dx} { ox[${slot}] = ox[${slot}] - ${-b.dx}; }`);
+      if (b.dy > 0) lines.push(`if oy[${slot}] + oh[${slot}] < ${h + 1} { oy[${slot}] = oy[${slot}] + ${b.dy}; }`);
+      else if (b.dy < 0) lines.push(`if oy[${slot}] >= ${-b.dy} { oy[${slot}] = oy[${slot}] - ${-b.dy}; }`);
+    } else if (b.op === "set_pos") {
+      lines.push(`ox[${slot}] = ${b.x}; oy[${slot}] = ${b.y};`);
+    } else if (b.op === "play") {
+      lines.push(`Audio${b.voice}.addr = &sq32;`);
+      lines.push(`Audio${b.voice}.length = 32;`);
+      lines.push(`Audio${b.voice}.volume = ${b.vol};`);
+      lines.push(`Audio${b.voice}.adsr = 4369;`);
+      lines.push(`Audio${b.voice}.pitch = ${128 + b.note};`);
+    } else if (b.op === "goto") {
+      lines.push(`setup_${b.scene}();`);
+      lines.push(`scene_go(SC_${b.scene.toUpperCase()});`);
+    } else if (b.op === "destroy") {
+      if (ctx.destroyFn) lines.push(`${ctx.destroyFn}(${slot});`);
+      lines.push(`oflags[${slot}] = oflags[${slot}] & 247;`);
+    } else if (b.op === "wait") {
+      lines.push(`oat[${slot}] = ${b.ticks};`);
+    } else {
+      throw new Error(`unknown block '${(b as { op: unknown }).op}'`);
+    }
+  }
+  return lines;
+}
+
+/** Destroy-event fn name for a leaf: def destroy fns live per template
+    (`destroy_def_<id>`, emitted once globally), inline ones per leaf
+    (`destroy_<tag>`). Shared by the emitter, the UI preview and
+    preview_event, so all three agree on the call. */
+export function destroyFnName(
+  defs: Map<string, ObjectDef>,
+  leaf: FlatLeaf,
+  tag: string,
+): string | undefined {
+  if (leaf.def) {
+    const evs = defs.get(leaf.def)?.events ?? [];
+    return evs.some((e) => e.trigger === "destroy" && e.blocks.length > 0) ? `destroy_def_${leaf.def}` : undefined;
+  }
+  return leaf.events.some((e) => e.trigger === "destroy" && e.blocks.length > 0) ? `destroy_${tag}` : undefined;
+}
+
+/** An event owner for previews and tools: a template, or a top-level
+    leaf path of the preview scene. */
+export interface PreviewOwner {
+  def?: string;
+  leaf?: string;
+}
+
+/** Exact body lines for one event, as the emitter writes them
+    (slot-relative; headers omitted). Collide shows its matched
+    targets as a comment plus the lowered blocks — the pair
+    scaffolding itself is visible in emit_files output. */
+export function previewOwnerEvent(
+  p: Project,
+  sceneId: string,
+  owner: PreviewOwner,
+  eventId: string,
+): string[] | null {
+  let leaves: FlatLeaf[];
+  try {
+    leaves = flattenScene(p, sceneId);
+  } catch {
+    return null;
+  }
+  const defs = new Map(projectDefs(p).map((d) => [d.id, d]));
+  let events: ObjectEvent[];
+  let destroyFn: string | undefined;
+  if (owner.def !== undefined) {
+    const def = defs.get(owner.def);
+    if (!def) return null;
+    events = def.events ?? [];
+    destroyFn = (def.events ?? []).some((e) => e.trigger === "destroy" && e.blocks.length > 0)
+      ? `destroy_def_${def.id}`
+      : undefined;
+  } else if (owner.leaf !== undefined) {
+    const leaf = leaves.find((l) => l.path === owner.leaf);
+    if (!leaf) return null;
+    events = leaf.events;
+    destroyFn = destroyFnName(defs, leaf, slotTag(sceneId, leaf.path));
+  } else {
+    return null;
+  }
+  const ev = events.find((e) => e.id === eventId);
+  if (!ev) return null;
+  const lines = previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, destroyFn });
+  if (ev.trigger === "collide") {
+    const hits = leaves.filter((t, j) => matchTarget(t, j, -1, ev.target ?? "")).map((t) => t.path);
+    return [`( collide ${ev.target} → ${hits.join(", ") || "nothing"} )`, ...lines];
+  }
+  return lines;
+}
+
+/** Per-leaf event fns for one scene. Every event becomes a small
+    `slot`-param fn — the frame only dispatches — so generated fns
+    stay far under the assembler reference budget no matter how many
+    leaves share a scene. Step blocks share the historic `tick_<tag>`
+    name with legacy tick text (blocks first); destroyed leaves never
+    reach these fns (dispatch sites guard the alive bit). Destroy fns
+    for defs emit once globally (see below), inline ones per leaf. */
+function emitLeafEvents(
+  rootId: string,
+  leaves: FlatLeaf[],
+  w: number,
+  h: number,
+  defs: Map<string, ObjectDef>,
+): string[] {
+  const lines: string[] = [];
+  const ind = (ss: string[]): string[] => ss.map((l) => `    ${l}`);
+  leaves.forEach((o, i) => {
+    const tag = slotTag(rootId, o.path);
+    const ctx: BlockCtx = { slot: "slot", w, h, destroyFn: destroyFnName(defs, o, tag) };
+    const fn = (name: string, stmts: string[]): void => {
+      if (stmts.length === 0) return;
+      lines.push(`${name} :: fn(slot: u16) {`, ...ind(stmts), `}`);
+    };
+    for (const e of o.events) {
+      if (e.blocks.length === 0) continue;
+      if (e.trigger === "create") fn(`create_${tag}`, previewBlocks(e.blocks, ctx));
+      else if (e.trigger === "destroy" && !o.def) fn(`destroy_${tag}`, previewBlocks(e.blocks, ctx));
+      else if (e.trigger === "alarm") fn(`alarm_${tag}`, previewBlocks(e.blocks, ctx));
+      else if (e.trigger === "key" && e.key) fn(`key_${tag}_${e.key}`, previewBlocks(e.blocks, ctx));
+      else if (e.trigger === "click") fn(`click_${tag}`, previewBlocks(e.blocks, ctx));
+    }
+    let ci = 0;
+    for (const e of o.events) {
+      if (e.trigger !== "collide" || e.blocks.length === 0) continue;
+      const body: string[] = [`if oflags[slot] & 8 != 0 {`];
+      leaves.forEach((t, j) => {
+        if (!matchTarget(t, j, i, e.target ?? "")) return;
+        body.push(`    if overlapwh(ox[slot], oy[slot], ow[slot], oh[slot], ox[${j}], oy[${j}], ow[${j}], oh[${j}]) {`);
+        for (const s of previewBlocks(e.blocks, ctx)) body.push(`        ${s}`);
+        body.push(`    }`);
+      });
+      body.push(`}`);
+      fn(`collide_${tag}_${ci++}`, body);
+    }
+    // Step: blocks first, legacy tick text after, one historic name.
+    const stepEv = o.events.find((e) => e.trigger === "step");
+    const stepLines =
+      stepEv && stepEv.blocks.length > 0 ? previewBlocks(stepEv.blocks, ctx).map((l) => `    ${l}`) : [];
+    if (stepLines.length > 0 || o.tick) {
+      lines.push(
+        `tick_${tag} :: fn(slot: u16) {`,
+        ...stepLines,
+        ...String(o.tick ?? "")
+          .split("\n")
+          .map((line) => `    ${line}`),
+        `}`,
+      );
+    }
+  });
+  return lines;
+}
+
+/** Destroy fns for templates with destroy events: one fn per def
+    (instances share it — statements are slot-relative). Inline
+    leaves get theirs in emitLeafEvents. */
+function emitDefEvents(p: Project): string[] {
+  const lines: string[] = [];
+  for (const d of projectDefs(p)) {
+    const ev = (d.events ?? []).find((e) => e.trigger === "destroy" && e.blocks.length > 0);
+    if (!ev) continue;
+    lines.push(`destroy_def_${d.id} :: fn(slot: u16) {`);
+    for (const l of previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height })) lines.push(`    ${l}`);
+    lines.push(`}`);
+  }
+  return lines;
 }
 
 function emitAnim(rootId: string, leaves: FlatLeaf[], anims: Map<string, Animation>): string[] {
@@ -741,7 +1108,7 @@ function emitDrive(pi: number, w: number, h: number, n: number, pw: number, ph: 
     `    blocked: u8 = 0;`,
     `    for j in 0..${n} {`,
     `        if j != ${pi} {`,
-    `            if oflags[j] & 2 != 0 {`,
+    `            if oflags[j] & 10 == 10 {`,
     `                if overlapwh(ox[${pi}], oy[${pi}], ${pw}, ${ph}, ox[j], oy[j], ow[j], oh[j]) {`,
     `                    if oflags[j] & 4 != 0 {`,
     `                        jx: u16 = ox[j]; jy: u16 = oy[j];`,
@@ -753,7 +1120,7 @@ function emitDrive(pi: number, w: number, h: number, n: number, pw: number, ph: 
     `                        for k in 0..${n} {`,
     `                            if k != ${pi} {`,
     `                                if k != j {`,
-    `                                    if oflags[k] & 2 != 0 {`,
+    `                                    if oflags[k] & 10 == 10 {`,
     `                                        if overlapwh(jx, jy, ow[j], oh[j], ox[k], oy[k], ow[k], oh[k]) { free = 0; }`,
     `                                    }`,
     `                                }`,
@@ -781,8 +1148,9 @@ function emitFrame(
   dims: Map<string, [number, number]>,
 ): string {
   const lines = [`${s.id}_frame :: fn() {`];
-  if (s.keys.length > 0) lines.push(`    k: u8 = kb[0]; kb[0] = 0;`);
-  if (s.clicks.length > 0) {
+  const live = (t: EventTrigger): FlatLeaf[] => leaves.filter((o) => o.events.some((e) => e.trigger === t && e.blocks.length > 0));
+  if (s.keys.length > 0 || live("key").length > 0) lines.push(`    k: u8 = kb[0]; kb[0] = 0;`);
+  if (s.clicks.length > 0 || live("click").length > 0) {
     lines.push(`    mnow: u8 = Mouse.state | mb[0]; mb[0] = 0;`);
     lines.push(`    mpressed: u8 = mnow & (mouse_last ^ 255);`);
     lines.push(`    mouse_last = mnow;`);
@@ -792,7 +1160,9 @@ function emitFrame(
   const driver = leaves.findIndex((o) => o.controls);
   if (driver >= 0) {
     const [pw, ph] = dims.get(leaves[driver].sprite) ?? [TILE_PX, TILE_PX];
-    lines.push(...emitDrive(driver, w, h, leaves.length, pw, ph));
+    lines.push(`    if oflags[${driver}] & 8 != 0 {`);
+    lines.push(...emitDrive(driver, w, h, leaves.length, pw, ph).map((l) => `    ${l}`));
+    lines.push(`    }`);
   }
   lines.push(...emitAnim(s.id, leaves, anims));
   const byObject = new Map<string, number>();
@@ -816,8 +1186,55 @@ function emitFrame(
     lines.push(`        scene_go(SC_${k.goto.toUpperCase()});`);
     lines.push(`    }`);
   }
+  // Object handlers, in loop order: key → click → step → collide →
+  // alarm. Every dispatch guards the alive bit (destroyed leaves go
+  // quiet); the fns themselves carry the statements, so the frame
+  // stays small no matter how the scene fills up.
   leaves.forEach((o, i) => {
-    if (o.tick) lines.push(`    tick_${slotTag(s.id, o.path)}(${i});`);
+    for (const e of o.events) {
+      if (e.trigger !== "key" || e.blocks.length === 0 || !e.key) continue;
+      const code = (p.inputs ?? []).find((ii) => ii.id === e.key)?.key ?? 0;
+      lines.push(`    if k == ${code} {`);
+      lines.push(`        if oflags[${i}] & 8 != 0 {`);
+      lines.push(`            key_${slotTag(s.id, o.path)}_${e.key}(${i});`);
+      lines.push(`        }`);
+      lines.push(`    }`);
+    }
+  });
+  if (live("click").length > 0) {
+    lines.push(`    if mpressed & 1 != 0 {`);
+    leaves.forEach((o, i) => {
+      if (!o.events.some((e) => e.trigger === "click" && e.blocks.length > 0)) return;
+      const [cw, ch] = dims.get(o.sprite) ?? [TILE_PX, TILE_PX];
+      lines.push(`        if pt_in_rect(mx, my, ox[${i}], oy[${i}], ${cw}, ${ch}) {`);
+      lines.push(`            if oflags[${i}] & 8 != 0 {`);
+      lines.push(`                click_${slotTag(s.id, o.path)}(${i});`);
+      lines.push(`            }`);
+      lines.push(`        }`);
+    });
+    lines.push(`    }`);
+  }
+  leaves.forEach((o, i) => {
+    const stepEv = o.events.find((e) => e.trigger === "step");
+    if ((stepEv && stepEv.blocks.length > 0) || o.tick)
+      lines.push(`    if oflags[${i}] & 8 != 0 { tick_${slotTag(s.id, o.path)}(${i}); }`);
+  });
+  leaves.forEach((o, i) => {
+    let ci = 0;
+    for (const e of o.events) {
+      if (e.trigger !== "collide" || e.blocks.length === 0) continue;
+      lines.push(`    if oflags[${i}] & 8 != 0 { collide_${slotTag(s.id, o.path)}_${ci}(${i}); }`);
+      ci++;
+    }
+  });
+  leaves.forEach((o, i) => {
+    if (!o.events.some((e) => e.trigger === "alarm" && e.blocks.length > 0)) return;
+    lines.push(`    if oat[${i}] > 0 {`);
+    lines.push(`        oat[${i}] = oat[${i}] - 1;`);
+    lines.push(`        if oat[${i}] == 0 {`);
+    lines.push(`            alarm_${slotTag(s.id, o.path)}(${i});`);
+    lines.push(`        }`);
+    lines.push(`    }`);
   });
   if (frameHook) lines.push(`    custom_frame();`);
   if (s.frameCode) {
@@ -873,20 +1290,31 @@ export function emitProject(p: Project): Record<string, string> {
   }
   out.push(``);
   // Flattened once up front: setup/draw/frame all read it, and the
-  // dims decision below needs every leaf's driver flag.
+  // buffer decisions below need every leaf's flags and events.
   const flat = new Map(p.scenes.map((s) => [s.id, flattenScene(p, s.id)] as const));
-  // Dims buffers exist only when something reads them (a keyboard
-  // driver, or custom code naming them): unreferenced globals warn,
-  // and warning-free assembly is a tested property.
+  const flatEvents = [...flat.values()].flatMap((leaves) => leaves.flatMap((o) => o.events));
+  // Dims/alarm buffers exist only when something reads them (a
+  // keyboard driver, move/collide blocks, or custom code naming
+  // them): unreferenced globals warn, and warning-free assembly is
+  // a tested property.
   const customAll = [
     custom,
     ...p.scenes.flatMap((s) => [s.frameCode ?? "", ...s.nodes.map((o) => o.tick ?? "")]),
   ].join("\n");
   const needsDims =
     [...flat.values()].some((leaves) => leaves.some((o) => o.controls)) ||
+    flatEvents.some(
+      (e) =>
+        e.blocks.length > 0 &&
+        (e.trigger === "collide" || e.blocks.some((b) => b.op === "move")),
+    ) ||
     customAll.includes("ow[") ||
     customAll.includes("oh[") ||
     customAll.includes("overlapwh");
+  const needsAlarm =
+    flatEvents.some(
+      (e) => e.blocks.length > 0 && (e.trigger === "alarm" || e.blocks.some((b) => b.op === "wait")),
+    ) || customAll.includes("oat[");
   out.push(`buffer ox[${MAX_OBJECTS}]: u16;`);
   out.push(`buffer oy[${MAX_OBJECTS}]: u16;`);
   out.push(`buffer ot[${MAX_OBJECTS}]: u16;`);
@@ -895,6 +1323,7 @@ export function emitProject(p: Project): Record<string, string> {
     out.push(`buffer ow[${MAX_OBJECTS}]: u16;`);
     out.push(`buffer oh[${MAX_OBJECTS}]: u16;`);
   }
+  if (needsAlarm) out.push(`buffer oat[${MAX_OBJECTS}]: u8;`);
   out.push(`ocount: u8 = 0;`);
   out.push(`scene: u8 = 0;`);
   const needsKey = scenes.some((x) => x.keys.length > 0);
@@ -936,10 +1365,12 @@ export function emitProject(p: Project): Record<string, string> {
   out.push(`    for i in 0..${MAX_OBJECTS} {`);
   out.push(`        if i < ocount {`);
   out.push(`            if oflags[i] & 1 != 0 {`);
-  out.push(`                Screen.x = ox[i];`);
-  out.push(`                Screen.y = oy[i];`);
-  out.push(`                Screen.addr = ot[i];`);
-  out.push(`                Screen.sprite = 129;`);
+  out.push(`                if oflags[i] & 8 != 0 {`);
+  out.push(`                    Screen.x = ox[i];`);
+  out.push(`                    Screen.y = oy[i];`);
+  out.push(`                    Screen.addr = ot[i];`);
+  out.push(`                    Screen.sprite = 129;`);
+  out.push(`                }`);
   out.push(`            }`);
   out.push(`        }`);
   out.push(`    }`);
@@ -958,13 +1389,13 @@ export function emitProject(p: Project): Record<string, string> {
   // tiles for draw fns, pixels for setup/collide/click/drive.
   const tileDims = new Map(p.sprites.map((x) => [x.id, spriteTiles(x)] as const));
   const pxDims = new Map(p.sprites.map((x) => [x.id, spritePx(x)] as const));
+  const defs = new Map(projectDefs(p).map((d) => [d.id, d]));
+  out.push(...emitDefEvents(p));
   for (const s of scenes) {
     // Store order, not sorted: hierarchy drag-reorder defines draw order.
     const leaves = flat.get(s.id) as FlatLeaf[];
-    for (const o of leaves) {
-      if (o.tick) out.push(emitTickFn(slotTag(s.id, o.path), o.tick).join("\n") + "\n");
-    }
-    out.push(emitSetup(s.id, leaves, pxDims, needsDims));
+    out.push(...emitLeafEvents(s.id, leaves, p.width, p.height, defs));
+    out.push(emitSetup(s.id, leaves, pxDims, needsDims, needsAlarm));
     if (leaves.length > 0) out.push(emitDrawScene(s, leaves, tileDims));
     out.push(emitFrame(s, leaves, p.width, p.height, animMap, hasFrameHook, p, pxDims));
   }

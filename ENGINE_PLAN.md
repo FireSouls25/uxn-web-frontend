@@ -1,10 +1,10 @@
 # Engine plan: from scene painter to real engine
 
-Status: **Phases 0–1 done** (friction fixes + multi-tile sprites +
-object templates). Phase 2+ is still plan only. Each phase lists
-the model change, the emitter change, the UI change, and the docs/tests
-that move with it. Phases are ordered so every one ships something
-usable on its own.
+Status: **Phases 0–2 done** (friction fixes + multi-tile sprites +
+object templates + events/blocks). Phase 3+ is still plan only. Each
+phase lists the model change, the emitter change, the UI change, and
+the docs/tests that move with it. Phases are ordered so every one
+ships something usable on its own.
 
 ## 1. Where we are
 
@@ -231,36 +231,49 @@ everything later needs a picker and named inputs anyway.
   add/rename/extract/delete-bake/patch, tool flow). Suites:
   frontend 69, backend 55, `tsc` clean, production build ok.
 
-### Phase 2 — Events + blocks (the big one)
+### Phase 2 — Events + blocks (the big one) ✅ DONE
 
-* Model: `ObjectEvent[]` per def + scene events (`scene_start`
-  alongside today's transitions; click/key→goto become
-  `click`/`key` events whose default block list is `[goto]` —
-  migration, not deletion).
-* Triggers v1 (loop moments Uxn can afford): `create`, `step`,
-  `destroy`, `key` (named input), `collide` (AABB overlap vs
-  def-id/kind, edge-triggered), `click` (press-in-rect), `alarm`
-  (N slots, set/count/fire — GameMaker's 12, we do 4–8).
-* Blocks v1 (each = one ETAL lowering): move, set_pos, play voice,
-  goto scene, destroy, wait, set var, if/cond (overlap? key? var
-  compare). `tick`/`frameCode` textareas become the per-event
-  Execute-Code hatch, then deprecated (not removed).
-* Emitter: per-def event fns spliced into the frame loop in
-  documented order (create → input → step → collide → draw, mirroring
-  GameMaker's event order page); alarm counters in generated state.
-* UI:
-  * Events view rework: select object → its event list (Add Event
-    picker, GameMaker-style) → block stack editor (toolbox search,
-    drag to reorder, If forks, Live ETAL preview pane, Convert to
-    code button). Center canvas keeps showing the scene (split or
-    toggle — never lose WYSIWYG while scripting).
-  * `EventsGraph` grows into the scene map (§Phase 4) in the same
-    phase or the next.
-* Agent: `add_event`, `add_block`, `preview_event` tools; corpus
-  documents blocks 1:1 with lowerings.
-* Acceptance: chess showcase's hand ETAL re-expressible as
-  defs+events+blocks (or explicitly documented where it can't be —
-  that list is Phase 3+ input).
+* Model: `ObjectEvent {id, trigger, key?, target?, blocks}` on defs
+  and inline leaves (`SceneNode.events`); instances run their def's
+  (local lists on instances are an error). 7 triggers, 6 blocks.
+* Triggers v1: `create` (scene enter, via setup), `step`, `destroy`,
+  `key` (named input), `collide` (AABB vs any/solid/player/movable/
+  def, **level-triggered** while overlapping), `click`
+  (press-in-rect), `alarm` (**single** countdown timer per slot,
+  set by `wait`).
+* Blocks v1: move (clamped), set_pos, play (one-shot SFX reusing the
+  boot sample), goto, destroy (self; runs the destroy event first),
+  wait. **No `if`/`set` in v1** — events are the conditionals, and
+  the legacy `tick` textarea stays as the step code hatch (blocks
+  first, then tick text, same historic `tick_<tag>` name).
+* No data migration: clicks/keys/frameCode/tick stay exactly as they
+  were; object events are new and coexist (scene transitions still
+  run first in the frame).
+* Emitter: every event lowers to a small per-leaf `slot`-param fn
+  (step shares `tick_<tag>`); destroy fns live per template
+  (`destroy_def_<id>`) or per inline leaf. Frame only dispatches, in
+  documented order: input latch → drive → anims → scene transitions
+  → object key → object click → step → collide → alarm →
+  custom/frameCode → draw. Destroyed leaves go quiet via a new
+  alive bit (oflags bit 3; draw, drive, collide, handlers honor
+  it). Collide pairs unroll statically (max 48/scene, validated)
+  with a dead-target error — no runtime tags needed.
+* UI: events view center = `EventPanel` (owner picker: scene leaves
+  + templates; event list with Add picker incl. KeyPicker and
+  collide targets; vertical block stack with per-op editors, up/down
+  reorder, add palette, live ETAL preview via the same
+  `previewBlocks` the emitter calls; step shows the tick hatch).
+  Transition graph stays below it, untouched (scene map = Phase 4).
+  Convert-to-code and toolbox-search deferred (stack is small).
+* Agent: `add_event`, `add_block`, `preview_event` (+ delete both);
+  corpus documents triggers/blocks/order/caps 1:1.
+* Tests: 10 new (validation incl. dups/pairing/dead-targets/cap,
+  exact lowerings per op, fn/dispatch/guard wiring, store fns,
+  agent tool flow, full-events real-etal assembly). Suites:
+  frontend 79, backend 55, `tsc` clean, production build ok.
+* Phase 3+ input: `if`/variables need a var system (buffers +
+  UI); named sounds replace play literals; edge-triggered collide
+  would need prev-frame overlap state.
 
 ### Phase 3 — Sound as an event citizen
 

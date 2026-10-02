@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { artifactFilename } from "./export";
 import {
+  addBlock,
   addDef,
+  addEvent,
   addInstance,
   clampToCanvas,
+  deleteBlock,
   deleteDef,
+  deleteEvent,
   extractObject,
+  moveBlock,
   moveObject,
+  patchBlock,
   patchDef,
   renameDef,
   renameObject,
@@ -152,5 +158,49 @@ describe("object templates", () => {
       kind: "movable",
       solid: true,
     });
+  });
+});
+
+describe("object events", () => {
+  function reset() {
+    projectsStore.set({ demo: structuredClone(SAMPLE_PROJECT) });
+    currentIdStore.set("demo");
+    sceneIdStore.set("title");
+    selectionStore.set(null);
+    defSelStore.set(null);
+  }
+
+  it("adds events and blocks to defs and leaves", () => {
+    reset();
+    addDef("crate", "wall");
+    expect(addEvent({ def: "crate" }, "step")).toBe("ev_1");
+    expect(addEvent({ def: "crate" }, "step")).toBe("ev_2"); // ids unique, dup caught by validation
+    expect(addEvent({ def: "crate" }, "key", { key: "jump" })).toBe("ev_3");
+    expect(addEvent({ def: "crate" }, "key", {})).toBeNull();
+    expect(addEvent({ def: "nope" }, "step")).toBeNull();
+    expect(addEvent({ leaf: "hero" }, "explode" as never)).toBeNull();
+    expect(addBlock({ def: "crate" }, "ev_1", { op: "move", dx: 1, dy: 0 })).toBe(true);
+    expect(addBlock({ def: "crate" }, "ev_1", { op: "nope" } as never)).toBe(false);
+    expect(addBlock({ def: "crate" }, "missing", { op: "move", dx: 0, dy: 0 })).toBe(false);
+    expect(addEvent({ leaf: "hero" }, "step")).toBe("ev_1");
+    expect(addBlock({ leaf: "hero" }, "ev_1", { op: "wait", ticks: 30 })).toBe(true);
+    expect(moveBlock({ def: "crate" }, "ev_1", 0, 0)).toBe(true);
+    expect(moveBlock({ def: "crate" }, "ev_1", 0, 9)).toBe(false);
+    expect(patchBlock({ def: "crate" }, "ev_1", 0, { dx: 2 })).toBe(true);
+    expect(deleteBlock({ def: "crate" }, "ev_1", 0)).toBe(true);
+    expect(deleteBlock({ def: "crate" }, "ev_1", 0)).toBe(false);
+    expect(deleteEvent({ def: "crate" }, "ev_2")).toBe(true);
+    expect(deleteEvent({ def: "crate" }, "ev_2")).toBe(false);
+    const demo = projectsStore.get().demo;
+    expect(demo.objectDefs?.find((d) => d.id === "crate")?.events?.map((e) => e.id)).toEqual(["ev_1", "ev_3"]);
+    expect(demo.scenes[0].nodes.find((o) => o.id === "hero")?.events?.map((e) => e.id)).toEqual(["ev_1"]);
+  });
+
+  it("refuses events on instances and nested leaves", () => {
+    reset();
+    addDef("crate", "wall");
+    addInstance("crate", 0, 0, "box");
+    expect(addEvent({ leaf: "box" }, "step")).toBeNull(); // instance: edit the def
+    expect(validateProject(projectsStore.get().demo)).toEqual([]);
   });
 });

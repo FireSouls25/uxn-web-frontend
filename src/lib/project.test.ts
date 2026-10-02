@@ -430,6 +430,166 @@ describe("object templates", () => {
   });
 });
 
+describe("object events", () => {
+  function evProject(): Project {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.objectDefs = [
+      {
+        id: "coin_obj",
+        sprite: "coin",
+        kind: "static",
+        events: [
+          { id: "ev_1", trigger: "create", blocks: [{ op: "play", voice: 1, note: 72, vol: 100 }] },
+          { id: "ev_2", trigger: "click", blocks: [{ op: "play", voice: 1, note: 84, vol: 100 }] },
+          { id: "ev_3", trigger: "destroy", blocks: [{ op: "play", voice: 1, note: 36, vol: 80 }] },
+        ],
+      },
+    ];
+    p.scenes[0].nodes.push(
+      { id: "bonus", x: 0, y: 0, def: "coin_obj" },
+      {
+        id: "walker",
+        x: 8,
+        y: 8,
+        sprite: "hero",
+        kind: "static",
+        events: [
+          { id: "ev_1", trigger: "step", blocks: [{ op: "move", dx: 1, dy: 0 }, { op: "wait", ticks: 30 }] },
+          { id: "ev_2", trigger: "key", key: "jump", blocks: [{ op: "set_pos", x: 8, y: 8 }] },
+          { id: "ev_3", trigger: "collide", target: "def:coin_obj", blocks: [{ op: "destroy" }] },
+          { id: "ev_4", trigger: "alarm", blocks: [{ op: "play", voice: 2, note: 60, vol: 100 }] },
+          { id: "ev_5", trigger: "destroy", blocks: [{ op: "play", voice: 2, note: 48, vol: 100 }] },
+        ],
+      },
+    );
+    return p;
+  }
+
+  it("accepts a project using every trigger and block", () => {
+    expect(validateProject(evProject())).toEqual([]);
+  });
+
+  it("rejects bad triggers, refs, duplicates and ranges", () => {
+    const badId = evProject();
+    badId.objectDefs![0].events!.push({ id: "ev_1", trigger: "step", blocks: [] });
+    expect(validateProject(badId).some((e) => e.includes("duplicate event id"))).toBe(true);
+    const badTrigger = evProject();
+    (badTrigger.objectDefs![0].events![0] as { trigger: string }).trigger = "explode";
+    expect(validateProject(badTrigger).some((e) => e.includes("bad trigger"))).toBe(true);
+    const badKey = evProject();
+    badKey.scenes[0].nodes.find((o) => o.id === "walker")!.events![1].key = "nope";
+    expect(validateProject(badKey).some((e) => e.includes("needs a known input"))).toBe(true);
+    const badTarget = evProject();
+    badTarget.scenes[0].nodes.find((o) => o.id === "walker")!.events![2].target = "def:nope";
+    expect(validateProject(badTarget).some((e) => e.includes("collide target must be"))).toBe(true);
+    const badBlock = evProject();
+    (badBlock.objectDefs![0].events![0].blocks[0] as { vol: number }).vol = 300;
+    expect(validateProject(badBlock).some((e) => e.includes("vol must be 0–255"))).toBe(true);
+    const badGoto = evProject();
+    badGoto.scenes[0].nodes.find((o) => o.id === "walker")!.events!.push({
+      id: "ev_9",
+      trigger: "step",
+      blocks: [{ op: "goto", scene: "nowhere" }],
+    });
+    expect(validateProject(badGoto).some((e) => e.includes("goto unknown scene"))).toBe(true);
+  });
+
+  it("rejects instance-local events and unpaired waits", () => {
+    const p = evProject();
+    p.scenes[0].nodes.find((o) => o.id === "bonus")!.events = [{ id: "ev_9", trigger: "step", blocks: [] }];
+    expect(validateProject(p).some((e) => e.includes("carry no events"))).toBe(true);
+    const q = evProject();
+    q.scenes[0].nodes.find((o) => o.id === "walker")!.events = q.scenes[0].nodes
+      .find((o) => o.id === "walker")!
+      .events!.filter((e) => e.trigger !== "alarm");
+    expect(validateProject(q).some((e) => e.includes("no alarm event"))).toBe(true);
+  });
+
+  it("rejects dead collide targets and caps pairs", () => {
+    const p = evProject();
+    p.scenes[1].nodes.push({
+      id: "lonely",
+      x: 0,
+      y: 0,
+      sprite: "hero",
+      kind: "static",
+      events: [{ id: "ev_1", trigger: "collide", target: "def:coin_obj", blocks: [{ op: "destroy" }] }],
+    });
+    expect(validateProject(p).some((e) => e.includes("matches nothing"))).toBe(true);
+    const big = structuredClone(SAMPLE_PROJECT);
+    for (let i = 0; i < 8; i++) {
+      big.scenes[0].nodes.push({
+        id: `swarm${i}`,
+        x: i * 8,
+        y: 0,
+        sprite: "hero",
+        kind: "static",
+        events: [{ id: "ev_1", trigger: "collide", target: "any", blocks: [{ op: "destroy" }] }],
+      });
+    }
+    expect(validateProject(big).some((e) => e.includes("collide pairs"))).toBe(true);
+  });
+
+  it("lowers every block to fixed lines", async () => {
+    const { previewBlocks } = await import("./project");
+    const ctx = { slot: "slot", w: 128, h: 128 };
+    expect(previewBlocks([{ op: "move", dx: 2, dy: -3 }], ctx)).toEqual([
+      "if ox[slot] + ow[slot] < 129 { ox[slot] = ox[slot] + 2; }",
+      "if oy[slot] >= 3 { oy[slot] = oy[slot] - 3; }",
+    ]);
+    expect(previewBlocks([{ op: "set_pos", x: 1, y: 2 }], ctx)).toEqual(["ox[slot] = 1; oy[slot] = 2;"]);
+    expect(previewBlocks([{ op: "play", voice: 1, note: 72, vol: 100 }], ctx)).toEqual([
+      "Audio1.addr = &sq32;",
+      "Audio1.length = 32;",
+      "Audio1.volume = 100;",
+      "Audio1.adsr = 4369;",
+      "Audio1.pitch = 200;",
+    ]);
+    expect(previewBlocks([{ op: "goto", scene: "play" }], ctx)).toEqual(["setup_play();", "scene_go(SC_PLAY);"]);
+    expect(previewBlocks([{ op: "destroy" }], { ...ctx, destroyFn: "destroy_x" })).toEqual([
+      "destroy_x(slot);",
+      "oflags[slot] = oflags[slot] & 247;",
+    ]);
+    expect(previewBlocks([{ op: "wait", ticks: 30 }], ctx)).toEqual(["oat[slot] = 30;"]);
+  });
+
+  it("wires fns, dispatch and alive guards through the frame", () => {
+    const main = emitProject(evProject())["main.ux"];
+    // setup marks slots alive and calls create fns
+    expect(main).toContain("oflags[0] = 9;");
+    expect(main).toContain("create_title_bonus(3);");
+    // per-leaf fns exist for every trigger
+    for (const fn of ["click_title_bonus", "tick_title_walker", "key_title_walker_jump", "collide_title_walker_0", "alarm_title_walker", "destroy_title_walker", "destroy_def_coin_obj"]) {
+      expect(main).toContain(`${fn} :: fn(slot: u16) {`);
+    }
+    // step blocks run before legacy tick text in the historic name
+    expect(main.indexOf("oat[slot] = 30;")).toBeLessThan(main.indexOf("tick_title_walker(4);"));
+    // dispatch guards the alive bit; alarm polls the countdown
+    expect(main).toContain("if k == 32 {");
+    expect(main).toContain("key_title_walker_jump(4);");
+    expect(main).toContain("if oat[4] > 0 {");
+    // draw and drive honor destroyed leaves
+    expect(main).toContain("if oflags[4] & 8 != 0 {");
+    expect(main).toContain("oflags[j] & 10 == 10");
+  });
+
+  it("assembles a full-events project with the real etal", async () => {
+    const files = emitProject(evProject());
+    const etal =
+      process.env.ETAL_BIN ?? "/home/grim/Documents/projects/uxn-dsl/build/linux-x86/etal";
+    if (!existsSync(etal)) {
+      console.warn("skip: no etal binary");
+      return;
+    }
+    const dir = mkdtempSync(join(tmpdir(), "uxn-events-"));
+    for (const [name, content] of Object.entries(files)) {
+      writeFileSync(join(dir, name), content);
+    }
+    execFileSync(etal, ["-r", join(dir, "main.ux"), "-o", join(dir, "events.rom")], { stdio: "pipe" });
+    expect(existsSync(join(dir, "events.rom"))).toBe(true);
+  });
+});
+
 describe("named inputs", () => {
   function legacy(): Record<string, unknown> {
     const p = structuredClone(SAMPLE_PROJECT) as unknown as Record<string, unknown>;
