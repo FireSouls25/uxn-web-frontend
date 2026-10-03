@@ -606,6 +606,53 @@ describe("object events", () => {
   });
 });
 
+describe("scene map", () => {
+  it("orders nodes by depth and lists bindings plus event gotos", async () => {
+    const { buildSceneMap } = await import("./project");
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.scenes.push({ id: "void", nodes: [], clicks: [], keys: [] });
+    p.scenes[0].nodes.find((o) => o.id === "hero")!.events!.push({
+      id: "ev_9",
+      trigger: "step",
+      blocks: [{ op: "goto", scene: "void" }],
+    });
+    const map = buildSceneMap(p);
+    expect(map.nodes.map((n) => [n.id, n.depth])).toEqual([
+      ["title", 0],
+      ["play", 1],
+      ["void", 1],
+    ]);
+    expect(map.nodes.find((n) => n.id === "title")!.leaves).toBe(3);
+    const labels = map.edges.map((e) => `${e.from}→${e.to}|${e.label}`);
+    expect(labels).toContain("title→play|click hero");
+    expect(labels).toContain("title→play|key jump");
+    expect(labels).toContain("play→title|key back");
+    expect(labels).toContain("title→void|step hero");
+  });
+
+  it("dedupes edges, skips unknown gotos, and survives broken scenes", async () => {
+    const { buildSceneMap } = await import("./project");
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.scenes[0].nodes.find((o) => o.id === "hero")!.events!.push(
+      { id: "ev_9", trigger: "step", blocks: [{ op: "goto", scene: "play" }] },
+      { id: "ev_10", trigger: "step", blocks: [{ op: "goto", scene: "play" }] },
+      { id: "ev_11", trigger: "step", blocks: [{ op: "goto", scene: "nowhere" }] },
+    );
+    // a nesting cycle: flatten throws, the node still lists
+    p.scenes.push(
+      { id: "a", nodes: [{ id: "to_b", x: 0, y: 0, scene: "b" }], clicks: [], keys: [] },
+      { id: "b", nodes: [{ id: "to_a", x: 0, y: 0, scene: "a" }], clicks: [], keys: [] },
+    );
+    const map = buildSceneMap(p);
+    const steps = map.edges.filter((e) => e.label === "step hero");
+    expect(steps).toHaveLength(1);
+    expect(map.edges.some((e) => e.to === "nowhere")).toBe(false);
+    const broken = map.nodes.find((n) => n.id === "a")!;
+    expect(broken).toMatchObject({ broken: true, leaves: -1, depth: -1 });
+    expect(map.nodes.map((n) => n.id)).toContain("b");
+  });
+});
+
 describe("named sounds", () => {
   it("migrates literal play blocks to shared named sounds", () => {
     const raw = structuredClone(SAMPLE_PROJECT) as unknown as Record<string, unknown>;

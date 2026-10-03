@@ -581,6 +581,86 @@ function validateEvents(
   return errs;
 }
 
+export interface SceneMapEdge {
+  from: string;
+  to: string;
+  label: string;
+}
+export interface SceneMapNode {
+  id: string;
+  /** Flattened leaf count, -1 when the chain is broken mid-edit. */
+  leaves: number;
+  broken: boolean;
+  /** BFS depth from the start scene (-1 = unreachable). Drives columns. */
+  depth: number;
+}
+export interface SceneMap {
+  nodes: SceneMapNode[];
+  edges: SceneMapEdge[];
+}
+
+/** Scene overview data: every scene as a node, every transition as a
+    labeled edge — bindings AND goto blocks in leaf events (defs
+    included, via resolved flat leaves). Broken scenes still list
+    (with their bindings, no event edges); unknown gotos are skipped.
+    Nodes come out BFS-ordered from the start scene. Pure: the map
+    canvas renders this without touching the store. */
+export function buildSceneMap(p: Project): SceneMap {
+  const sceneIds = new Set(p.scenes.map((s) => s.id));
+  const nodes: SceneMapNode[] = p.scenes.map((s) => {
+    let leaves = -1;
+    try {
+      leaves = flattenScene(p, s.id).length;
+    } catch {
+      leaves = -1;
+    }
+    return { id: s.id, leaves, broken: leaves < 0, depth: -1 };
+  });
+  const edges: SceneMapEdge[] = [];
+  const seen = new Set<string>();
+  const push = (from: string, to: string, label: string): void => {
+    if (!sceneIds.has(to)) return;
+    const key = `${from}→${to}|${label}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    edges.push({ from, to, label });
+  };
+  for (const s of p.scenes) {
+    for (const c of s.clicks) push(s.id, c.goto, `click ${c.object}`);
+    for (const k of s.keys) push(s.id, k.goto, `key ${k.input ?? k.key}`);
+    let flat: FlatLeaf[];
+    try {
+      flat = flattenScene(p, s.id);
+    } catch {
+      continue;
+    }
+    for (const o of flat) {
+      for (const e of o.events) {
+        for (const b of e.blocks) {
+          if (b.op !== "goto") continue;
+          push(s.id, b.scene, `${e.trigger} ${o.def ?? o.id}`);
+        }
+      }
+    }
+  }
+  // BFS depths from the start scene for column layout.
+  const depth = new Map<string, number>([[p.start, 0]]);
+  const queue = [p.start];
+  while (queue.length > 0) {
+    const cur = queue.shift() as string;
+    const d = depth.get(cur) as number;
+    for (const e of edges) {
+      if (e.from !== cur || depth.has(e.to)) continue;
+      depth.set(e.to, d + 1);
+      queue.push(e.to);
+    }
+  }
+  for (const n of nodes) n.depth = depth.get(n.id) ?? -1;
+  const rank = new Map(nodes.map((n, i) => [n.id, i]));
+  nodes.sort((a, b) => (a.depth < 0 ? 1e9 : a.depth) - (b.depth < 0 ? 1e9 : b.depth) || (rank.get(a.id) as number) - (rank.get(b.id) as number));
+  return { nodes, edges };
+}
+
 /** Static collide matching: kinds and def identity are all known at
     emit time (leaves carry resolved kind + raw def ref), so pairs
     unroll without any runtime tags. */

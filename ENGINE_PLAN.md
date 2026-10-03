@@ -1,10 +1,10 @@
 # Engine plan: from scene painter to real engine
 
-Status: **Phases 0–3 done** (friction fixes + multi-tile sprites +
-object templates + events/blocks + named sounds). Phase 4+ is still
-plan only. Each phase lists the model change, the emitter change, the
-UI change, and the docs/tests that move with it. Phases are ordered
-so every one ships something usable on its own.
+Status: **Phases 0–4 done** (friction fixes + multi-tile sprites +
+object templates + events/blocks + named sounds + scene map). Only
+Phase 5 (polish) is still plan. Each phase lists the model change,
+the emitter change, the UI change, and the docs/tests that move with
+it. Phases are ordered so every one ships something usable on its own.
 
 ## 1. Where we are
 
@@ -298,13 +298,23 @@ everything later needs a picker and named inputs anyway.
   validation, sample after-boot SFX, store add/rename/delete).
   Suites: frontend 83, backend 55, `tsc` clean, production build ok.
 
-### Phase 4 — Scenes overview map
+### Phase 4 — Scenes overview map ✅ DONE
 
-* `EventsGraph` list → canvas: scene nodes (status color, object
-  count), edges for every transition/event-goto, click-to-jump,
-  drag-to-pan, "new scene" drop, minimap-ish zoom for large projects.
-  GameMaker's room order + Godot's scene tabs as reference, not copy.
-* No model change (reads scenes + bindings + event gotos).
+* `EventsGraph` list → SVG canvas: scene nodes (accent color,
+  object count, start-scene ring, dashed red when broken), edges
+  for every transition — bindings AND event goto blocks (deduped,
+  labeled, self-loops included), click-to-jump, drag-to-pan,
+  cursor-anchored wheel zoom + buttons + fit. BFS-depth columns
+  from the start scene (unreachable last). No minimap (zoom-to-fit
+  + pan covers it at our scene counts) and no "new scene" drop
+  (creation stays in the hierarchy).
+* No model change: pure `buildSceneMap(p)` over scenes + bindings
+  + resolved flat-leaf events (def events included automatically);
+  broken scenes list with bindings but no event edges, unknown
+  gotos skipped.
+* Tests: map ordering/depths/edge labels, dedupe, unknown-goto
+  skip, broken-scene survival. Suites: frontend 85, `tsc` clean,
+  production build ok.
 
 ### Phase 5 — Engine-complete polish (pick by pain, not by list)
 
