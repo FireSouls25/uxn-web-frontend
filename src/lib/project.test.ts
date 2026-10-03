@@ -433,15 +433,19 @@ describe("object templates", () => {
 describe("object events", () => {
   function evProject(): Project {
     const p = structuredClone(SAMPLE_PROJECT);
+    p.sounds = [
+      { id: "blip", voices: [{ note: 72, vol: 100 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }] },
+      { id: "chime", voices: [{ note: 0, vol: 0 }, { note: 60, vol: 100 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }] },
+    ];
     p.objectDefs = [
       {
         id: "coin_obj",
         sprite: "coin",
         kind: "static",
         events: [
-          { id: "ev_1", trigger: "create", blocks: [{ op: "play", voice: 1, note: 72, vol: 100 }] },
-          { id: "ev_2", trigger: "click", blocks: [{ op: "play", voice: 1, note: 84, vol: 100 }] },
-          { id: "ev_3", trigger: "destroy", blocks: [{ op: "play", voice: 1, note: 36, vol: 80 }] },
+          { id: "ev_1", trigger: "create", blocks: [{ op: "play", sound: "blip" }] },
+          { id: "ev_2", trigger: "click", blocks: [{ op: "play", sound: "blip" }] },
+          { id: "ev_3", trigger: "destroy", blocks: [{ op: "play", sound: "blip" }] },
         ],
       },
     ];
@@ -457,8 +461,8 @@ describe("object events", () => {
           { id: "ev_1", trigger: "step", blocks: [{ op: "move", dx: 1, dy: 0 }, { op: "wait", ticks: 30 }] },
           { id: "ev_2", trigger: "key", key: "jump", blocks: [{ op: "set_pos", x: 8, y: 8 }] },
           { id: "ev_3", trigger: "collide", target: "def:coin_obj", blocks: [{ op: "destroy" }] },
-          { id: "ev_4", trigger: "alarm", blocks: [{ op: "play", voice: 2, note: 60, vol: 100 }] },
-          { id: "ev_5", trigger: "destroy", blocks: [{ op: "play", voice: 2, note: 48, vol: 100 }] },
+          { id: "ev_4", trigger: "alarm", blocks: [{ op: "play", sound: "chime" }] },
+          { id: "ev_5", trigger: "destroy", blocks: [{ op: "play", sound: "chime" }] },
         ],
       },
     );
@@ -482,9 +486,12 @@ describe("object events", () => {
     const badTarget = evProject();
     badTarget.scenes[0].nodes.find((o) => o.id === "walker")!.events![2].target = "def:nope";
     expect(validateProject(badTarget).some((e) => e.includes("collide target must be"))).toBe(true);
-    const badBlock = evProject();
-    (badBlock.objectDefs![0].events![0].blocks[0] as { vol: number }).vol = 300;
-    expect(validateProject(badBlock).some((e) => e.includes("vol must be 0–255"))).toBe(true);
+    const badSound = evProject();
+    (badSound.objectDefs![0].events![0].blocks[0] as { sound: string }).sound = "nope";
+    expect(validateProject(badSound).some((e) => e.includes("play needs a known sound"))).toBe(true);
+    const silent = evProject();
+    silent.sounds!.forEach((x) => x.voices.forEach((v) => (v.vol = 0)));
+    expect(validateProject(silent).some((e) => e.includes("is silent"))).toBe(true);
     const badGoto = evProject();
     badGoto.scenes[0].nodes.find((o) => o.id === "walker")!.events!.push({
       id: "ev_9",
@@ -531,20 +538,29 @@ describe("object events", () => {
   });
 
   it("lowers every block to fixed lines", async () => {
-    const { previewBlocks } = await import("./project");
-    const ctx = { slot: "slot", w: 128, h: 128 };
+    const { previewBlocks, soundMap } = await import("./project");
+    const p = evProject();
+    const ctx = { slot: "slot", w: 128, h: 128, sounds: soundMap(p) };
     expect(previewBlocks([{ op: "move", dx: 2, dy: -3 }], ctx)).toEqual([
       "if ox[slot] + ow[slot] < 129 { ox[slot] = ox[slot] + 2; }",
       "if oy[slot] >= 3 { oy[slot] = oy[slot] - 3; }",
     ]);
     expect(previewBlocks([{ op: "set_pos", x: 1, y: 2 }], ctx)).toEqual(["ox[slot] = 1; oy[slot] = 2;"]);
-    expect(previewBlocks([{ op: "play", voice: 1, note: 72, vol: 100 }], ctx)).toEqual([
+    expect(previewBlocks([{ op: "play", sound: "blip" }], ctx)).toEqual([
+      "Audio0.addr = &sq32;",
+      "Audio0.length = 32;",
+      "Audio0.volume = 100;",
+      "Audio0.adsr = 4369;",
+      "Audio0.pitch = 200;",
+    ]);
+    expect(previewBlocks([{ op: "play", sound: "chime" }], ctx)).toEqual([
       "Audio1.addr = &sq32;",
       "Audio1.length = 32;",
       "Audio1.volume = 100;",
       "Audio1.adsr = 4369;",
-      "Audio1.pitch = 200;",
+      "Audio1.pitch = 188;",
     ]);
+    expect(previewBlocks([{ op: "play", sound: "nope" }], ctx)).toEqual(["( unknown sound 'nope' )"]);
     expect(previewBlocks([{ op: "goto", scene: "play" }], ctx)).toEqual(["setup_play();", "scene_go(SC_PLAY);"]);
     expect(previewBlocks([{ op: "destroy" }], { ...ctx, destroyFn: "destroy_x" })).toEqual([
       "destroy_x(slot);",
@@ -587,6 +603,54 @@ describe("object events", () => {
     }
     execFileSync(etal, ["-r", join(dir, "main.ux"), "-o", join(dir, "events.rom")], { stdio: "pipe" });
     expect(existsSync(join(dir, "events.rom"))).toBe(true);
+  });
+});
+
+describe("named sounds", () => {
+  it("migrates literal play blocks to shared named sounds", () => {
+    const raw = structuredClone(SAMPLE_PROJECT) as unknown as Record<string, unknown>;
+    delete raw["sounds"];
+    const scenes = raw["scenes"] as Array<{ nodes: Array<Record<string, unknown>> }>;
+    const hero = scenes[0].nodes.find((o) => o.id === "hero")!;
+    hero["events"] = [{ id: "ev_9", trigger: "click", blocks: [{ op: "play", voice: 1, note: 72, vol: 100 }] }];
+    const wall = scenes[0].nodes.find((o) => o.id === "wall")!;
+    wall["events"] = [{ id: "ev_1", trigger: "step", blocks: [{ op: "play", voice: 1, note: 72, vol: 100 }] }];
+    const p = migrateProject(raw);
+    // identical literals share one synthesized sound
+    expect(p.sounds).toEqual([
+      {
+        id: "sfx_1_72_100",
+        voices: [{ note: 0, vol: 0 }, { note: 72, vol: 100 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }],
+      },
+    ]);
+    const heroEv = p.scenes[0].nodes.find((o) => o.id === "hero")!.events![0];
+    expect(heroEv.blocks).toEqual([{ op: "play", sound: "sfx_1_72_100" }]);
+    const wallEv = p.scenes[0].nodes.find((o) => o.id === "wall")!.events![0];
+    expect(wallEv.blocks).toEqual([{ op: "play", sound: "sfx_1_72_100" }]);
+    expect(validateProject(p)).toEqual([]);
+    expect(emitProject(p)["main.ux"]).toContain("Audio1.pitch = 200;");
+  });
+
+  it("validates the sound library", () => {
+    const dup = structuredClone(SAMPLE_PROJECT);
+    dup.sounds!.push({ id: "blip", voices: [{ note: 60, vol: 100 }] });
+    expect(validateProject(dup).some((e) => e.includes("duplicate sound id"))).toBe(true);
+    const badVoice = structuredClone(SAMPLE_PROJECT);
+    badVoice.sounds![0].voices[1] = { note: 200, vol: 100 };
+    expect(validateProject(badVoice).some((e) => e.includes("note must be 0–107"))).toBe(true);
+    const silent = structuredClone(SAMPLE_PROJECT);
+    silent.sounds![0].voices.forEach((v) => (v.vol = 0));
+    expect(validateProject(silent).some((e) => e.includes("is silent"))).toBe(true);
+    const dangling = structuredClone(SAMPLE_PROJECT);
+    (dangling.scenes[0].nodes.find((o) => o.id === "hero")!.events![0].blocks[0] as { sound: string }).sound = "nope";
+    expect(validateProject(dangling).some((e) => e.includes("play needs a known sound"))).toBe(true);
+  });
+
+  it("plays a sound after boot in the sample", () => {
+    const files = emitProject(SAMPLE_PROJECT);
+    expect(files["main.ux"]).toContain("click_title_hero :: fn(slot: u16) {");
+    expect(files["main.ux"]).toContain("Audio1.pitch = 212;");
+    expect(files["devices.ux"]).toContain("device Audio1 64");
   });
 });
 

@@ -84,8 +84,19 @@ describe("agent tools", () => {
     expect(runTool("create_object_def", { name: "coin_obj", sprite: "coin" }).ok).toBe(true);
     const ev = runTool("add_event", { def: "coin_obj", trigger: "click" });
     expect(ev).toMatchObject({ ok: true, data: { id: "ev_1" } });
-    expect(runTool("add_block", { def: "coin_obj", event: "ev_1", op: "play", voice: 1, note: 72, vol: 100 }).ok).toBe(true);
+    expect(runTool("create_sound", { name: "sfx" }).ok).toBe(true);
+    expect(runTool("set_sound_voice", { sound: "sfx", voice: 1, note: 72, vol: 100 }).ok).toBe(true);
+    expect(runTool("set_sound_voice", { sound: "nope", voice: 0, note: 60, vol: 100 }).ok).toBe(false);
+    expect(runTool("add_block", { def: "coin_obj", event: "ev_1", op: "play", sound: "sfx" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "coin_obj", event: "ev_1", op: "play", sound: "nope" }).ok).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: false });
+    expect(runTool("delete_block", { def: "coin_obj", event: "ev_1", index: 1 }).ok).toBe(true);
     expect(runTool("add_block", { def: "coin_obj", event: "ev_1", op: "frobnicate" }).ok).toBe(false);
+    expect(runTool("rename_sound", { from: "sfx", to: "ping" }).ok).toBe(true);
+    expect(runTool("delete_sound", { sound: "ping" }).ok).toBe(false); // still referenced
+    expect(runTool("create_sound", { name: "tmp" }).ok).toBe(true);
+    expect(runTool("delete_sound", { sound: "tmp" }).ok).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
     expect(runTool("place_instance", { def: "coin_obj", name: "bonus", x: 0, y: 0 }).ok).toBe(true);
     expect(runTool("add_event", { object: "coin", trigger: "collide", target: "def:coin_obj" }).ok).toBe(true);
     expect(runTool("add_block", { object: "coin", event: "ev_1", op: "destroy" }).ok).toBe(true);

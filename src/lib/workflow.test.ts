@@ -5,10 +5,12 @@ import {
   addDef,
   addEvent,
   addInstance,
+  addSound,
   clampToCanvas,
   deleteBlock,
   deleteDef,
   deleteEvent,
+  deleteSound,
   extractObject,
   moveBlock,
   moveObject,
@@ -16,7 +18,9 @@ import {
   patchDef,
   renameDef,
   renameObject,
+  renameSound,
   reorderObject,
+  setSoundVoice,
 } from "./store";
 import { currentIdStore, defSelStore, projectsStore, sceneIdStore, selectionStore } from "./store";
 import { SAMPLE_PROJECT, validateProject } from "./project";
@@ -193,7 +197,7 @@ describe("object events", () => {
     expect(deleteEvent({ def: "crate" }, "ev_2")).toBe(false);
     const demo = projectsStore.get().demo;
     expect(demo.objectDefs?.find((d) => d.id === "crate")?.events?.map((e) => e.id)).toEqual(["ev_1", "ev_3"]);
-    expect(demo.scenes[0].nodes.find((o) => o.id === "hero")?.events?.map((e) => e.id)).toEqual(["ev_1"]);
+    expect(demo.scenes[0].nodes.find((o) => o.id === "hero")?.events?.map((e) => e.id)).toEqual(["ev_click", "ev_1"]);
   });
 
   it("refuses events on instances and nested leaves", () => {
@@ -201,6 +205,40 @@ describe("object events", () => {
     addDef("crate", "wall");
     addInstance("crate", 0, 0, "box");
     expect(addEvent({ leaf: "box" }, "step")).toBeNull(); // instance: edit the def
+    expect(validateProject(projectsStore.get().demo)).toEqual([]);
+  });
+});
+
+describe("named sounds", () => {
+  function reset() {
+    projectsStore.set({ demo: structuredClone(SAMPLE_PROJECT) });
+    currentIdStore.set("demo");
+    sceneIdStore.set("title");
+    selectionStore.set(null);
+    defSelStore.set(null);
+  }
+
+  it("adds voices, retargets renames, and refuses dangling deletes", () => {
+    reset();
+    expect(addSound("alarm")).toBe("alarm");
+    expect(addSound("alarm")).not.toBe("alarm");
+    expect(deleteSound("alarm_2")).toBeNull();
+    expect(setSoundVoice("alarm", 0, 72, 120)).toBeNull();
+    expect(setSoundVoice("nope", 0, 72, 120)).toContain("unknown sound");
+    expect(setSoundVoice("alarm", 9, 72, 120)).toContain("voice must be 0–3");
+    const def = addDef("x", "hero");
+    const ev = addEvent({ def }, "step")!;
+    expect(addBlock({ def }, ev, { op: "play", sound: "alarm" })).toBe(true);
+    expect(renameSound("alarm", "siren")).toBeNull();
+    expect(renameSound("siren", "9bad")).toBe("bad id");
+    const demo = projectsStore.get().demo;
+    expect(demo.sounds?.map((s) => s.id)).toContain("siren");
+    const blk = demo.objectDefs?.find((d) => d.id === "x")?.events?.[0].blocks[0];
+    expect(blk).toEqual({ op: "play", sound: "siren" });
+    // referenced: refuse with the reason, not a dangling ref
+    expect(deleteSound("siren")).toContain("used by a play block");
+    expect(deleteBlock({ def }, ev, 0)).toBe(true);
+    expect(deleteSound("siren")).toBeNull();
     expect(validateProject(projectsStore.get().demo)).toEqual([]);
   });
 });

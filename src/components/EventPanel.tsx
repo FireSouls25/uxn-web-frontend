@@ -5,6 +5,7 @@ import { previewOwnerEvent, type Block, type EventTrigger, type ObjectEvent } fr
 import {
   addBlock,
   addEvent,
+  addSound,
   currentScene,
   deleteBlock,
   deleteEvent,
@@ -73,11 +74,18 @@ function BlockRow({
         {num(block.y, (y) => set({ y }))}
       </>
     ) : block.op === "play" ? (
-      <>
-        {num(block.voice, (voice) => set({ voice }), 0, 3, "w-12")}
-        {num(block.note, (note) => set({ note }), 0, 107)}
-        {num(block.vol, (vol) => set({ vol }), 0, 255)}
-      </>
+      <select
+        value={(project.sounds ?? []).some((s) => s.id === block.sound) ? block.sound : ""}
+        onChange={(e) => set({ sound: e.target.value })}
+        className="select min-w-0 flex-1"
+      >
+        {(project.sounds ?? []).length === 0 && <option value="">{t(lang, "ev.no_sounds")}</option>}
+        {(project.sounds ?? []).map((s) => (
+          <option key={s.id} value={s.id}>
+            {s.id}
+          </option>
+        ))}
+      </select>
     ) : block.op === "goto" ? (
       <select
         value={block.scene}
@@ -142,6 +150,7 @@ export default function EventPanel() {
   const [newTarget, setNewTarget] = useState("any");
 
   const scene = currentScene(project, sceneId);
+  const locked = !!project.locked;
   const leaves = scene.nodes.filter((o) => !o.scene);
   const defs = project.objectDefs ?? [];
   const owner: EventOwner | null = useMemo(() => {
@@ -185,6 +194,14 @@ export default function EventPanel() {
     );
   }, [project, sceneId, owner, event]);
 
+  if (locked) {
+    return (
+      <p className="rounded-lg border border-dashed border-yellow/30 bg-yellow/5 px-3 py-4 text-center text-[13px] text-yellow">
+        {t(lang, "locked.note")}
+      </p>
+    );
+  }
+
   function pickOwner(key: string) {
     setOwnerKey(key);
     setEventId(null);
@@ -208,11 +225,9 @@ export default function EventPanel() {
     if (!owner || !event) return;
     const base: Record<string, number | string> = {};
     if (op === "goto") base["scene"] = project.scenes[0]?.id ?? "";
-    if (op === "play") {
-      base["voice"] = 0;
-      base["note"] = 72;
-      base["vol"] = 120;
-    }
+    // A play action always names a sound: template one on first use
+    // so the new block is valid immediately.
+    if (op === "play") base["sound"] = project.sounds?.[0]?.id ?? addSound(t(lang, "sound.default_name"));
     if (op === "wait") base["ticks"] = 30;
     addBlock(owner, event.id, { op, ...base } as Block);
   }

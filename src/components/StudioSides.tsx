@@ -6,13 +6,14 @@ import HierarchyPanel from "./HierarchyPanel";
 import InspectorPanel from "./InspectorPanel";
 import ObjectEditor from "./ObjectEditor";
 import SceneNav from "./SceneNav";
+import SoundEditor from "./SoundEditor";
 import SpriteLibrary from "./SpriteLibrary";
 import SpriteTools from "./SpriteTools";
 import TransitionEditor from "./TransitionEditor";
 import VoiceEditor from "./VoiceEditor";
 import VoiceList from "./VoiceList";
 import { t, useLang } from "../lib/i18n";
-import { defSelStore, projectStore, viewStore } from "../lib/store";
+import { defSelStore, projectStore, soundSelStore, viewStore } from "../lib/store";
 
 /* Hand-written ETAL has no visual model: sides say so plainly. */
 function CodeNote() {
@@ -76,6 +77,7 @@ export function StudioRight() {
   const view = useStore(viewStore);
   const project = useStore(projectStore);
   const defSel = useStore(defSelStore);
+  const soundSel = useStore(soundSelStore);
   if (project.kind === "code") {
     return (
       <div className="flex min-w-0 flex-col gap-3">
@@ -100,7 +102,12 @@ export function StudioRight() {
             ))}
           {view === "sprites" && <SpriteTools />}
           {view === "events" && (project.locked ? <LockedNote /> : <TransitionEditor />)}
-          {view === "sound" && <VoiceEditor />}
+          {view === "sound" &&
+            (soundSel && (project.sounds ?? []).some((s) => s.id === soundSel) ? (
+              <SoundEditor id={soundSel} />
+            ) : (
+              <VoiceEditor />
+            ))}
         </div>
       )}
       <div className="pane rounded-xl p-3">

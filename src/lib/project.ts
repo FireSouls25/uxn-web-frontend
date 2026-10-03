@@ -86,9 +86,8 @@ export interface BlockPos {
 }
 export interface BlockPlay {
   op: "play";
-  voice: number;
-  note: number;
-  vol: number;
+  /** Named sound id (Phase 3: one-shot SFX from the library). */
+  sound: string;
 }
 export interface BlockGoto {
   op: "goto";
@@ -273,6 +272,14 @@ export interface Voice {
   vol: number;
 }
 
+/** A named one-shot sound: up to 4 voices, index = Audio device
+    (same convention as the boot mix). Triggered by play blocks;
+    polyphony is the Uxn hardware (last write wins per device). */
+export interface SoundDef {
+  id: string;
+  voices: Voice[];
+}
+
 export interface Project {
   id: string;
   /** visual: scenes lowered by the emitter. code: hand-written files. */
@@ -298,6 +305,8 @@ export interface Project {
   anims: Animation[];
   /** Up to 4 voices, played once on boot. Absent = silent. */
   sound?: { voices: Voice[] };
+  /** Named one-shot SFX library (Phase 3). Absent = none yet. */
+  sounds?: SoundDef[];
   /** Visual only: raw top-level ETAL spliced into main.ux. May define
       custom_setup() and/or custom_frame() hooks (called when present). */
   customCode?: string;
@@ -381,6 +390,8 @@ export function migrateProject(raw: Record<string, unknown>): Project {
     });
     const modernScenes = (base["scenes"] ?? []) as Scene[];
     base["inputs"] = migrateInputs(modernScenes, base["inputs"]);
+    const modernDefs = (base["objectDefs"] ?? []) as ObjectDef[];
+    base["sounds"] = migrateSounds(modernScenes, modernDefs, base["sounds"]);
     return base as unknown as Project;
   }
   const sprites: Sprite[] = [];
@@ -432,6 +443,52 @@ export function migrateProject(raw: Record<string, unknown>): Project {
     (`key_<code>`, shared per code), so the UI can store input ids
     while old projects keep byte-identical behavior. Deterministic:
     scenes in order, codes in encounter order. */
+/** Phase 3 migration: literal play blocks `{voice, note, vol}` become
+    named sounds, so the block has one form going forward. Same
+    (voice, note, vol) shares one synthesized sound
+    (`sfx_<voice>_<note>_<vol>`); behavior is byte-identical, only the
+    spelling changes. Deterministic: defs, then scenes in order. */
+function migrateSounds(scenes: Scene[], defs: ObjectDef[], existing: unknown): SoundDef[] {
+  const sounds: SoundDef[] = Array.isArray(existing)
+    ? (existing as SoundDef[]).filter((s) => s && typeof s.id === "string" && Array.isArray(s.voices))
+    : [];
+  const byContent = new Map<string, SoundDef>();
+  for (const s of sounds) {
+    if (s.voices.length !== 4) continue;
+    const live = s.voices.map((v, i) => ({ ...v, i })).filter((v) => v.vol > 0);
+    if (live.length !== 1) continue;
+    const key = `${live[0].i}_${live[0].note}_${live[0].vol}`;
+    if (!byContent.has(key)) byContent.set(key, s);
+  }
+  const convert = (blocks: Block[] | undefined): void => {
+    if (!Array.isArray(blocks)) return;
+    blocks.forEach((b, i) => {
+      const raw = b as unknown as Record<string, unknown>;
+      if (raw["op"] !== "play" || typeof raw["sound"] === "string") return;
+      const voice = Number.isInteger(raw["voice"]) ? (raw["voice"] as number) : 0;
+      const note = Number.isInteger(raw["note"]) ? (raw["note"] as number) : 60;
+      const vol = Number.isInteger(raw["vol"]) ? (raw["vol"] as number) : 120;
+      const key = `${voice}_${note}_${vol}`;
+      let found = byContent.get(key);
+      if (!found) {
+        let id = `sfx_${key}`;
+        let n = 2;
+        while (sounds.some((s) => s.id === id)) id = `sfx_${key}_${n++}`;
+        const voices = [0, 1, 2, 3].map((vi) => (vi === voice ? { note, vol } : { note: 0, vol: 0 }));
+        found = { id, voices };
+        sounds.push(found);
+        byContent.set(key, found);
+      }
+      blocks[i] = { op: "play", sound: found.id };
+    });
+  };
+  for (const d of defs) for (const e of d.events ?? []) convert(e.blocks);
+  for (const s of scenes) for (const o of s.nodes) {
+    if (!o.scene) for (const e of o.events ?? []) convert(e.blocks);
+  }
+  return sounds;
+}
+
 function migrateInputs(scenes: Scene[], existing: unknown): NamedInput[] {
   const inputs: NamedInput[] = Array.isArray(existing)
     ? (existing as NamedInput[]).filter((i) => i && typeof i.id === "string" && Number.isInteger(i.key))
@@ -467,7 +524,7 @@ export const MAX_COLLIDE_PAIRS = 48;
 
 const TRIGGERS: EventTrigger[] = ["create", "step", "destroy", "key", "collide", "click", "alarm"];
 
-function validateBlocks(blocks: Block[], label: string, sceneIds: Set<string>): string[] {
+function validateBlocks(blocks: Block[], label: string, sceneIds: Set<string>, soundIds: Set<string>): string[] {
   const errs: string[] = [];
   (blocks ?? []).forEach((b, i) => {
     const at = `${label} block ${i}`;
@@ -476,9 +533,8 @@ function validateBlocks(blocks: Block[], label: string, sceneIds: Set<string>): 
     } else if (b.op === "set_pos") {
       if (!u16(b.x) || !u16(b.y)) errs.push(`${at}: x/y must be 0–65535`);
     } else if (b.op === "play") {
-      if (!Number.isInteger(b.voice) || b.voice < 0 || b.voice > 3) errs.push(`${at}: voice must be 0–3`);
-      if (!Number.isInteger(b.note) || b.note < 0 || b.note > 107) errs.push(`${at}: note must be 0–107`);
-      if (!Number.isInteger(b.vol) || b.vol < 0 || b.vol > 255) errs.push(`${at}: vol must be 0–255`);
+      if (typeof b.sound !== "string" || !soundIds.has(b.sound))
+        errs.push(`${at}: play needs a known sound`);
     } else if (b.op === "goto") {
       if (!sceneIds.has(b.scene)) errs.push(`${at}: goto unknown scene '${b.scene}'`);
     } else if (b.op === "destroy") {
@@ -504,6 +560,7 @@ function validateEvents(
   sceneIds: Set<string>,
   inputIds: Set<string>,
   defIds: Set<string>,
+  soundIds: Set<string>,
 ): string[] {
   const errs: string[] = [];
   const ids = new Set((events ?? []).map((e) => e.id));
@@ -519,7 +576,7 @@ function validateEvents(
     const sig = `${e.trigger}|${e.key ?? ""}|${e.target ?? ""}`;
     if (seen.has(sig)) errs.push(`${label}: duplicate ${e.trigger} event`);
     seen.add(sig);
-    errs.push(...validateBlocks(e.blocks ?? [], `${label} '${e.id}'`, sceneIds));
+    errs.push(...validateBlocks(e.blocks ?? [], `${label} '${e.id}'`, sceneIds, soundIds));
   }
   return errs;
 }
@@ -601,6 +658,23 @@ export function validateProject(p: Project): string[] {
       }
     }
   }
+  const sounds = p.sounds ?? [];
+  const soundIds = new Set(sounds.map((s) => s.id));
+  if (soundIds.size !== sounds.length) errs.push("duplicate sound id");
+  for (const s of sounds) {
+    if (!IDENT.test(s.id)) errs.push(`bad sound id '${s.id}'`);
+    if (s.voices.length > 4) errs.push(`sound '${s.id}': at most 4 voices (Uxn limit)`);
+    s.voices.forEach((v, i) => {
+      if (!Number.isInteger(v.note) || v.note < 0 || v.note > 107)
+        errs.push(`sound '${s.id}' voice ${i}: note must be 0–107`);
+      if (!Number.isInteger(v.vol) || v.vol < 0 || v.vol > 255)
+        errs.push(`sound '${s.id}' voice ${i}: vol must be 0–255`);
+    });
+    // A silent sound lowers to zero lines: the event fn would be
+    // skipped while dispatch still calls it (assembly failure on a
+    // VALID project). Reject the hole instead of working around it.
+    if (s.voices.every((v) => v.vol === 0)) errs.push(`sound '${s.id}' is silent (all voices vol 0)`);
+  }
   const defs = projectDefs(p);
   const defIds = new Set(defs.map((d) => d.id));
   if (defIds.size !== defs.length) errs.push("duplicate object id");
@@ -613,7 +687,7 @@ export function validateProject(p: Project): string[] {
     if (d.controls && d.kind !== "player") errs.push(`object '${d.id}': controls require player kind`);
     if (d.anim && !animIds.has(d.anim)) errs.push(`object '${d.id}': unknown animation '${d.anim}'`);
     if (d.tick) errs.push(...validateCustomCode(d.tick).map((e) => `object '${d.id}' tick: ${e}`));
-    errs.push(...validateEvents(d.events ?? [], `object '${d.id}'`, sceneIds, inputIds, defIds));
+    errs.push(...validateEvents(d.events ?? [], `object '${d.id}'`, sceneIds, inputIds, defIds, soundIds));
   }
   if (sceneIds.size !== p.scenes.length) errs.push("duplicate scene id");
   if (!sceneIds.has(p.start)) errs.push(`start scene '${p.start}' missing`);
@@ -643,7 +717,7 @@ export function validateProject(p: Project): string[] {
       if (!isBranch && o.def && (o.events?.length ?? 0) > 0)
         errs.push(`node '${o.id}': instances carry no events — edit object '${o.def}'`);
       if (!isBranch && !o.def)
-        errs.push(...validateEvents(o.events ?? [], `node '${o.id}'`, sceneIds, inputIds, defIds));
+        errs.push(...validateEvents(o.events ?? [], `node '${o.id}'`, sceneIds, inputIds, defIds, soundIds));
       if (!isBranch && !o.sprite && !o.def) errs.push(`node '${o.id}': leaf needs a sprite or an object`);
       if (!isBranch) {
         if (o.sprite && !spriteIds.has(o.sprite)) errs.push(`node '${o.id}': unknown sprite '${o.sprite}'`);
@@ -792,11 +866,15 @@ function usedVoices(p: Project): number[] {
   (p.sound?.voices ?? []).forEach((v, i) => {
     if (i < 4 && v.vol > 0) out.add(i);
   });
+  const snds = soundMap(p);
   for (const s of p.scenes) {
     for (const o of flattenScene(p, s.id)) {
       for (const e of o.events) {
         for (const b of e.blocks) {
-          if (b.op === "play" && Number.isInteger(b.voice) && b.voice >= 0 && b.voice < 4) out.add(b.voice);
+          if (b.op !== "play") continue;
+          snds.get(b.sound)?.voices.forEach((v, i) => {
+            if (i < 4 && v.vol > 0) out.add(i);
+          });
         }
       }
     }
@@ -887,6 +965,15 @@ export interface BlockCtx {
   h: number;
   /** Destroy-event fn to call first, when the leaf has one. */
   destroyFn?: string;
+  /** Named sounds for play blocks (unknown id previews as a comment;
+      emit never sees one — validation throws first). */
+  sounds: Map<string, SoundDef>;
+}
+
+/** Named sounds by id (unknown ids are a validation error; the
+    preview degrades to a comment line instead of throwing). */
+export function soundMap(p: Project): Map<string, SoundDef> {
+  return new Map((p.sounds ?? []).map((s) => [s.id, s]));
 }
 
 /** One block = fixed ETAL lines. THE lowering: the UI live preview
@@ -906,11 +993,19 @@ export function previewBlocks(blocks: Block[], ctx: BlockCtx): string[] {
     } else if (b.op === "set_pos") {
       lines.push(`ox[${slot}] = ${b.x}; oy[${slot}] = ${b.y};`);
     } else if (b.op === "play") {
-      lines.push(`Audio${b.voice}.addr = &sq32;`);
-      lines.push(`Audio${b.voice}.length = 32;`);
-      lines.push(`Audio${b.voice}.volume = ${b.vol};`);
-      lines.push(`Audio${b.voice}.adsr = 4369;`);
-      lines.push(`Audio${b.voice}.pitch = ${128 + b.note};`);
+      const snd = ctx.sounds.get(b.sound);
+      if (!snd) {
+        lines.push(`( unknown sound '${b.sound}' )`);
+      } else {
+        snd.voices.forEach((v, vi) => {
+          if (vi >= 4 || v.vol <= 0) return;
+          lines.push(`Audio${vi}.addr = &sq32;`);
+          lines.push(`Audio${vi}.length = 32;`);
+          lines.push(`Audio${vi}.volume = ${v.vol};`);
+          lines.push(`Audio${vi}.adsr = 4369;`);
+          lines.push(`Audio${vi}.pitch = ${128 + v.note};`);
+        });
+      }
     } else if (b.op === "goto") {
       lines.push(`setup_${b.scene}();`);
       lines.push(`scene_go(SC_${b.scene.toUpperCase()});`);
@@ -985,7 +1080,7 @@ export function previewOwnerEvent(
   }
   const ev = events.find((e) => e.id === eventId);
   if (!ev) return null;
-  const lines = previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, destroyFn });
+  const lines = previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, destroyFn, sounds: soundMap(p) });
   if (ev.trigger === "collide") {
     const hits = leaves.filter((t, j) => matchTarget(t, j, -1, ev.target ?? "")).map((t) => t.path);
     return [`( collide ${ev.target} → ${hits.join(", ") || "nothing"} )`, ...lines];
@@ -1006,12 +1101,13 @@ function emitLeafEvents(
   w: number,
   h: number,
   defs: Map<string, ObjectDef>,
+  sounds: Map<string, SoundDef>,
 ): string[] {
   const lines: string[] = [];
   const ind = (ss: string[]): string[] => ss.map((l) => `    ${l}`);
   leaves.forEach((o, i) => {
     const tag = slotTag(rootId, o.path);
-    const ctx: BlockCtx = { slot: "slot", w, h, destroyFn: destroyFnName(defs, o, tag) };
+    const ctx: BlockCtx = { slot: "slot", w, h, destroyFn: destroyFnName(defs, o, tag), sounds };
     const fn = (name: string, stmts: string[]): void => {
       if (stmts.length === 0) return;
       lines.push(`${name} :: fn(slot: u16) {`, ...ind(stmts), `}`);
@@ -1064,7 +1160,7 @@ function emitDefEvents(p: Project): string[] {
     const ev = (d.events ?? []).find((e) => e.trigger === "destroy" && e.blocks.length > 0);
     if (!ev) continue;
     lines.push(`destroy_def_${d.id} :: fn(slot: u16) {`);
-    for (const l of previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height })) lines.push(`    ${l}`);
+    for (const l of previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, sounds: soundMap(p) })) lines.push(`    ${l}`);
     lines.push(`}`);
   }
   return lines;
@@ -1394,7 +1490,7 @@ export function emitProject(p: Project): Record<string, string> {
   for (const s of scenes) {
     // Store order, not sorted: hierarchy drag-reorder defines draw order.
     const leaves = flat.get(s.id) as FlatLeaf[];
-    out.push(...emitLeafEvents(s.id, leaves, p.width, p.height, defs));
+    out.push(...emitLeafEvents(s.id, leaves, p.width, p.height, defs, soundMap(p)));
     out.push(emitSetup(s.id, leaves, pxDims, needsDims, needsAlarm));
     if (leaves.length > 0) out.push(emitDrawScene(s, leaves, tileDims));
     out.push(emitFrame(s, leaves, p.width, p.height, animMap, hasFrameHook, p, pxDims));
@@ -1471,6 +1567,9 @@ export const SAMPLE_PROJECT: Project = {
     { id: "back", key: 27 },
   ],
   sound: { voices: [{ note: 72, vol: 120 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }] },
+  sounds: [
+    { id: "blip", voices: [{ note: 0, vol: 0 }, { note: 84, vol: 120 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }] },
+  ],
   sprites: [
     { id: "hero", pixels: BLOCK },
     { id: "wall", pixels: monoToPixels(WALL_ROWS) },
@@ -1482,7 +1581,15 @@ export const SAMPLE_PROJECT: Project = {
     {
       id: "title",
       nodes: [
-        { id: "hero", x: 16, y: 40, sprite: "hero", kind: "player", controls: true },
+        {
+          id: "hero",
+          x: 16,
+          y: 40,
+          sprite: "hero",
+          kind: "player",
+          controls: true,
+          events: [{ id: "ev_click", trigger: "click", blocks: [{ op: "play", sound: "blip" }] }],
+        },
         { id: "wall", x: 64, y: 64, sprite: "wall", kind: "static", solid: true },
         { id: "coin", x: 96, y: 96, sprite: "coin", kind: "movable", solid: true, anim: "spin" },
       ],

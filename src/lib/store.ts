@@ -117,6 +117,10 @@ export const defSelStore = atom<string | null>(null);
 export const paintColorStore = atom<number>(1);
 export const paintToolStore = atom<"brush" | "erase">("brush");
 export const voiceSelStore = atom<number>(0);
+/** Selected named sound (right panel shows its SoundEditor).
+    Mutually exclusive with voiceSelStore the same way defSel is
+    with selectionStore: picking one clears the other. */
+export const soundSelStore = atom<string | null>(null);
 export const codeFileStore = atom<string>("main.ux");
 export const viewStore = atom<"scene" | "sprites" | "events" | "sound" | "code">("scene");
 
@@ -1005,4 +1009,99 @@ export function setVoice(index: number, note: number, vol: number): void {
     voices[index] = { note, vol };
     return { ...prev, sound: { voices } };
   });
+}
+
+/* Named one-shot sounds: the Phase 3 library behind play blocks. All
+   four voices travel with the sound (index = Audio device); the boot
+   mix above stays exactly as it was. */
+
+/** Add a sound with an audible voice 0 (the rest silent), so the
+    new library entry validates immediately. Selects it. */
+export function addSound(name: string): string {
+  const p = projectStore.get();
+  let base = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24) || "sound";
+  if (!/^[A-Za-z]/.test(base)) base = `s_${base}`;
+  let id = base;
+  let n = 2;
+  const sounds = p.sounds ?? [];
+  while (sounds.some((s) => s.id === id)) id = `${base}_${n++}`;
+  updateCurrent((prev) => ({
+    ...prev,
+    sounds: [
+      ...(prev.sounds ?? []),
+      { id, voices: [{ note: 72, vol: 120 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }, { note: 0, vol: 0 }] },
+    ],
+  }));
+  soundSelStore.set(id);
+  return id;
+}
+
+/** Set one voice of a named sound. Unknown sound or voice refused. */
+export function setSoundVoice(soundId: string, voice: number, note: number, vol: number): string | null {
+  const p = projectStore.get();
+  if (!(p.sounds ?? []).some((s) => s.id === soundId)) return `unknown sound '${soundId}'`;
+  if (!Number.isInteger(voice) || voice < 0 || voice > 3) return `voice must be 0–3`;
+  updateCurrent((prev) => ({
+    ...prev,
+    sounds: (prev.sounds ?? []).map((s) =>
+      s.id !== soundId
+        ? s
+        : {
+            ...s,
+            voices: [0, 1, 2, 3].map((i) =>
+              i === voice
+                ? {
+                    note: Math.min(107, Math.max(0, Math.round(note))),
+                    vol: Math.min(255, Math.max(0, Math.round(vol))),
+                  }
+                : (s.voices[i] ?? { note: 0, vol: 0 }),
+            ),
+          },
+    ),
+  }));
+  return null;
+}
+
+/** Rename a sound id everywhere play blocks reference it. */
+export function renameSound(oldId: string, newId: string): string | null {
+  const clean = newId.trim().slice(0, 24);
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(clean)) return "bad id";
+  const p = projectStore.get();
+  if (oldId !== clean && (p.sounds ?? []).some((s) => s.id === clean)) return "duplicate id";
+  const retarget = (blocks: Block[]): Block[] =>
+    blocks.map((b) => (b.op === "play" && b.sound === oldId ? { ...b, sound: clean } : b));
+  updateCurrent((prev) => ({
+    ...prev,
+    sounds: (prev.sounds ?? []).map((s) => (s.id === oldId ? { ...s, id: clean } : s)),
+    objectDefs: projectDefs(prev).map((d) => ({
+      ...d,
+      events: (d.events ?? []).map((e) => ({ ...e, blocks: retarget(e.blocks) })),
+    })),
+    scenes: prev.scenes.map((s) => ({
+      ...s,
+      nodes: s.nodes.map((o) =>
+        !o.scene && !o.def && o.events ? { ...o, events: o.events.map((e) => ({ ...e, blocks: retarget(e.blocks) })) } : o,
+      ),
+    })),
+  }));
+  if (soundSelStore.get() === oldId) soundSelStore.set(clean);
+  return null;
+}
+
+/** Delete a named sound. Refused while a play block names it —
+    retarget (or delete) those blocks first. */
+export function deleteSound(soundId: string): string | null {
+  const p = projectStore.get();
+  if (!(p.sounds ?? []).some((s) => s.id === soundId)) return `unknown sound '${soundId}'`;
+  const used =
+    projectDefs(p).some((d) => (d.events ?? []).some((e) => e.blocks.some((b) => b.op === "play" && b.sound === soundId))) ||
+    p.scenes.some((s) =>
+      s.nodes.some(
+        (o) => !o.scene && (o.events ?? []).some((e) => e.blocks.some((b) => b.op === "play" && b.sound === soundId)),
+      ),
+    );
+  if (used) return `sound '${soundId}' is used by a play block`;
+  updateCurrent((prev) => ({ ...prev, sounds: (prev.sounds ?? []).filter((s) => s.id !== soundId) }));
+  if (soundSelStore.get() === soundId) soundSelStore.set(null);
+  return null;
 }

@@ -16,11 +16,13 @@ import {
   addNode,
   addObject,
   addScene,
+  addSound,
   addSprite,
   createProject,
   deleteBlock,
   deleteEvent,
   deleteNode,
+  deleteSound,
   extractObject,
   moveNode,
   openProject,
@@ -29,11 +31,13 @@ import {
   projectStore,
   readList,
   renameObject,
+  renameSound,
   reorderNodes,
   sceneIdStore,
   selectionStore,
   setObjectPos,
   setSceneFrameCode,
+  setSoundVoice,
   setSpritePixels,
   setTheme,
   setVoice,
@@ -66,6 +70,7 @@ function snapshot(): Record<string, unknown> {
     scenes: p.scenes.map((s) => s.id),
     sprites: p.sprites.map((s) => s.id),
     defs: projectDefs(p).map((d) => d.id),
+    sounds: (p.sounds ?? []).map((s) => s.id),
     anims: p.anims.map((a) => a.id),
   };
 }
@@ -213,7 +218,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "add_block",
     description:
-      "Append a visual action to an event (see add_event). Ops: move {dx,dy} (pixels, clamped), set_pos {x,y}, play {voice 0-3, note 0-107, vol 0-255} (one-shot SFX), goto {scene}, destroy (self), wait {ticks 1-255} (arms the alarm event). Every op lowers to fixed ETAL — use preview_event to see it.",
+      "Append a visual action to an event (see add_event). Ops: move {dx,dy} (pixels, clamped), set_pos {x,y}, play {sound} (named one-shot SFX — see create_sound), goto {scene}, destroy (self), wait {ticks 1-255} (arms the alarm event). Every op lowers to fixed ETAL — use preview_event to see it.",
     params: {
       def: { type: "string", description: "Object template id (exactly one of def/object)" },
       object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
@@ -223,9 +228,7 @@ export const TOOLS: ToolDef[] = [
       dy: { type: "number", description: "move: pixels" },
       x: { type: "number", description: "set_pos: pixels" },
       y: { type: "number", description: "set_pos: pixels" },
-      voice: { type: "number", description: "play: 0-3" },
-      note: { type: "number", description: "play: MIDI 0-107" },
-      vol: { type: "number", description: "play: 0-255" },
+      sound: { type: "string", description: "play: named sound id (see create_sound)" },
       scene: { type: "string", description: "goto: target scene" },
       ticks: { type: "number", description: "wait: 1-255" },
       index: { type: "number", description: "Insert position, default append" },
@@ -396,6 +399,58 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "create_sound",
+    description:
+      "Add a named one-shot sound to the library (up to 4 voices each; index = Audio device, vol 0 = silent). Trigger it after boot with a play block. A sound where every voice is silent is rejected by validation.",
+    params: {
+      name: { type: "string", required: true, description: "Display name, becomes the id when valid" },
+    },
+    run: (args) => {
+      const id = addSound(str(args["name"], "sound"));
+      return { ok: true, message: `sound ${id}`, data: { id } };
+    },
+  },
+  {
+    name: "set_sound_voice",
+    description: "Set one voice of a named sound: MIDI note 0-107, volume 0 (silent) to 255.",
+    params: {
+      sound: { type: "string", required: true, description: "Sound id from create_sound" },
+      voice: { type: "number", required: true, description: "0-3" },
+      note: { type: "number", required: true, description: "MIDI 0-107" },
+      vol: { type: "number", required: true, description: "0-255" },
+    },
+    run: (args) => {
+      const err = setSoundVoice(str(args["sound"]), num(args["voice"]), num(args["note"], 60), num(args["vol"], 120));
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: `sound ${args["sound"]} voice ${args["voice"]} set` };
+    },
+  },
+  {
+    name: "rename_sound",
+    description: "Rename a sound id everywhere it is referenced (play blocks follow).",
+    params: {
+      from: { type: "string", required: true },
+      to: { type: "string", required: true },
+    },
+    run: (args) => {
+      const err = renameSound(str(args["from"]), str(args["to"]));
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: `renamed to ${args["to"]}` };
+    },
+  },
+  {
+    name: "delete_sound",
+    description: "Delete a named sound. Refused while a play block references it — retarget those blocks first.",
+    params: {
+      sound: { type: "string", required: true, description: "Sound id" },
+    },
+    run: (args) => {
+      const err = deleteSound(str(args["sound"]));
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: "sound deleted" };
+    },
+  },
+  {
     name: "set_theme",
     description:
       "Set the System palette theme (3 channels 0-65535, nibbles per color). This is the ONLY way to get more colors: sprites stay 4 indices, but the 4 colors can be anything.",
@@ -539,7 +594,10 @@ function blockOf(args: Record<string, unknown>): Block | null {
   const op = str(args["op"]);
   if (op === "move") return { op, dx: num(args["dx"]), dy: num(args["dy"]) };
   if (op === "set_pos") return { op, x: num(args["x"]), y: num(args["y"]) };
-  if (op === "play") return { op, voice: num(args["voice"]), note: num(args["note"], 60), vol: num(args["vol"], 120) };
+  if (op === "play") {
+    if (!str(args["sound"])) return null;
+    return { op, sound: str(args["sound"]) };
+  }
   if (op === "goto") {
     if (!str(args["scene"])) return null;
     return { op, scene: str(args["scene"]) };

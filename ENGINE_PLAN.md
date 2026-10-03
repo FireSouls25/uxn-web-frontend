@@ -1,10 +1,10 @@
 # Engine plan: from scene painter to real engine
 
-Status: **Phases 0–2 done** (friction fixes + multi-tile sprites +
-object templates + events/blocks). Phase 3+ is still plan only. Each
-phase lists the model change, the emitter change, the UI change, and
-the docs/tests that move with it. Phases are ordered so every one
-ships something usable on its own.
+Status: **Phases 0–3 done** (friction fixes + multi-tile sprites +
+object templates + events/blocks + named sounds). Phase 4+ is still
+plan only. Each phase lists the model change, the emitter change, the
+UI change, and the docs/tests that move with it. Phases are ordered
+so every one ships something usable on its own.
 
 ## 1. Where we are
 
@@ -275,16 +275,28 @@ everything later needs a picker and named inputs anyway.
   UI); named sounds replace play literals; edge-triggered collide
   would need prev-frame overlap state.
 
-### Phase 3 — Sound as an event citizen
+### Phase 3 — Sound as an event citizen ✅ DONE
 
-* Model: `sounds: {id, voices: Voice[]}` — named one-shot blips +
-  today's boot jingle becomes `scene_start → play boot` default.
-* Emitter: `play` block → voice trigger code; polyphony = today's 4
-  voices, documented (steal GameMaker's asset-gain × instance-gain
-  *idea* as volume-per-call, nothing more).
-* UI: Sound view lists named sounds (each = mini voice editor),
-  block picker lists them by name; VoiceList/VoiceEditor generalize.
-* Small phase on purpose — it only unlocks after blocks exist.
+* Model: `sounds: {id, voices: Voice[]}[]` — named one-shot SFX;
+  voice index = Audio device, vol 0 = silent. The boot mix stays
+  exactly as it was (no scene-start trigger exists to migrate it
+  to); literal play blocks migrate to synthesized `sfx_*` sounds,
+  so `play {sound}` is the one form going forward.
+* Emitter: named voices lower to Audio port writes reusing the boot
+  sample; `usedVoices` collects block voices so devices exist;
+  all-silent sounds are rejected (they would lower to zero lines
+  while dispatch still calls the fn).
+* UI: sound view = boot mix + named library (VoiceList), per-sound
+  editor with rename/4 voices/test tones/refuse-when-referenced
+  delete; play rows use a sound dropdown (+play templates an audible
+  sound on first use). Locked projects stay read-only (incl. the
+  previously unguarded event panel).
+* Agent: `create_sound`, `set_sound_voice`, `rename_sound`
+  (play blocks follow), `delete_sound` (refused while referenced).
+  The demo plays a `blip` when its hero is clicked.
+* Tests: 4 new (literal→named migration incl. sharing, library
+  validation, sample after-boot SFX, store add/rename/delete).
+  Suites: frontend 83, backend 55, `tsc` clean, production build ok.
 
 ### Phase 4 — Scenes overview map
 
