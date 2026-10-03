@@ -11,6 +11,8 @@ import {
   projectDefs,
   spritePxOf,
   spriteTiles,
+  type HitBox,
+  type Animation,
   type Block,
   type EventTrigger,
   type FlatLeaf,
@@ -512,6 +514,34 @@ export function moveBlock(owner: EventOwner, eventId: string, from: number, to: 
   );
 }
 
+/** Set (or clear, when mask is undefined) the hitbox on a template
+    or a top-level leaf. Bounds are validation's job, like the
+    editors — this just writes. */
+export function setMask(target: { def: string } | { leaf: string }, mask: HitBox | undefined): string | null {
+  const p = projectStore.get();
+  if ("def" in target) {
+    if (!projectDefs(p).some((d) => d.id === target.def)) return `unknown object '${target.def}'`;
+    updateCurrent((prev) => ({
+      ...prev,
+      objectDefs: projectDefs(prev).map((d) => (d.id === target.def ? { ...d, mask } : d)),
+    }));
+    return null;
+  }
+  const scene = currentScene(p, sceneIdStore.get());
+  const node = scene.nodes.find((o) => o.id === target.leaf && !o.scene);
+  if (!node) return `unknown object '${target.leaf}'`;
+  updateCurrent((prev) => {
+    const home = currentScene(prev, sceneIdStore.get());
+    return {
+      ...prev,
+      scenes: prev.scenes.map((s) =>
+        s.id !== home.id ? s : { ...s, nodes: s.nodes.map((o) => (o.id === target.leaf ? { ...o, mask } : o)) },
+      ),
+    };
+  });
+  return null;
+}
+
 /** Patch a template (unknown sprite/anim/kind refused with a message).
     Movable implies solid, same as the editors. */
 export function patchDef(defId: string, patch: Partial<ObjectDef>): string | null {
@@ -594,6 +624,46 @@ export function setSpriteSize(spriteId: string, w: number, h: number): void {
       return { ...s, w: tw, h: th, pixels: next };
     }),
   }));
+}
+
+/** Patch rate/loop/pingpong (frames have dedicated fns below). */
+export function patchAnimation(animId: string, patch: Partial<Animation>): void {
+  updateCurrent((prev) => ({
+    ...prev,
+    anims: prev.anims.map((a) => (a.id === animId ? { ...a, ...patch } : a)),
+  }));
+}
+
+/** Append a frame. Refused when the sprite is unknown, already 16
+    frames, or sized differently (frames swap one address — mixed
+    sizes would tear). */
+export function addAnimFrame(animId: string, spriteId: string): string | null {
+  const p = projectStore.get();
+  const anim = p.anims.find((a) => a.id === animId);
+  if (!anim) return `unknown animation '${animId}'`;
+  const sprite = p.sprites.find((s) => s.id === spriteId);
+  if (!sprite) return `unknown sprite '${spriteId}'`;
+  if (anim.frames.length >= 16) return "animation holds at most 16 frames";
+  const [w, h] = spriteTiles(sprite);
+  const [fw, fh] = spriteTiles(p.sprites.find((s) => s.id === anim.frames[0]) ?? { id: "", pixels: [] });
+  if (anim.frames.length > 0 && (w !== fw || h !== fh)) return `sprite must match ${fw}×${fh} tiles`;
+  updateCurrent((prev) => ({
+    ...prev,
+    anims: prev.anims.map((a) => (a.id === animId ? { ...a, frames: [...a.frames, spriteId] } : a)),
+  }));
+  return null;
+}
+
+/** Drop a frame; the last one stays (validation needs 1–16). */
+export function removeAnimFrame(animId: string, index: number): boolean {
+  const p = projectStore.get();
+  const anim = p.anims.find((a) => a.id === animId);
+  if (!anim || anim.frames.length <= 1 || index < 0 || index >= anim.frames.length) return false;
+  updateCurrent((prev) => ({
+    ...prev,
+    anims: prev.anims.map((a) => (a.id === animId ? { ...a, frames: a.frames.filter((_, i) => i !== index) } : a)),
+  }));
+  return true;
 }
 
 export function addAnimation(spriteIds: string[]): string {

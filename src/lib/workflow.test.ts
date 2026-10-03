@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { artifactFilename } from "./export";
 import {
+  addAnimFrame,
   addBlock,
   addDef,
   addEvent,
   addInstance,
   addSound,
+  addSprite,
   clampToCanvas,
   deleteBlock,
   deleteDef,
@@ -14,8 +16,10 @@ import {
   extractObject,
   moveBlock,
   moveObject,
+  patchAnimation,
   patchBlock,
   patchDef,
+  removeAnimFrame,
   renameDef,
   renameObject,
   renameSound,
@@ -205,6 +209,42 @@ describe("object events", () => {
     addDef("crate", "wall");
     addInstance("crate", 0, 0, "box");
     expect(addEvent({ leaf: "box" }, "step")).toBeNull(); // instance: edit the def
+    expect(validateProject(projectsStore.get().demo)).toEqual([]);
+  });
+});
+
+describe("animation editing", () => {
+  function reset() {
+    projectsStore.set({ demo: structuredClone(SAMPLE_PROJECT) });
+    currentIdStore.set("demo");
+    sceneIdStore.set("title");
+    selectionStore.set(null);
+    defSelStore.set(null);
+  }
+
+  it("appends same-size frames, tunes, and trims", () => {
+    reset();
+    expect(addAnimFrame("spin", "hero")).toBeNull();
+    expect(addAnimFrame("spin", "ghost")).toContain("unknown sprite");
+    expect(addAnimFrame("nope", "hero")).toContain("unknown animation");
+    patchAnimation("spin", { rate: 12, pingpong: true });
+    const demo = projectsStore.get().demo;
+    expect(demo.anims.find((a) => a.id === "spin")).toMatchObject({
+      frames: ["coin", "coin2", "hero"],
+      rate: 12,
+      pingpong: true,
+    });
+    expect(validateProject(demo)).toEqual([]);
+    expect(removeAnimFrame("spin", 2)).toBe(true);
+    expect(removeAnimFrame("spin", 9)).toBe(false);
+  });
+
+  it("refuses oversized casts and size mismatches", () => {
+    reset();
+    addSprite("wide", 2, 1);
+    expect(addAnimFrame("spin", "wide")).toContain("must match 1×1 tiles");
+    for (let i = 0; i < 14; i++) addAnimFrame("spin", "hero");
+    expect(addAnimFrame("spin", "hero")).toContain("at most 16 frames");
     expect(validateProject(projectsStore.get().demo)).toEqual([]);
   });
 });

@@ -8,6 +8,7 @@
    (validateProject, reserved names, slot budget); the backend
    compiler remains the final arbiter at export. */
 import {
+  addAnimFrame,
   addBinding,
   addBlock,
   addDef,
@@ -26,6 +27,7 @@ import {
   extractObject,
   moveNode,
   openProject,
+  patchAnimation,
   patchDef,
   patchObject,
   projectStore,
@@ -35,6 +37,7 @@ import {
   reorderNodes,
   sceneIdStore,
   selectionStore,
+  setMask,
   setObjectPos,
   setSceneFrameCode,
   setSoundVoice,
@@ -366,6 +369,23 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "creation_code",
+    description:
+      "Attach per-instance creation code: ETAL statements spliced after the leaf's create-event blocks in its create fn, run on scene enter (GameMaker Creation Code — the escape hatch that prevents template proliferation). Empty clears.",
+    params: {
+      object: { type: "string", required: true, description: "Top-level object id in current scene" },
+      code: { type: "string", required: true, description: "ETAL statements" },
+    },
+    run: (args) => {
+      const p = projectStore.get();
+      const scene = p.scenes.find((s) => s.id === sceneIdStore.get());
+      const node = scene?.nodes.find((o) => o.id === str(args["object"]) && !o.scene);
+      if (!node) return { ok: false, message: `unknown object ${args["object"]}` };
+      patchObject(node.id, { initCode: str(args["code"]) || undefined });
+      return { ok: true, message: `creation code set on ${node.id}` };
+    },
+  },
+  {
     name: "script_scene",
     description:
       "Attach a per-scene ETAL script, spliced at the end of the scene frame (after input/drive/ticks, before drawing). Same reserved names as custom code.",
@@ -426,6 +446,38 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "set_mask",
+    description:
+      "Set the hitbox on a template ({def}) or a top-level leaf ({object}): pixel offsets inside the sprite, the body for collision and clicks (drive keeps full bounds). Omit x/y/w/h to clear back to the whole sprite.",
+    params: {
+      def: { type: "string", description: "Object template id (exactly one of def/object)" },
+      object: { type: "string", description: "Top-level leaf id (exactly one of def/object)" },
+      x: { type: "number", description: "Left offset px" },
+      y: { type: "number", description: "Top offset px" },
+      w: { type: "number", description: "Width px" },
+      h: { type: "number", description: "Height px" },
+    },
+    run: (args) => {
+      const hasBox =
+        args["x"] !== undefined || args["y"] !== undefined || args["w"] !== undefined || args["h"] !== undefined;
+      const mask =
+        hasBox
+          ? {
+              x: num(args["x"]),
+              y: num(args["y"]),
+              w: num(args["w"], 8),
+              h: num(args["h"], 8),
+            }
+          : undefined;
+      let err: string | null;
+      if (str(args["def"])) err = setMask({ def: str(args["def"]) }, mask);
+      else if (str(args["object"])) err = setMask({ leaf: str(args["object"]) }, mask);
+      else return { ok: false, message: "name exactly one of def/object" };
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: mask ? "hitbox set" : "hitbox cleared" };
+    },
+  },
+  {
     name: "rename_sound",
     description: "Rename a sound id everywhere it is referenced (play blocks follow).",
     params: {
@@ -448,6 +500,40 @@ export const TOOLS: ToolDef[] = [
       const err = deleteSound(str(args["sound"]));
       if (err) return { ok: false, message: err };
       return { ok: true, message: "sound deleted" };
+    },
+  },
+  {
+    name: "add_anim_frame",
+    description:
+      "Append a sprite as a frame of an animation (same tile size required — frames swap one address, mixed sizes would tear).",
+    params: {
+      anim: { type: "string", required: true, description: "Animation id" },
+      sprite: { type: "string", required: true, description: "Sprite id" },
+    },
+    run: (args) => {
+      const err = addAnimFrame(str(args["anim"]), str(args["sprite"]));
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: "frame added" };
+    },
+  },
+  {
+    name: "set_anim",
+    description: "Tune an animation: ticks per frame (rate 1-255), loop, ping-pong bounce at the ends (needs loop + 2+ frames).",
+    params: {
+      anim: { type: "string", required: true, description: "Animation id" },
+      rate: { type: "number", description: "Ticks per frame 1-255" },
+      loop: { type: "boolean", description: "Wrap (or hold last) at the end" },
+      pingpong: { type: "boolean", description: "Bounce at the ends" },
+    },
+    run: (args) => {
+      const p = projectStore.get();
+      if (!p.anims.some((a) => a.id === str(args["anim"]))) return { ok: false, message: `unknown animation ${args["anim"]}` };
+      patchAnimation(str(args["anim"]), {
+        ...(args["rate"] === undefined ? {} : { rate: num(args["rate"], 30) }),
+        ...(args["loop"] === undefined ? {} : { loop: !!args["loop"] }),
+        ...(args["pingpong"] === undefined ? {} : { pingpong: !!args["pingpong"] }),
+      });
+      return { ok: true, message: "animation updated" };
     },
   },
   {

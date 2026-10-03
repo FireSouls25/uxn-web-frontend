@@ -1,5 +1,6 @@
 import { useStore } from "@nanostores/react";
 import CodePanel from "./CodePanel";
+import CommandPalette from "./CommandPalette";
 import EventPanel from "./EventPanel";
 import EventsGraph from "./EventsGraph";
 import SoundMixer from "./SoundMixer";
@@ -16,6 +17,7 @@ export default function StudioCenter() {
 
   return (
     <div className="pane space-y-4 rounded-xl p-3">
+      <CommandPalette />
       {effective === "scene" && <StudioCanvas />}
       {effective === "sprites" && <SpriteEditor />}
       {effective === "events" && (

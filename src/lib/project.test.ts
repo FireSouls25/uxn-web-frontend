@@ -653,6 +653,108 @@ describe("scene map", () => {
   });
 });
 
+describe("phase 5 polish", () => {
+  it("validates hitboxes against resolved sprites", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    const hero = p.scenes[0].nodes.find((o) => o.id === "hero")!;
+    hero.mask = { x: 2, y: 2, w: 4, h: 4 };
+    expect(validateProject(p)).toEqual([]);
+    const over = structuredClone(SAMPLE_PROJECT);
+    over.scenes[0].nodes.find((o) => o.id === "hero")!.mask = { x: 6, y: 0, w: 4, h: 8 };
+    expect(validateProject(over).some((e) => e.includes("mask must fit"))).toBe(true);
+    const zero = structuredClone(SAMPLE_PROJECT);
+    zero.scenes[0].nodes.find((o) => o.id === "hero")!.mask = { x: 0, y: 0, w: 0, h: 8 };
+    expect(validateProject(zero).some((e) => e.includes("mask must fit"))).toBe(true);
+    const defMask = structuredClone(SAMPLE_PROJECT);
+    defMask.objectDefs = [{ id: "box", sprite: "ghost", kind: "static", mask: { x: 0, y: 0, w: 8, h: 8 } }];
+    expect(validateProject(defMask).some((e) => e.includes("unknown sprite 'ghost'"))).toBe(true);
+  });
+
+  it("sizes click rects and collide pairs by mask, drive stays full", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.scenes[0].nodes.find((o) => o.id === "hero")!.mask = { x: 2, y: 2, w: 4, h: 4 };
+    p.scenes[0].nodes.find((o) => o.id === "coin")!.events = [
+      { id: "ev_1", trigger: "collide", target: "any", blocks: [{ op: "destroy" }] },
+    ];
+    const main = emitProject(p)["main.ux"];
+    expect(main).toContain("pt_in_rect(mx, my, ox[0] + 2, oy[0] + 2, 4, 4)");
+    expect(main).toContain("overlapwh(ox[slot], oy[slot], ow[slot], oh[slot], ox[0] + 2, oy[0] + 2, 4, 4)");
+    // drive keeps full sprite bounds (generous world, precise hitbox)
+    expect(main).toContain("if nx < 120 { nx = nx + 1; }");
+  });
+
+  it("validates creation code like tick text", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.scenes[0].nodes.find((o) => o.id === "wall")!.initCode = "ox[slot] = ox[slot];";
+    expect(validateProject(p)).toEqual([]);
+    const bad = structuredClone(SAMPLE_PROJECT);
+    bad.scenes[0].nodes.find((o) => o.id === "wall")!.initCode = "scene: u8 = 1;";
+    expect(validateProject(bad).some((e) => e.includes("creation code"))).toBe(true);
+  });
+
+  it("runs creation code after create blocks in setup order", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    const wall = p.scenes[0].nodes.find((o) => o.id === "wall")!;
+    wall.events = [{ id: "ev_1", trigger: "create", blocks: [{ op: "play", sound: "blip" }] }];
+    wall.initCode = "ox[slot] = ox[slot];";
+    expect(validateProject(p)).toEqual([]);
+    const main = emitProject(p)["main.ux"];
+    expect(main).toContain("create_title_wall(1);");
+    const fn = main.slice(main.indexOf("create_title_wall :: fn(slot: u16) {"));
+    expect(fn.indexOf("Audio1.pitch = 212;")).toBeLessThan(fn.indexOf("ox[slot] = ox[slot];"));
+  });
+
+  it("calls create for instance code alone, no event needed", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.scenes[0].nodes.find((o) => o.id === "wall")!.initCode = "ox[slot] = ox[slot];";
+    expect(validateProject(p)).toEqual([]);
+    const main = emitProject(p)["main.ux"];
+    expect(main).toContain("create_title_wall :: fn(slot: u16) {");
+    expect(main).toContain("create_title_wall(1);");
+  });
+
+  it("validates ping-pong needs loop plus two frames", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.anims.find((a) => a.id === "spin")!.pingpong = true;
+    expect(validateProject(p)).toEqual([]);
+    const noLoop = structuredClone(SAMPLE_PROJECT);
+    Object.assign(noLoop.anims.find((a) => a.id === "spin")!, { loop: false, pingpong: true });
+    expect(validateProject(noLoop).some((e) => e.includes("pingpong needs loop"))).toBe(true);
+    const one = structuredClone(SAMPLE_PROJECT);
+    one.anims.push({ id: "solo", frames: ["hero"], rate: 30, loop: true, pingpong: true });
+    expect(validateProject(one).some((e) => e.includes("2+ frames"))).toBe(true);
+  });
+
+  it("bounces animation frames at the ends", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.anims.find((a) => a.id === "spin")!.pingpong = true;
+    const main = emitProject(p)["main.ux"];
+    expect(main).toContain("adir_title_coin: u8 = 0;");
+    expect(main).toContain("if adir_title_coin == 0 {");
+    expect(main).toContain("afr_title_coin = 0; adir_title_coin = 1;");
+  });
+
+  it("assembles masks, creation code and ping-pong with the real etal", async () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.anims.find((a) => a.id === "spin")!.pingpong = true;
+    p.scenes[0].nodes.find((o) => o.id === "hero")!.mask = { x: 2, y: 2, w: 4, h: 4 };
+    p.scenes[0].nodes.find((o) => o.id === "wall")!.initCode = "ox[slot] = ox[slot];";
+    expect(validateProject(p)).toEqual([]);
+    const files = emitProject(p);
+    const etal = process.env.ETAL_BIN ?? "/home/grim/Documents/projects/uxn-dsl/build/linux-x86/etal";
+    if (!existsSync(etal)) {
+      console.warn("skip: no etal binary");
+      return;
+    }
+    const dir = mkdtempSync(join(tmpdir(), "uxn-phase5-"));
+    for (const [name, content] of Object.entries(files)) {
+      writeFileSync(join(dir, name), content);
+    }
+    execFileSync(etal, ["-r", join(dir, "main.ux"), "-o", join(dir, "phase5.rom")], { stdio: "pipe" });
+    expect(existsSync(join(dir, "phase5.rom"))).toBe(true);
+  });
+});
+
 describe("named sounds", () => {
   it("migrates literal play blocks to shared named sounds", () => {
     const raw = structuredClone(SAMPLE_PROJECT) as unknown as Record<string, unknown>;

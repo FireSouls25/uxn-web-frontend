@@ -1,10 +1,11 @@
-# Engine plan: from scene painter to real engine
+# Engine plan: from scene painter to real engine — ALL PHASES DONE
 
-Status: **Phases 0–4 done** (friction fixes + multi-tile sprites +
-object templates + events/blocks + named sounds + scene map). Only
-Phase 5 (polish) is still plan. Each phase lists the model change,
-the emitter change, the UI change, and the docs/tests that move with
-it. Phases are ordered so every one ships something usable on its own.
+Status: **Phases 0–5 done** (friction fixes, multi-tile sprites,
+object templates, events/blocks, named sounds, scene map, polish).
+The engine is complete per this plan; what remains is futured in
+each phase's notes (if/variables, multi-select, precise masks,
+headless-run endpoint). Each phase lists the model change, the
+emitter change, the UI change, and the docs/tests that move with it.
 
 ## 1. Where we are
 
@@ -316,20 +317,38 @@ everything later needs a picker and named inputs anyway.
   skip, broken-scene survival. Suites: frontend 85, `tsc` clean,
   production build ok.
 
-### Phase 5 — Engine-complete polish (pick by pain, not by list)
+### Phase 5 — Engine-complete polish ✅ DONE (picked by pain)
 
-* Instance Creation Code (per-instance ETAL patch after Create —
-  the escape hatch that prevents def proliferation).
-* Collision mask choice per def (full/solid-box/precise-slow —
-  GameMaker's mask honesty, Uxn-sized).
-* Animation polish: ping-pong, per-frame rates (model already has
-  rate+loop; extend, don't redesign).
-* Multi-select + bulk edit with `-` for divergent values (GameMaker
-  inspector), lockable inspector.
-* `Ctrl+T` go-to-everything (assets, scenes, inputs, sounds).
-* Playtest: needs backend headless-run endpoint (deferred v2 in
-  backend ARCHITECTURE.md) — until then, "export + open" stays,
-  but one click from the studio.
+* Instance Creation Code: `SceneNode.initCode`, spliced after the
+  leaf's create blocks (same setup call condition), instance-only
+  (defs use create events). Inspector textarea + `creation_code`
+  tool; validated like tick text.
+* Hitboxes: `HitBox {x,y,w,h}` on defs (default) + leaves (whole-box
+  override), resolved in flatten, validated against resolved sprite
+  pixels. Collide pairs and click rects use masked literals; **drive
+  keeps full bounds on purpose** (generous world, precise hitbox —
+  the GameMaker-feel trade without mask buffers blowing the
+  assembler budget). Inspector + ObjectEditor share `MaskEditor`;
+  `set_mask` tool for the agent. Precise-per-pixel masks skipped
+  (AABB is the Uxn-sized honesty).
+* Animation: real frame editor (strip + add-selected with
+  same-size guard, rate, loop, **ping-pong** with bounce logic and
+  `adir_` counters; ping-pong requires loop + 2+ frames) +
+  `add_anim_frame` / `set_anim` tools. Per-frame rates skipped
+  (rate 1–255 is fine-grained enough).
+* `Ctrl+K` go-to-everything (K, because browsers own T): scenes,
+  templates, sprites, sounds, inputs with jump-to-view+select.
+* Playtest: no backend endpoint needed — `compileProject` returns
+  bytes, and a Playtest button runs the web bundle in an iframe
+  below the export panel (same bytes as the download).
+* Deferred, honestly: multi-select + bulk edit (doubles inspector
+  complexity; revisit when level-building pain demands it),
+  per-frame rates, precise masks, backend headless-run endpoint.
+* Tests: 12 new (mask validation/emitter/drive-unchanged, initCode
+  validation/order/initCode-only call, ping-pong validation/lines/
+  counters, anim store fns, creation_code/anim/mask tools,
+  full-feature real-etal assembly). Suites: frontend 97, backend
+  55, `tsc` clean, production build ok.
 
 ### Explicitly not copying
 

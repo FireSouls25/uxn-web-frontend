@@ -112,6 +112,30 @@ describe("agent tools", () => {
     expect(runTool("preview_event", { object: "coin", event: "ev_1" }).ok).toBe(false);
   });
 
+  it("sets creation code and tunes animations", () => {
+    expect(runTool("creation_code", { object: "wall", code: "ox[slot] = ox[slot];" }).ok).toBe(true);
+    expect(runTool("creation_code", { object: "missing", code: "x" }).ok).toBe(false);
+    expect(runTool("creation_code", { object: "wall", code: "" }).ok).toBe(true);
+    expect(runTool("add_anim_frame", { anim: "spin", sprite: "hero" }).ok).toBe(true);
+    expect(runTool("add_anim_frame", { anim: "spin", sprite: "ghost" }).ok).toBe(false);
+    expect(runTool("set_anim", { anim: "spin", rate: 12, pingpong: true }).ok).toBe(true);
+    expect(runTool("set_anim", { anim: "nope", rate: 12 }).ok).toBe(false);
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+    const emit = runTool("emit_files", {});
+    const main = (emit.data as { files: Record<string, string> }).files["main.ux"];
+    expect(main).toContain("adir_title_coin");
+  });
+
+  it("sets hitboxes from either side", () => {
+    expect(runTool("set_mask", { object: "hero", x: 2, y: 2, w: 4, h: 4 }).ok).toBe(true);
+    expect(runTool("set_mask", { object: "hero", x: 6, y: 0, w: 4, h: 8 }).ok).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: false });
+    expect(runTool("set_mask", { object: "hero" }).ok).toBe(true);
+    expect(runTool("set_mask", { object: "nope", x: 0, y: 0, w: 1, h: 1 }).ok).toBe(false);
+    expect(runTool("set_mask", { x: 0, y: 0, w: 1, h: 1 }).ok).toBe(false);
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+  });
+
   it("authors shared behavior through object templates", () => {
     const def = runTool("create_object_def", { name: "crate", sprite: "wall", kind: "movable" });
     expect(def).toMatchObject({ ok: true, data: { id: "crate" } });

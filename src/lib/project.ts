@@ -64,6 +64,18 @@ export interface Animation {
   /** Ticks per frame (60Hz frames). */
   rate: number;
   loop: boolean;
+  /** Bounce at the ends instead of wrapping (requires loop + 2+ frames). */
+  pingpong?: boolean;
+}
+
+/** Hitbox mask in sprite pixels: the body for collision AND clicks
+    (the full sprite stays the canvas/drive bounds — generous world,
+    precise hitbox). Absent = whole sprite. */
+export interface HitBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 export type ObjectKind = "player" | "static" | "movable";
@@ -132,6 +144,8 @@ export interface ObjectDef {
   tick?: string;
   /** The def's events; instances inherit them whole. */
   events?: ObjectEvent[];
+  /** Default hitbox; a leaf mask replaces it whole (boxes don't merge). */
+  mask?: HitBox;
 }
 
 /** The def library, legacy-safe: pre-def projects simply have none. */
@@ -186,6 +200,13 @@ export interface SceneNode {
   anim?: string;
   /** Leaves only: per-object script, wrapped as tick_<root>_<path>. */
   tick?: string;
+  /** Leaves only: creation code — ETAL statements spliced after the
+      leaf's create-event blocks in its create fn (GameMaker Creation
+      Code: per-instance patch, runs on scene enter). Always instance
+      state, never inherited from a def. */
+  initCode?: string;
+  /** Leaves only: hitbox override (def leaves: default on the def). */
+  mask?: HitBox;
   /** Leaves only: instance of ObjectDef. Every field above (except
       id/x/y, which are always instance state) falls back to the def
       when locally absent — explicit local values always win. */
@@ -255,6 +276,7 @@ export function flattenScene(p: Project, sceneId: string): FlatLeaf[] {
           controls: n.controls ?? def?.controls,
           anim: n.anim ?? def?.anim,
           tick: n.tick ?? def?.tick,
+          mask: n.mask ?? def?.mask,
           events: def ? (def.events ?? []) : (n.events ?? []),
         });
       }
@@ -326,7 +348,7 @@ const RESERVED_EXACT = new Set([
   "dpad", "draw_all", "pt_in_rect", "overlap88", "scene_go", "start", "main", "sq32",
   "custom_setup", "custom_frame",
 ]);
-const RESERVED_PREFIX = ["atick_", "afr_", "spr_", "tick_"];
+const RESERVED_PREFIX = ["atick_", "afr_", "adir_", "spr_", "tick_"];
 
 function declaredNames(code: string): string[] {
   const names: string[] = [];
@@ -517,6 +539,14 @@ function u16(n: number): boolean {
   return Number.isInteger(n) && n >= 0 && n <= 65535;
 }
 
+/** A hitbox is pixel offsets inside its sprite: non-negative origin,
+    positive size, fully contained. Integers only (ports take ints). */
+function maskFits(m: HitBox, dims: [number, number]): boolean {
+  const [w, h] = dims;
+  for (const v of [m.x, m.y, m.w, m.h]) if (!Number.isInteger(v)) return false;
+  return m.x >= 0 && m.y >= 0 && m.w >= 1 && m.h >= 1 && m.x + m.w <= w && m.y + m.h <= h;
+}
+
 /** Max static collide pairs per scene (see the pair counting below).
     Keeps generated frame fns far under the assembler reference
     budget (~1200) no matter how the statements stack. */
@@ -661,6 +691,23 @@ export function buildSceneMap(p: Project): SceneMap {
   return { nodes, edges };
 }
 
+/** Masked rect args for overlap/click sites: the full sprite rect by
+    default, mask offsets when set. Drive deliberately keeps full
+    bounds (generous world, precise hitbox — see the plan). Zero
+    offsets collapse so output stays identical for unmasked leaves. */
+function hitArgs(
+  xBase: string,
+  yBase: string,
+  wBase: string | number,
+  hBase: string | number,
+  mask: HitBox | undefined,
+): [string, string, string | number, string | number] {
+  if (!mask) return [xBase, yBase, wBase, hBase];
+  const x = mask.x === 0 ? xBase : `${xBase} + ${mask.x}`;
+  const y = mask.y === 0 ? yBase : `${yBase} + ${mask.y}`;
+  return [x, y, mask.w, mask.h];
+}
+
 /** Static collide matching: kinds and def identity are all known at
     emit time (leaves carry resolved kind + raw def ref), so pairs
     unroll without any runtime tags. */
@@ -726,6 +773,8 @@ export function validateProject(p: Project): string[] {
     for (const f of a.frames) if (!spriteIds.has(f)) errs.push(`animation '${a.id}': unknown sprite '${f}'`);
     if (!Number.isInteger(a.rate) || a.rate < 1 || a.rate > 255)
       errs.push(`animation '${a.id}': rate must be 1–255`);
+    if (a.pingpong && (!a.loop || a.frames.length < 2))
+      errs.push(`animation '${a.id}': pingpong needs loop and 2+ frames`);
     // Frames swap the whole sprite address at runtime, so mixed-size
     // frames would shear: every frame shares the first frame's tiles.
     const first = spriteDims.get(a.frames[0] ?? "");
@@ -767,6 +816,12 @@ export function validateProject(p: Project): string[] {
     if (d.controls && d.kind !== "player") errs.push(`object '${d.id}': controls require player kind`);
     if (d.anim && !animIds.has(d.anim)) errs.push(`object '${d.id}': unknown animation '${d.anim}'`);
     if (d.tick) errs.push(...validateCustomCode(d.tick).map((e) => `object '${d.id}' tick: ${e}`));
+    if (d.mask) {
+      const tiles = spriteDims.get(d.sprite);
+      const dims: [number, number] | undefined = tiles && [tiles[0] * TILE_PX, tiles[1] * TILE_PX];
+      if (dims && !maskFits(d.mask, dims))
+        errs.push(`object '${d.id}': mask must fit inside its ${dims[0]}×${dims[1]}px sprite`);
+    }
     errs.push(...validateEvents(d.events ?? [], `object '${d.id}'`, sceneIds, inputIds, defIds, soundIds));
   }
   if (sceneIds.size !== p.scenes.length) errs.push("duplicate scene id");
@@ -805,6 +860,8 @@ export function validateProject(p: Project): string[] {
         if (o.anim && !animIds.has(o.anim)) errs.push(`node '${o.id}': unknown animation '${o.anim}'`);
       }
       if (o.tick) errs.push(...validateCustomCode(o.tick).map((e) => `node '${o.id}' tick: ${e}`));
+      if (o.initCode)
+        errs.push(...validateCustomCode(o.initCode).map((e) => `node '${o.id}' creation code: ${e}`));
       if (o.kind !== undefined && o.kind !== "player" && o.kind !== "static" && o.kind !== "movable")
         errs.push(`node '${o.id}': bad kind '${(o as { kind: unknown }).kind}'`);
     }
@@ -823,6 +880,12 @@ export function validateProject(p: Project): string[] {
           errs.push(`scene '${s.id}': '${o.path}' movable requires solid`);
         if (o.controls && o.kind !== "player")
           errs.push(`scene '${s.id}': '${o.path}' controls require player kind`);
+        if (o.mask) {
+          const tiles = spriteDims.get(o.sprite);
+          const dims: [number, number] | undefined = tiles && [tiles[0] * TILE_PX, tiles[1] * TILE_PX];
+          if (dims && !maskFits(o.mask, dims))
+            errs.push(`scene '${s.id}': '${o.path}' mask must fit inside its ${dims[0]}×${dims[1]}px sprite`);
+        }
         const hasWait = o.events.some((e) => e.blocks.some((b) => b.op === "wait"));
         const hasAlarm = o.events.some((e) => e.trigger === "alarm" && e.blocks.length > 0);
         if (hasWait && !hasAlarm)
@@ -999,7 +1062,9 @@ function emitSetup(
   }
   for (let i = 0; i < leaves.length; i++) {
     const o = leaves[i];
-    if (o.events.some((e) => e.trigger === "create" && e.blocks.length > 0))
+    // Create fn runs when it has blocks OR instance code (both run
+    // on scene enter, blocks first) — same condition as emission.
+    if (o.events.some((e) => e.trigger === "create" && e.blocks.length > 0) || o.initCode)
       lines.push(`    create_${slotTag(rootId, o.path)}(${i});`);
   }
   lines.push(`    ocount = ${leaves.length};`);
@@ -1192,10 +1257,17 @@ function emitLeafEvents(
       if (stmts.length === 0) return;
       lines.push(`${name} :: fn(slot: u16) {`, ...ind(stmts), `}`);
     };
+    // Create: blocks first, instance code after — same condition as
+    // the setup call site, so the fn always exists when called.
+    const createEv = o.events.find((e) => e.trigger === "create");
+    const createBody = [
+      ...(createEv && createEv.blocks.length > 0 ? previewBlocks(createEv.blocks, ctx) : []),
+      ...(o.initCode ? String(o.initCode).split("\n") : []),
+    ];
+    if (createBody.length > 0) fn(`create_${tag}`, createBody);
     for (const e of o.events) {
-      if (e.blocks.length === 0) continue;
-      if (e.trigger === "create") fn(`create_${tag}`, previewBlocks(e.blocks, ctx));
-      else if (e.trigger === "destroy" && !o.def) fn(`destroy_${tag}`, previewBlocks(e.blocks, ctx));
+      if (e.blocks.length === 0 || e.trigger === "create") continue;
+      if (e.trigger === "destroy" && !o.def) fn(`destroy_${tag}`, previewBlocks(e.blocks, ctx));
       else if (e.trigger === "alarm") fn(`alarm_${tag}`, previewBlocks(e.blocks, ctx));
       else if (e.trigger === "key" && e.key) fn(`key_${tag}_${e.key}`, previewBlocks(e.blocks, ctx));
       else if (e.trigger === "click") fn(`click_${tag}`, previewBlocks(e.blocks, ctx));
@@ -1203,10 +1275,12 @@ function emitLeafEvents(
     let ci = 0;
     for (const e of o.events) {
       if (e.trigger !== "collide" || e.blocks.length === 0) continue;
+      const [sx, sy, sw, sh] = hitArgs("ox[slot]", "oy[slot]", "ow[slot]", "oh[slot]", o.mask);
       const body: string[] = [`if oflags[slot] & 8 != 0 {`];
       leaves.forEach((t, j) => {
         if (!matchTarget(t, j, i, e.target ?? "")) return;
-        body.push(`    if overlapwh(ox[slot], oy[slot], ow[slot], oh[slot], ox[${j}], oy[${j}], ow[${j}], oh[${j}]) {`);
+        const [jx, jy, jw, jh] = hitArgs(`ox[${j}]`, `oy[${j}]`, `ow[${j}]`, `oh[${j}]`, t.mask);
+        body.push(`    if overlapwh(${sx}, ${sy}, ${sw}, ${sh}, ${jx}, ${jy}, ${jw}, ${jh}) {`);
         for (const s of previewBlocks(e.blocks, ctx)) body.push(`        ${s}`);
         body.push(`    }`);
       });
@@ -1258,8 +1332,23 @@ function emitAnim(rootId: string, leaves: FlatLeaf[], anims: Map<string, Animati
     lines.push(`    atick_${tag} = atick_${tag} + 1;`);
     lines.push(`    if atick_${tag} >= ${a.rate} {`);
     lines.push(`        atick_${tag} = 0;`);
-    lines.push(`        afr_${tag} = afr_${tag} + 1;`);
-    lines.push(`        if afr_${tag} >= ${F} { ${hold} }`);
+    if (a.pingpong) {
+      // Bounce at the ends (validated: loop + 2+ frames, so F - 2 is
+      // safe and the reverse branch always has somewhere to go).
+      // One if/else: the flip must not fall through to a reverse
+      // step in the same tick.
+      lines.push(`        if adir_${tag} == 0 {`);
+      lines.push(`            afr_${tag} = afr_${tag} + 1;`);
+      lines.push(`            if afr_${tag} >= ${F} { afr_${tag} = ${F - 2}; adir_${tag} = 1; }`);
+      lines.push(`        }`);
+      lines.push(`        else {`);
+      lines.push(`            if afr_${tag} == 0 { afr_${tag} = 1; adir_${tag} = 0; }`);
+      lines.push(`            else { afr_${tag} = afr_${tag} - 1; }`);
+      lines.push(`        }`);
+    } else {
+      lines.push(`        afr_${tag} = afr_${tag} + 1;`);
+      lines.push(`        if afr_${tag} >= ${F} { ${hold} }`);
+    }
     lines.push(`    }`);
     a.frames.forEach((f, fi) => {
       lines.push(`    if afr_${tag} == ${fi} { ot[${i}] = &spr_${f}; }`);
@@ -1349,8 +1438,9 @@ function emitFrame(
   for (const c of [...s.clicks].sort((a, b) => (a.object < b.object ? -1 : 1))) {
     const i = byObject.get(c.object) as number;
     const [cw, ch] = dims.get(leaves[i].sprite) ?? [TILE_PX, TILE_PX];
+    const [rx, ry, rw, rh] = hitArgs(`ox[${i}]`, `oy[${i}]`, cw, ch, leaves[i].mask);
     lines.push(`    if mpressed & 1 != 0 {`);
-    lines.push(`        if pt_in_rect(mx, my, ox[${i}], oy[${i}], ${cw}, ${ch}) {`);
+    lines.push(`        if pt_in_rect(mx, my, ${rx}, ${ry}, ${rw}, ${rh}) {`);
     lines.push(`            setup_${c.goto}();`);
     lines.push(`            scene_go(SC_${c.goto.toUpperCase()});`);
     lines.push(`        }`);
@@ -1382,7 +1472,8 @@ function emitFrame(
     leaves.forEach((o, i) => {
       if (!o.events.some((e) => e.trigger === "click" && e.blocks.length > 0)) return;
       const [cw, ch] = dims.get(o.sprite) ?? [TILE_PX, TILE_PX];
-      lines.push(`        if pt_in_rect(mx, my, ox[${i}], oy[${i}], ${cw}, ${ch}) {`);
+      const [rx, ry, rw, rh] = hitArgs(`ox[${i}]`, `oy[${i}]`, cw, ch, o.mask);
+      lines.push(`        if pt_in_rect(mx, my, ${rx}, ${ry}, ${rw}, ${rh}) {`);
       lines.push(`            if oflags[${i}] & 8 != 0 {`);
       lines.push(`                click_${slotTag(s.id, o.path)}(${i});`);
       lines.push(`            }`);
@@ -1558,6 +1649,7 @@ export function emitProject(p: Project): Record<string, string> {
         const tag = slotTag(s.id, o.path);
         out.push(`atick_${tag}: u8 = 0;`);
         out.push(`afr_${tag}: u8 = 0;`);
+        if (animMap.get(o.anim)?.pingpong) out.push(`adir_${tag}: u8 = 0;`);
       }
     }
   }

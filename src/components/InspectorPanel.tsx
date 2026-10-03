@@ -19,6 +19,7 @@ import {
   setObjectPos,
 } from "../lib/store";
 import KeyPicker from "./KeyPicker";
+import MaskEditor from "./MaskEditor";
 import SpritePicker, { SpriteThumb } from "./SpritePicker";
 
 const KIND_META: Record<ObjectKind, { icon: typeof Box; key: string }> = {
@@ -78,6 +79,7 @@ export default function InspectorPanel() {
         controls: obj.controls ?? def?.controls ?? false,
         anim: obj.anim ?? def?.anim,
         tick: obj.tick ?? def?.tick,
+        mask: obj.mask ?? def?.mask,
       }
     : null;
   const overridden =
@@ -311,6 +313,14 @@ export default function InspectorPanel() {
           ))}
           {toggleRow("solid", t(lang, "insp.solid"))}
           {eff?.kind === "player" && toggleRow("controls", t(lang, "insp.controls"))}
+          <div className="rounded-lg border border-surface0 px-3 py-2">
+            <MaskEditor
+              value={obj.mask}
+              full={spritePxOf(project, eff?.sprite ?? "")}
+              custom={obj.mask !== undefined && !!def}
+              onChange={(mask) => patchObject(obj.id, { mask })}
+            />
+          </div>
           <label className="block">
             <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
               {t(lang, "insp.anim")}
@@ -340,6 +350,19 @@ export default function InspectorPanel() {
               spellCheck={false}
               rows={3}
               placeholder={t(lang, "insp.tick_ph")}
+              className="w-full resize-y rounded-lg border border-surface1 bg-base p-2 font-mono text-[11px] leading-relaxed outline-none placeholder:text-overlay0 focus:border-mauve"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
+              {t(lang, "insp.init")}
+            </span>
+            <textarea
+              value={obj.initCode ?? ""}
+              onChange={(e) => patchObject(obj.id, { initCode: e.target.value || undefined })}
+              spellCheck={false}
+              rows={2}
+              placeholder={t(lang, "insp.init_ph")}
               className="w-full resize-y rounded-lg border border-surface1 bg-base p-2 font-mono text-[11px] leading-relaxed outline-none placeholder:text-overlay0 focus:border-mauve"
             />
           </label>

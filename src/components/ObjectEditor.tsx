@@ -2,7 +2,8 @@ import { useState } from "react";
 import { useStore } from "@nanostores/react";
 import { Box, Gamepad2, Move, Trash2 } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
-import { spriteTiles, type ObjectKind } from "../lib/project";
+import { spritePxOf, spriteTiles, type ObjectKind } from "../lib/project";
+import MaskEditor from "./MaskEditor";
 import {
   defSelStore,
   deleteDef,
@@ -150,6 +151,14 @@ export default function ObjectEditor({ id }: { id: string }) {
         <SpritePicker open={picking} onPick={(sid) => patchDef(id, { sprite: sid })} onClose={() => setPicking(false)} />
         {toggleRow("solid", t(lang, "insp.solid"))}
         {def.kind === "player" && toggleRow("controls", t(lang, "insp.controls"))}
+        <div className="rounded-lg border border-surface0 px-3 py-2">
+          <MaskEditor
+            value={def.mask}
+            full={spritePxOf(project, def.sprite)}
+            custom={false}
+            onChange={(mask) => patchDef(id, { mask })}
+          />
+        </div>
         <label className="block">
           <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
             {t(lang, "insp.anim")}

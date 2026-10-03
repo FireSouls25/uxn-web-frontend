@@ -44,12 +44,21 @@ function downloadBlob(bytes: Uint8Array, filename: string, mime: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
-export async function exportProject(
+export interface CompileResult extends ExportResult {
+  bytes?: Uint8Array;
+  mime?: string;
+  filename?: string;
+}
+
+/** Validate → emit → POST /compile, returning the artifact bytes
+    without downloading. Powers both export-to-file and the in-studio
+    playtest (same bytes either way). */
+export async function compileProject(
   project: Project,
   target: ExportTarget,
   mode: ExportMode,
   lang: Lang,
-): Promise<ExportResult> {
+): Promise<CompileResult> {
   const errs = validateProject(project);
   if (errs.length > 0) return { ok: false, message: errs[0] };
   const files = emitProject(project);
@@ -88,6 +97,17 @@ export async function exportProject(
       ? new TextEncoder().encode(payload)
       : Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
   const mime = key === "tal" ? "text/plain" : key === "html_b64" ? "text/html" : "application/octet-stream";
-  downloadBlob(bytes, artifactFilename(project.name, target, mode), mime);
-  return { ok: true, message: t(lang, "exp.done") };
+  return { ok: true, message: t(lang, "exp.done"), bytes, mime, filename: artifactFilename(project.name, target, mode) };
+}
+
+export async function exportProject(
+  project: Project,
+  target: ExportTarget,
+  mode: ExportMode,
+  lang: Lang,
+): Promise<ExportResult> {
+  const r = await compileProject(project, target, mode, lang);
+  if (!r.ok || !r.bytes) return { ok: r.ok, message: r.message, diagnostics: r.diagnostics };
+  downloadBlob(r.bytes, r.filename ?? "game", r.mime ?? "application/octet-stream");
+  return { ok: true, message: r.message };
 }
