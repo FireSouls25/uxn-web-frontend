@@ -64,7 +64,7 @@ export default function EngineCanvas() {
           style={{
             backgroundImage: "radial-gradient(#26272d 1px, transparent 1px)",
             backgroundSize: "24px 24px",
-            backgroundPosition: `${vp.x}px ${vp.y}px`,
+            backgroundPosition: "0 0",
           }}
         />
       )}
