@@ -112,6 +112,20 @@ describe("agent tools", () => {
     expect(runTool("preview_event", { object: "coin", event: "ev_1" }).ok).toBe(false);
   });
 
+  it("authors code and button blocks through tools", () => {
+    expect(runTool("create_object_def", { name: "lamp", sprite: "wall" }).ok).toBe(true);
+    expect(runTool("add_event", { def: "lamp", trigger: "step" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "lamp", event: "ev_1", op: "code", code: "ox[slot] = ox[slot];" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "lamp", event: "ev_1", op: "code", code: "  " }).ok).toBe(false);
+    expect(runTool("add_block", { def: "lamp", event: "ev_1", op: "button", label: "jump", action: "play" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "lamp", event: "ev_1", op: "button", label: "", action: "play" }).ok).toBe(false);
+    const preview = runTool("preview_event", { def: "lamp", event: "ev_1" });
+    expect(preview.ok).toBe(true);
+    expect(preview.message as string).toContain("ox[slot] = ox[slot];");
+    expect(preview.message as string).toContain("( button 'jump' -> play )");
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+  });
+
   it("sets creation code and tunes animations", () => {
     expect(runTool("creation_code", { object: "wall", code: "ox[slot] = ox[slot];" }).ok).toBe(true);
     expect(runTool("creation_code", { object: "missing", code: "x" }).ok).toBe(false);

@@ -1,40 +1,21 @@
 ---
 import Base from "../layouts/Base.astro";
-import ProjectBar from "../components/ProjectBar";
 import SessionBanner from "../components/SessionBanner";
-import StudioRail from "../components/StudioRail";
+import StudioHeader from "../components/StudioHeader";
 import StudioCenter from "../components/StudioCenter";
-import { StudioLeft, StudioRight } from "../components/StudioSides";
 ---
 
 <Base titleKey="page.studio" title="Studio">
-  <div class="mx-auto max-w-[1400px] px-3 py-4">
-    <div class="mb-3">
-      <ProjectBar client:load />
+  <div class="flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden bg-black">
+    <div class="shrink-0">
+      <StudioHeader client:load />
     </div>
-    <div class="mb-3">
+    <div class="shrink-0 px-3 pt-2">
       <SessionBanner client:load />
     </div>
 
-    <div class="mt-3 grid gap-3 lg:grid-cols-[44px_240px_1fr_280px]">
-      <div class="hidden lg:block">
-        <StudioRail client:load />
-      </div>
-
-      <StudioLeft client:load />
-
-      <div class="min-w-0">
-        <StudioCenter client:visible />
-      </div>
-
-      <StudioRight client:visible />
-    </div>
-
-    {/* Status bar */}
-    <div class="pane mt-3 flex flex-wrap gap-x-5 gap-y-1 rounded-xl px-4 py-2 font-mono text-[11px] text-subtext0">
-      <span><span class="text-green">●</span> <span data-i18n="st.eng">Engine: Ready</span></span>
-      <span data-i18n="st.rend">Renderer: pixel-perfect</span>
-      <span class="ml-auto"><span data-i18n="st.cursor">Cursor</span>: [X: 142, Y: 88]</span>
+    <div class="relative min-h-0 flex-1">
+      <StudioCenter client:visible />
     </div>
   </div>
 </Base>

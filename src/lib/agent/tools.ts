@@ -221,12 +221,12 @@ export const TOOLS: ToolDef[] = [
   {
     name: "add_block",
     description:
-      "Append a visual action to an event (see add_event). Ops: move {dx,dy} (pixels, clamped), set_pos {x,y}, play {sound} (named one-shot SFX — see create_sound), goto {scene}, destroy (self), wait {ticks 1-255} (arms the alarm event). Every op lowers to fixed ETAL — use preview_event to see it.",
+      "Append a visual action to an event (see add_event). Ops: move {dx,dy} (pixels, clamped), set_pos {x,y}, play {sound} (named one-shot SFX — see create_sound), goto {scene}, destroy (self), wait {ticks 1-255} (arms the alarm event), code {code} (raw ETAL statements, same gate as tick text), button {label, action} (labeled annotation, lowers to a comment). Every op lowers to fixed ETAL — use preview_event to see it.",
     params: {
       def: { type: "string", description: "Object template id (exactly one of def/object)" },
       object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
       event: { type: "string", required: true, description: "Event id from add_event" },
-      op: { type: "string", required: true, description: "move|set_pos|play|goto|destroy|wait" },
+      op: { type: "string", required: true, description: "move|set_pos|play|goto|destroy|wait|code|button" },
       dx: { type: "number", description: "move: pixels" },
       dy: { type: "number", description: "move: pixels" },
       x: { type: "number", description: "set_pos: pixels" },
@@ -234,6 +234,9 @@ export const TOOLS: ToolDef[] = [
       sound: { type: "string", description: "play: named sound id (see create_sound)" },
       scene: { type: "string", description: "goto: target scene" },
       ticks: { type: "number", description: "wait: 1-255" },
+      code: { type: "string", description: "code: raw ETAL statements" },
+      label: { type: "string", description: "button: 1-32 character label" },
+      action: { type: "string", description: "button: named action (at most 64 characters)" },
       index: { type: "number", description: "Insert position, default append" },
     },
     run: (args) => {
@@ -690,6 +693,14 @@ function blockOf(args: Record<string, unknown>): Block | null {
   }
   if (op === "destroy") return { op };
   if (op === "wait") return { op, ticks: num(args["ticks"], 30) };
+  if (op === "code") {
+    if (!str(args["code"]).trim()) return null;
+    return { op, code: str(args["code"]) };
+  }
+  if (op === "button") {
+    if (!str(args["label"]).trim()) return null;
+    return { op, label: str(args["label"]).slice(0, 32), action: str(args["action"]).slice(0, 64) };
+  }
   return null;
 }
 

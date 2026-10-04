@@ -21,20 +21,24 @@
   --ctp-sapphire: #74c7ec;
   --ctp-blue: #89b4fa;
   --ctp-lavender: #b4befe;
-  --ctp-text: #cdd6f4;
-  --ctp-subtext1: #bac2de;
-  --ctp-subtext0: #a6adc8;
-  --ctp-overlay2: #9399b2;
-  --ctp-overlay1: #7f849c;
-  --ctp-overlay0: #6c7086;
-  --ctp-surface2: #585b70;
-  --ctp-surface1: #45475a;
-  --ctp-surface0: #313244;
-  --ctp-base: #1e1e2e;
-  --ctp-mantle: #181825;
-  --ctp-crust: #11111b;
+  --ctp-text: #fafafa;
+  --ctp-subtext1: #d4d4d8;
+  --ctp-subtext0: #a1a1aa;
+  --ctp-overlay2: #71717a;
+  --ctp-overlay1: #52525b;
+  --ctp-overlay0: #3f3f46;
+  --ctp-surface2: #33343b;
+  --ctp-surface1: #26272d;
+  --ctp-surface0: #1a1b1f;
+  --ctp-base: #000000;
+  --ctp-mantle: #0e0e11;
+  --ctp-crust: #000000;
   --ctp-accent: var(--ctp-mauve);
   --ctp-accent-dim: #6e5a94;
+  --canvas-bg: #000000;
+  --node-bg: #131316;
+  --node-border: #2a2b31;
+  --wire: #e4e4e7;
 }
 
 [data-theme="latte"] {
@@ -119,10 +123,29 @@ pre {
   font-family: var(--font-mono);
 }
 
-/* Hairline panel seams, per the reference workstation language. */
+/* Hairline panel seams, per the reference workstation language.
+   Floating docks sit on top of the infinite canvas: near-black fill,
+   subtle border, blur + deep shadow like the UQURA reference. */
 .pane {
   background: var(--ctp-mantle);
   border: 1px solid var(--ctp-surface0);
+}
+
+.dock {
+  background: color-mix(in srgb, var(--node-bg, #131316) 92%, transparent);
+  border: 1px solid var(--node-border, #2a2b31);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 0.55);
+  backdrop-filter: blur(12px);
+}
+
+.node-card {
+  background: var(--node-bg, #131316);
+  border: 1px solid var(--node-border, #2a2b31);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 0.5);
+}
+
+.wire {
+  stroke: var(--wire, #e4e4e7);
 }
 
 ::selection {

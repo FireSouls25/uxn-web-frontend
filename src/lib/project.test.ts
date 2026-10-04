@@ -838,3 +838,73 @@ describe("named inputs", () => {
     expect(emitProject(p)["main.ux"]).toContain("if k == 32");
   });
 });
+
+describe("execute + button blocks", () => {
+  it("lowers code verbatim and button to a comment", async () => {
+    const { previewBlocks, soundMap } = await import("./project");
+    const ctx = { slot: "slot", w: 128, h: 128, sounds: soundMap(SAMPLE_PROJECT) };
+    expect(previewBlocks([{ op: "code", code: "ox[slot] = ox[slot];\noy[slot] = 4;" }], ctx)).toEqual([
+      "ox[slot] = ox[slot];",
+      "oy[slot] = 4;",
+    ]);
+    expect(previewBlocks([{ op: "button", label: "jump", action: "play" }], ctx)).toEqual([
+      "( button 'jump' -> play )",
+    ]);
+  });
+
+  it("rejects empty/colliding code and bad button text", () => {
+    const empty = structuredClone(SAMPLE_PROJECT);
+    empty.scenes[0].nodes.find((o) => o.id === "hero")!.events!.push({
+      id: "ev_9",
+      trigger: "step",
+      blocks: [{ op: "code", code: "   " }],
+    });
+    expect(validateProject(empty).some((e) => e.includes("needs ETAL statements"))).toBe(true);
+    const collide = structuredClone(SAMPLE_PROJECT);
+    collide.scenes[0].nodes.find((o) => o.id === "hero")!.events!.push({
+      id: "ev_9",
+      trigger: "step",
+      blocks: [{ op: "code", code: "scene: u8 = 1;" }],
+    });
+    expect(validateProject(collide).some((e) => e.includes("collides"))).toBe(true);
+    const badLabel = structuredClone(SAMPLE_PROJECT);
+    badLabel.scenes[0].nodes.find((o) => o.id === "hero")!.events!.push({
+      id: "ev_9",
+      trigger: "step",
+      blocks: [{ op: "button", label: 'say "hi"', action: "" }],
+    });
+    expect(validateProject(badLabel).some((e) => e.includes("label must not contain"))).toBe(true);
+    const badAction = structuredClone(SAMPLE_PROJECT);
+    badAction.scenes[0].nodes.find((o) => o.id === "hero")!.events!.push({
+      id: "ev_9",
+      trigger: "step",
+      blocks: [{ op: "button", label: "ok", action: "x".repeat(65) }],
+    });
+    expect(validateProject(badAction).some((e) => e.includes("at most 64"))).toBe(true);
+  });
+
+  it("emits new blocks inline and keeps old projects byte-identical", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.scenes[0].nodes.find((o) => o.id === "wall")!.events = [
+      {
+        id: "ev_1",
+        trigger: "step",
+        blocks: [
+          { op: "code", code: "ox[slot] = ox[slot];" },
+          { op: "button", label: "jump", action: "play" },
+        ],
+      },
+    ];
+    expect(validateProject(p)).toEqual([]);
+    const main = emitProject(p)["main.ux"];
+    expect(main).toContain("tick_title_wall :: fn(slot: u16) {");
+    expect(main).toContain("ox[slot] = ox[slot];");
+    expect(main).toContain("( button 'jump' -> play )");
+    // Old projects (no new ops) load through migration and emit
+    // exactly what they always did.
+    const before = emitProject(SAMPLE_PROJECT)["main.ux"];
+    const migrated = migrateProject(structuredClone(SAMPLE_PROJECT) as unknown as Record<string, unknown>);
+    expect(validateProject(migrated)).toEqual([]);
+    expect(emitProject(migrated)["main.ux"]).toBe(before);
+  });
+});

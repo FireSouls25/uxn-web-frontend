@@ -7,6 +7,7 @@ import { keyLabel } from "../lib/keys";
 import {
   addBinding,
   addInput,
+  canvasModeStore,
   currentScene,
   defSelStore,
   extractObject,
@@ -31,8 +32,10 @@ const KIND_META: Record<ObjectKind, { icon: typeof Box; key: string }> = {
 /* Inspector bound to the store selection: numeric X/Y, physics flags
    (solid / movable / player / controls) and the object's scene
    transitions, with add/remove. Canvas drags and typed values share
-   the same clamping, so they can never disagree. */
-export default function InspectorPanel() {
+   the same clamping, so they can never disagree. With hideCode (the
+   canvas overlay), the tick/creation-code textareas collapse into a
+   Logic summary that jumps to the logic graph — code lives there. */
+export default function InspectorPanel({ hideCode = false }: { hideCode?: boolean }) {
   const lang = useLang();
   const project = useStore(projectStore);
   const sceneId = useStore(sceneIdStore);
@@ -339,33 +342,50 @@ export default function InspectorPanel() {
               ))}
             </select>
           </label>
-          <label className="block">
-            <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
-              {t(lang, "insp.tick")}
-              {obj.tick !== undefined && def && <span className="ml-1 text-teal">●</span>}
-            </span>
-            <textarea
-              value={eff?.tick ?? ""}
-              onChange={(e) => patchObject(obj.id, { tick: e.target.value || undefined })}
-              spellCheck={false}
-              rows={3}
-              placeholder={t(lang, "insp.tick_ph")}
-              className="w-full resize-y rounded-lg border border-surface1 bg-base p-2 font-mono text-[11px] leading-relaxed outline-none placeholder:text-overlay0 focus:border-mauve"
-            />
-          </label>
-          <label className="block">
-            <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
-              {t(lang, "insp.init")}
-            </span>
-            <textarea
-              value={obj.initCode ?? ""}
-              onChange={(e) => patchObject(obj.id, { initCode: e.target.value || undefined })}
-              spellCheck={false}
-              rows={2}
-              placeholder={t(lang, "insp.init_ph")}
-              className="w-full resize-y rounded-lg border border-surface1 bg-base p-2 font-mono text-[11px] leading-relaxed outline-none placeholder:text-overlay0 focus:border-mauve"
-            />
-          </label>
+          {hideCode ? (
+            <button
+              onClick={() => canvasModeStore.set("logic")}
+              className="flex w-full items-center justify-between rounded-lg border border-surface0 px-3 py-2 text-left transition-colors hover:border-mauve/40"
+            >
+              <span className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
+                {t(lang, "insp.logic")}: {(def ? (def.events ?? []) : (obj.events ?? [])).length}{" "}
+                {t(lang, "view.events").toLowerCase()}
+              </span>
+              <span className="rounded-md bg-mauve/15 px-1.5 py-0.5 font-mono text-[11px] text-mauve">
+                {t(lang, "insp.events_open")}
+              </span>
+            </button>
+          ) : (
+            <>
+              <label className="block">
+                <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
+                  {t(lang, "insp.tick")}
+                  {obj.tick !== undefined && def && <span className="ml-1 text-teal">●</span>}
+                </span>
+                <textarea
+                  value={eff?.tick ?? ""}
+                  onChange={(e) => patchObject(obj.id, { tick: e.target.value || undefined })}
+                  spellCheck={false}
+                  rows={3}
+                  placeholder={t(lang, "insp.tick_ph")}
+                  className="w-full resize-y rounded-lg border border-surface1 bg-base p-2 font-mono text-[11px] leading-relaxed outline-none placeholder:text-overlay0 focus:border-mauve"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
+                  {t(lang, "insp.init")}
+                </span>
+                <textarea
+                  value={obj.initCode ?? ""}
+                  onChange={(e) => patchObject(obj.id, { initCode: e.target.value || undefined })}
+                  spellCheck={false}
+                  rows={2}
+                  placeholder={t(lang, "insp.init_ph")}
+                  className="w-full resize-y rounded-lg border border-surface1 bg-base p-2 font-mono text-[11px] leading-relaxed outline-none placeholder:text-overlay0 focus:border-mauve"
+                />
+              </label>
+            </>
+          )}
 
           <div className="rounded-lg border border-surface0 p-3">
             <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">

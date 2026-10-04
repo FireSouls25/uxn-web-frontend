@@ -59,7 +59,11 @@ Every tool validates like the UI; the backend compiler is final arbiter.
   `play {sound}` (named one-shot SFX — see below),
   `goto {scene}`, `destroy` (self; runs the destroy event first),
   `wait {ticks 1-255}` (arms the alarm event — a waiter without one
-  is rejected, single timer per object).
+  is rejected, single timer per object),
+  `code {code}` (raw ETAL statements, same reserved-name gate as
+  tick text — the Execute-ETAL hatch),
+  `button {label 1-32, action 0-64}` (labeled annotation, lowers to
+  a comment — never changes runtime bytes).
 * `preview_event {def|object, event}` — the exact lines the emitter
   writes (same function; preview and build cannot disagree).
   `delete_event` / `delete_block {index}` for iteration.

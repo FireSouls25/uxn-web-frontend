@@ -112,11 +112,25 @@ export interface BlockWait {
   op: "wait";
   ticks: number;
 }
+export interface BlockCode {
+  op: "code";
+  /** Raw ETAL statements spliced verbatim (the Execute-ETAL hatch:
+      what tick/initCode textareas become in the logic graph). */
+  code: string;
+}
+export interface BlockButton {
+  op: "button";
+  /** UI annotation: a labeled control firing a named action. Lowers
+      to a comment, so it never changes runtime bytes — the logic
+      graph's clickable affordance without a second language. */
+  label: string;
+  action: string;
+}
 
-/** One visual action = one ETAL lowering (see previewBlocks). No
-    `if`, no variables in v1: events ARE the conditionals, and the
-    tick textarea remains the code hatch for the rest. */
-export type Block = BlockMove | BlockPos | BlockPlay | BlockGoto | BlockDestroy | BlockWait;
+/** One visual action = one ETAL lowering (see previewBlocks). `code`
+    splices raw ETAL (validated like tick text); `button` lowers to a
+    comment. Old projects use neither, so their emit is untouched. */
+export type Block = BlockMove | BlockPos | BlockPlay | BlockGoto | BlockDestroy | BlockWait | BlockCode | BlockButton;
 
 export interface ObjectEvent {
   /** Stable id for agent/UI targeting (ev_N). */
@@ -572,6 +586,18 @@ function validateBlocks(blocks: Block[], label: string, sceneIds: Set<string>, s
     } else if (b.op === "wait") {
       if (!Number.isInteger(b.ticks) || b.ticks < 1 || b.ticks > 255)
         errs.push(`${at}: ticks must be 1–255`);
+    } else if (b.op === "code") {
+      if (typeof b.code !== "string" || b.code.trim().length === 0)
+        errs.push(`${at}: code needs ETAL statements`);
+      else if (b.code.length > 4096) errs.push(`${at}: code exceeds 4KB`);
+      else errs.push(...validateCustomCode(b.code).map((e) => `${at}: ${e}`));
+    } else if (b.op === "button") {
+      if (typeof b.label !== "string" || b.label.trim().length === 0 || b.label.length > 32)
+        errs.push(`${at}: label must be 1–32 characters`);
+      else if (/["\\\n]/.test(b.label)) errs.push(`${at}: label must not contain quotes, backslashes or newlines`);
+      if (typeof b.action !== "string" || b.action.length > 64)
+        errs.push(`${at}: action must be at most 64 characters`);
+      else if (/["\\\n]/.test(b.action)) errs.push(`${at}: action must not contain quotes, backslashes or newlines`);
     } else {
       errs.push(`${label} block ${i}: unknown op '${(b as { op: unknown }).op}'`);
     }
@@ -1159,6 +1185,10 @@ export function previewBlocks(blocks: Block[], ctx: BlockCtx): string[] {
       lines.push(`oflags[${slot}] = oflags[${slot}] & 247;`);
     } else if (b.op === "wait") {
       lines.push(`oat[${slot}] = ${b.ticks};`);
+    } else if (b.op === "code") {
+      for (const line of String(b.code).split("\n")) lines.push(line);
+    } else if (b.op === "button") {
+      lines.push(`( button '${b.label}' -> ${b.action} )`);
     } else {
       throw new Error(`unknown block '${(b as { op: unknown }).op}'`);
     }

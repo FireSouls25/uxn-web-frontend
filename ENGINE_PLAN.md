@@ -1,11 +1,12 @@
-# Engine plan: from scene painter to real engine — ALL PHASES DONE
+# Engine plan: from scene painter to real engine — PHASES 0–6 DONE
 
-Status: **Phases 0–5 done** (friction fixes, multi-tile sprites,
-object templates, events/blocks, named sounds, scene map, polish).
-The engine is complete per this plan; what remains is futured in
-each phase's notes (if/variables, multi-select, precise masks,
-headless-run endpoint). Each phase lists the model change, the
-emitter change, the UI change, and the docs/tests that move with it.
+Status: **Phases 0–6 done** (friction fixes, multi-tile sprites,
+object templates, events/blocks, named sounds, scene map, polish,
+canvas-first studio rebuild + execute/button blocks).
+Phases 0–5 made it an engine; Phase 6 made it feel like one
+(GameMaker loop, Godot chrome). Each phase lists the model change,
+the emitter change, the UI change, and the docs/tests that move
+with it.
 
 ## 1. Where we are
 
@@ -360,6 +361,56 @@ everything later needs a picker and named inputs anyway.
   no second mechanism.
 * Third-party block runtimes — blocks lower to our DSL, no
   interpreter in the ROM.
+
+### Phase 6 — Canvas-first studio ✅ DONE
+
+*Why:* phases 0–5 built the engine but left five separate views
+around it (rail + side panes + event list + map list). The rebuild
+puts one pannable/zoomable canvas at the center with GameMaker's
+loop (Scene ⇄ Logic) and Godot's chrome (header tabs, docked
+overlays), keeping every byte of project data loading untouched.
+* Model: two new blocks, both total in `previewBlocks`:
+  `code {code}` (Execute-ETAL hatch — raw statements spliced
+  verbatim, same reserved-name gate as tick text, the UI home of the
+  old tick/initCode textareas) and `button {label 1–32, action 0–64}`
+  (labeled annotation lowering to a comment — clickable affordance,
+  zero runtime bytes). Validation rejects empty/colliding code and
+  quote/backslash/newline smuggling in button text. Old projects use
+  neither op, so their emit is byte-identical (tested: sample
+  through migration emits exactly what it always did).
+* Emitter: **no shape change** — two new `previewBlocks` arms only.
+  `button` is a comment; `code` splices lines like tick text.
+* UI:
+  * `StudioHeader` (replaces `ProjectBar` + `StudioRail` view
+    switching, both deleted): project name/kind, scene tabs (+/x,
+    drag-across reorder via new `reorderScenes`), Scene|Logic toggle
+    (`canvasModeStore`), snap/grid/fit (`viewportStore`), sprite /
+    sound / code dialog buttons (`viewStore`, dialogs only now),
+    Playtest button (compiles the web bundle into `playtestStore`)
+    and an export popover (target/mode/Download).
+  * `EngineCanvas` shell (pan/zoom viewport) + `SceneLayer` (the
+    StudioCanvas pixel render/hit/drag/def-drop, snap+grid from the
+    viewport store), `SceneMapLayer` (EventsGraph BFS columns
+    restyled dark with cubic bezier edges), `LogicGraphLayer` (every
+    object a dark node, event ports → child block stacks wired with
+    measured beziers, goto edges to scene chips, tick/initCode as
+    Execute-ETAL blocks with live `previewBlocks` previews).
+  * `NodeDock` (left overlay: AssetBrowser + Hierarchy + SceneNav,
+    collapsible, def drag still stamps) and `InspectorOverlay`
+    (right overlay: slim Inspector/ObjectEditor with `hideCode` —
+    no code textareas, Logic N-events → Open jump, teal dots and
+    used-by kept). `PlaytestOverlay` (fullscreen, X/Esc, revokes
+    the blob URL on close).
+  * `viewStore` kept for sprite/sound/code dialogs only (modal over
+    the canvas); scene/events views are canvas modes now. Deleted:
+    `EventPanel`, `EventsGraph`, `ExportPanel`, `TransitionEditor`
+    (bindings still edit from the inspector), `StudioSides`.
+* Agent: `add_block` takes `code {code}` / `button {label,
+  action}`; corpus (`corpus/tools.md`) mirrors the two ops.
+* Tests/docs: 4 new (lowerings, validation rejections, emit
+  inclusion + byte-identical old emit, tool flow), i18n en+es for
+  every new string, `tsc` clean, production build ok. Suites:
+  frontend 101.
 
 ## 4. How the graphical version compiles to our DSL
 

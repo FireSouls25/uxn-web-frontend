@@ -5,6 +5,7 @@ import { t, useLang } from "../lib/i18n";
 import { spritePxOf, spriteTiles, type ObjectKind } from "../lib/project";
 import MaskEditor from "./MaskEditor";
 import {
+  canvasModeStore,
   defSelStore,
   deleteDef,
   patchDef,
@@ -22,8 +23,10 @@ const KIND_META: Record<ObjectKind, { icon: typeof Box; key: string }> = {
 /* Right panel when an object template is selected: the GameMaker
    object editor minus physics — default art, kind, flags, animation
    and tick script. Instances inherit all of it; editing here updates
-   every placement at once. */
-export default function ObjectEditor({ id }: { id: string }) {
+   every placement at once. With hideCode (the canvas overlay), the
+   tick textarea collapses into a Logic summary — code lives in the
+   logic graph. */
+export default function ObjectEditor({ id, hideCode = false }: { id: string; hideCode?: boolean }) {
   const lang = useLang();
   const project = useStore(projectStore);
   const [rename, setRename] = useState<string | null>(null);
@@ -176,19 +179,33 @@ export default function ObjectEditor({ id }: { id: string }) {
             ))}
           </select>
         </label>
-        <label className="block">
-          <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
-            {t(lang, "insp.tick")}
-          </span>
-          <textarea
-            value={def.tick ?? ""}
-            onChange={(e) => patchDef(id, { tick: e.target.value || undefined })}
-            spellCheck={false}
-            rows={3}
-            placeholder={t(lang, "insp.tick_ph")}
-            className="w-full resize-y rounded-lg border border-surface1 bg-base p-2 font-mono text-[11px] leading-relaxed outline-none placeholder:text-overlay0 focus:border-mauve"
-          />
-        </label>
+        {hideCode ? (
+          <button
+            onClick={() => canvasModeStore.set("logic")}
+            className="flex w-full items-center justify-between rounded-lg border border-surface0 px-3 py-2 text-left transition-colors hover:border-mauve/40"
+          >
+            <span className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
+              {t(lang, "insp.logic")}: {(def.events ?? []).length} {t(lang, "view.events").toLowerCase()}
+            </span>
+            <span className="rounded-md bg-mauve/15 px-1.5 py-0.5 font-mono text-[11px] text-mauve">
+              {t(lang, "insp.events_open")}
+            </span>
+          </button>
+        ) : (
+          <label className="block">
+            <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
+              {t(lang, "insp.tick")}
+            </span>
+            <textarea
+              value={def.tick ?? ""}
+              onChange={(e) => patchDef(id, { tick: e.target.value || undefined })}
+              spellCheck={false}
+              rows={3}
+              placeholder={t(lang, "insp.tick_ph")}
+              className="w-full resize-y rounded-lg border border-surface1 bg-base p-2 font-mono text-[11px] leading-relaxed outline-none placeholder:text-overlay0 focus:border-mauve"
+            />
+          </label>
+        )}
         <div className="rounded-lg border border-surface0 p-3">
           <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
             {t(lang, "assets.used_by")} ({usedBy.length})

@@ -126,6 +126,41 @@ export const soundSelStore = atom<string | null>(null);
 export const codeFileStore = atom<string>("main.ux");
 export const viewStore = atom<"scene" | "sprites" | "events" | "sound" | "code">("scene");
 
+/* Canvas-first studio chrome. viewStore above now only opens the
+   sprite/sound/code dialogs; the canvas itself runs on these. */
+export const canvasModeStore = atom<"scene" | "logic">("scene");
+export const overlayStore = atom<{ left: boolean; right: boolean }>({ left: true, right: true });
+export function toggleOverlay(side: "left" | "right"): void {
+  const cur = overlayStore.get();
+  overlayStore.set(side === "left" ? { ...cur, left: !cur.left } : { ...cur, right: !cur.right });
+}
+/** Playtest blob URL (null = closed). closePlaytest revokes it so
+    repeated runs never leak object URLs. */
+export const playtestStore = atom<string | null>(null);
+export function openPlaytest(url: string): void {
+  const prev = playtestStore.get();
+  if (prev) URL.revokeObjectURL(prev);
+  playtestStore.set(url);
+}
+export function closePlaytest(): void {
+  const prev = playtestStore.get();
+  if (prev) URL.revokeObjectURL(prev);
+  playtestStore.set(null);
+}
+export const viewportStore = atom<{ x: number; y: number; k: number; snap: boolean; grid: boolean }>({
+  x: 0,
+  y: 0,
+  k: 1,
+  snap: true,
+  grid: true,
+});
+export function patchViewport(patch: Partial<{ x: number; y: number; k: number; snap: boolean; grid: boolean }>): void {
+  viewportStore.set({ ...viewportStore.get(), ...patch });
+}
+export function resetViewport(): void {
+  viewportStore.set({ ...viewportStore.get(), x: 0, y: 0, k: 1 });
+}
+
 if (typeof localStorage !== "undefined") {
   const persist = (all: Record<string, Project>, id: string) => {
     // Guests write per-tab storage only; logins write local storage.
@@ -452,7 +487,7 @@ export function deleteEvent(owner: EventOwner, eventId: string): boolean {
   return writeOwnerEvents(owner, (events) => events.filter((e) => e.id !== eventId));
 }
 
-const BLOCK_OPS = ["move", "set_pos", "play", "goto", "destroy", "wait"];
+const BLOCK_OPS = ["move", "set_pos", "play", "goto", "destroy", "wait", "code", "button"];
 
 /** Append (or insert) a block. The op and required fields are
     checked; value ranges are validation's job (same gate as export). */
@@ -690,6 +725,18 @@ export function addScene(): string {
   sceneIdStore.set(id);
   selectionStore.set(null);
   return id;
+}
+
+/** Reorder scenes (header tab drag). The start scene follows its id. */
+export function reorderScenes(from: number, to: number): void {
+  const p = projectStore.get();
+  if (from === to || from < 0 || to < 0 || from >= p.scenes.length || to >= p.scenes.length) return;
+  updateCurrent((prev) => {
+    const scenes = [...prev.scenes];
+    const [moved] = scenes.splice(from, 1);
+    scenes.splice(to, 0, moved);
+    return { ...prev, scenes };
+  });
 }
 
 export function deleteScene(id: string): void {

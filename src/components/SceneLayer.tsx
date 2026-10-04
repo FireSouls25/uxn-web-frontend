@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
-import { Grid3x3, Stamp } from "lucide-react";
+import { Stamp } from "lucide-react";
 import { themeColors } from "../lib/palette";
 import { t, useLang } from "../lib/i18n";
-import { sceneVar } from "../lib/scene-ui";
 import {
   addInstance,
   addObject,
@@ -15,6 +14,7 @@ import {
   sceneIdStore,
   selectionStore,
   spriteSelStore,
+  viewportStore,
 } from "../lib/store";
 import { TILE_PX, flattenScene, spritePxOf } from "../lib/project";
 import type { FlatLeaf } from "../lib/project";
@@ -49,19 +49,21 @@ function hitTest(
   return null;
 }
 
-/* Pixel canvas for the active scene. Click selects, drag moves
-   (clamped to the project bounds, written straight to the store). */
-export default function StudioCanvas() {
+/* Scene layer of the canvas-first studio: the StudioCanvas pixel
+   render, hit-test, drag-move and def-drop, minus the scene tabs
+   (the header owns those now). Snap/grid come from the shared
+   viewport store so header and canvas can never disagree. */
+export default function SceneLayer() {
   const lang = useLang();
   const project = useStore(projectStore);
   const sceneId = useStore(sceneIdStore);
   const selection = useStore(selectionStore);
+  const vp = useStore(viewportStore);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<{ path: string; dx: number; dy: number } | null>(null);
 
   const scene = currentScene(project, sceneId);
   const spriteSel = useStore(spriteSelStore);
-  const [snap, setSnap] = useState(true);
   const [placing, setPlacing] = useState(false);
   const leaves: FlatLeaf[] = (() => {
     try {
@@ -73,7 +75,7 @@ export default function StudioCanvas() {
 
   /** Snap a game pixel to the 8px tile grid (top-left origin). */
   function snapV(v: number): number {
-    return snap ? Math.round(v / TILE) * TILE : v;
+    return vp.snap ? Math.round(v / TILE) * TILE : v;
   }
 
   useEffect(() => {
@@ -83,6 +85,7 @@ export default function StudioCanvas() {
     if (!ctx) return;
     ctx.clearRect(0, 0, project.width, project.height);
     const accent = cssVar("--ctp-mauve", "#cba6f7");
+    const grid = cssVar("--ctp-surface1", "#45475a");
     const pal = themeColors(project.theme);
     const sprites = new Map(project.sprites.map((s) => [s.id, s.pixels]));
     for (const o of leaves) {
@@ -99,7 +102,23 @@ export default function StudioCanvas() {
         ctx.strokeRect(o.x - 1.5, o.y - 1.5, TILE + 3, TILE + 3);
       }
     }
-  }, [project, scene, selection]);
+    if (vp.grid) {
+      ctx.strokeStyle = grid;
+      ctx.globalAlpha = 0.35;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let x = TILE; x < project.width; x += TILE) {
+        ctx.moveTo(x + 0.5, 0);
+        ctx.lineTo(x + 0.5, project.height);
+      }
+      for (let y = TILE; y < project.height; y += TILE) {
+        ctx.moveTo(0, y + 0.5);
+        ctx.lineTo(project.width, y + 0.5);
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }, [project, scene, selection, vp.grid]);
 
   function toGame(e: React.PointerEvent): [number, number] {
     const canvas = canvasRef.current as HTMLCanvasElement;
@@ -155,40 +174,12 @@ export default function StudioCanvas() {
   }
 
   return (
-    <div>
+    <div data-nopan className="mx-auto w-full max-w-3xl">
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         <span className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
-          {t(lang, "canvas.switch")}
+          {scene.id} · {leaves.length}
         </span>
-        {project.scenes.map((s, si) => (
-          <button
-            key={s.id}
-            onClick={() => {
-              sceneIdStore.set(s.id);
-              selectionStore.set(null);
-            }}
-            className="rounded-md px-2.5 py-1 font-mono text-[11px] transition-all hover:bg-surface0"
-            style={
-              s.id === scene.id
-                ? { background: "color-mix(in srgb, currentColor 14%, transparent)", color: sceneVar(si) }
-                : { color: "var(--ctp-subtext0)" }
-            }
-          >
-            {s.id}
-          </button>
-        ))}
         <span className="ml-auto inline-flex items-center gap-1">
-          <button
-            onClick={() => setSnap((v) => !v)}
-            title={t(lang, "canvas.snap")}
-            aria-label={t(lang, "canvas.snap")}
-            aria-pressed={snap}
-            className={`grid size-7 place-items-center rounded-md transition-colors ${
-              snap ? "bg-mauve/20 text-mauve" : "text-subtext0 hover:bg-surface0 hover:text-text"
-            }`}
-          >
-            <Grid3x3 size={14} />
-          </button>
           <button
             onClick={() => setPlacing((v) => !v)}
             title={t(lang, "canvas.place")}
