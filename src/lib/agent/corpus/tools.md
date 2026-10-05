@@ -56,14 +56,28 @@ Every tool validates like the UI; the backend compiler is final arbiter.
   Defs own their events; instances run them (no local event lists).
 * `add_block {def|object, event, op, ...}` — one action = fixed ETAL:
   `move {dx,dy}` (pixels, clamped), `set_pos {x,y}`,
+  `sprite {sprite}` (swap art at runtime, same tile size as the
+  leaf — the draw loop unrolls the declared size),
+  `show`/`hide` (alive bit on/off without running destroy events),
   `play {sound}` (named one-shot SFX — see below),
-  `goto {scene}`, `destroy` (self; runs the destroy event first),
+  `goto {scene}`, `destroy {target?}` (self default, else
+  `any|solid|player|movable|def:<id>` unrolled statically like
+  collide pairs, victim destroy fns run first under the alive
+  guard, max 12 victims),
   `wait {ticks 1-255}` (arms the alarm event — a waiter without one
   is rejected, single timer per object),
-  `code {code}` (raw ETAL statements, same reserved-name gate as
-  tick text — the Execute-ETAL hatch),
+  `run {snippet}` (named ETAL snippet from the Code library — see
+  below; the replacement for inline code),
+  `code {code}` (legacy inline ETAL, same reserved-name gate as
+  tick text — convert to a snippet + run block),
   `button {label 1-32, action 0-64}` (labeled annotation, lowers to
-  a comment — never changes runtime bytes).
+  a comment — never changes runtime bytes; menus are button labels
+  + click/key events + goto scene chains, no interpreter in ROM).
+* `add_snippet {name, code?}` / `set_snippet_code {snippet, code}` —
+  the Code library: ETAL statements with the tick-text gate,
+  authored once and connected to any event with run blocks.
+  `delete` is refused while a run block names the snippet (same
+  refcount rule as sounds).
 * `preview_event {def|object, event}` — the exact lines the emitter
   writes (same function; preview and build cannot disagree).
   `delete_event` / `delete_block {index}` for iteration.

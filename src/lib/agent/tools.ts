@@ -17,6 +17,7 @@ import {
   addNode,
   addObject,
   addScene,
+  addSnippet,
   addSound,
   addSprite,
   createProject,
@@ -40,6 +41,7 @@ import {
   setMask,
   setObjectPos,
   setSceneFrameCode,
+  setSnippetCode,
   setSoundVoice,
   setSpritePixels,
   setTheme,
@@ -221,20 +223,23 @@ export const TOOLS: ToolDef[] = [
   {
     name: "add_block",
     description:
-      "Append a visual action to an event (see add_event). Ops: move {dx,dy} (pixels, clamped), set_pos {x,y}, play {sound} (named one-shot SFX — see create_sound), goto {scene}, destroy (self), wait {ticks 1-255} (arms the alarm event), code {code} (raw ETAL statements, same gate as tick text), button {label, action} (labeled annotation, lowers to a comment). Every op lowers to fixed ETAL — use preview_event to see it.",
+      "Append a visual action to an event (see add_event). Ops: move {dx,dy} (pixels, clamped), set_pos {x,y}, sprite {sprite} (swap art, same tile size), show/hide (alive bit, no destroy event), play {sound} (named one-shot SFX — see create_sound), goto {scene}, destroy {target?} (self default, else any|solid|player|movable|def:<id> unrolled like collide), wait {ticks 1-255} (arms the alarm event), run {snippet} (named ETAL snippet — see add_snippet), code {code} (legacy inline ETAL, prefer run), button {label, action} (labeled annotation, lowers to a comment). Every op lowers to fixed ETAL — use preview_event to see it.",
     params: {
       def: { type: "string", description: "Object template id (exactly one of def/object)" },
       object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
       event: { type: "string", required: true, description: "Event id from add_event" },
-      op: { type: "string", required: true, description: "move|set_pos|play|goto|destroy|wait|code|button" },
+      op: { type: "string", required: true, description: "move|set_pos|sprite|show|hide|play|goto|destroy|wait|run|code|button" },
       dx: { type: "number", description: "move: pixels" },
       dy: { type: "number", description: "move: pixels" },
       x: { type: "number", description: "set_pos: pixels" },
       y: { type: "number", description: "set_pos: pixels" },
       sound: { type: "string", description: "play: named sound id (see create_sound)" },
       scene: { type: "string", description: "goto: target scene" },
+      target: { type: "string", description: "destroy: self default, else any|solid|player|movable|def:<id>" },
+      sprite: { type: "string", description: "sprite: sprite id, same tile size as the leaf" },
       ticks: { type: "number", description: "wait: 1-255" },
-      code: { type: "string", description: "code: raw ETAL statements" },
+      code: { type: "string", description: "code: raw ETAL statements (legacy inline; prefer run)" },
+      snippet: { type: "string", description: "run: named snippet id (see add_snippet)" },
       label: { type: "string", description: "button: 1-32 character label" },
       action: { type: "string", description: "button: named action (at most 64 characters)" },
       index: { type: "number", description: "Insert position, default append" },
@@ -446,6 +451,32 @@ export const TOOLS: ToolDef[] = [
       const err = setSoundVoice(str(args["sound"]), num(args["voice"]), num(args["note"], 60), num(args["vol"], 120));
       if (err) return { ok: false, message: err };
       return { ok: true, message: `sound ${args["sound"]} voice ${args["voice"]} set` };
+    },
+  },
+  {
+    name: "add_snippet",
+    description:
+      "Add a named ETAL snippet to the Code library (same gate as tick text). Connect it to object events with a run block — the replacement for inline code blocks.",
+    params: {
+      name: { type: "string", required: true, description: "Display name, becomes the id when valid" },
+      code: { type: "string", description: "ETAL statements (default ox[slot] = ox[slot];)" },
+    },
+    run: (args) => {
+      const id = addSnippet(str(args["name"], "snippet"), str(args["code"], "ox[slot] = ox[slot];"));
+      return { ok: true, message: `snippet ${id}`, data: { id } };
+    },
+  },
+  {
+    name: "set_snippet_code",
+    description: "Replace a named snippet's ETAL statements (validated at export like all ETAL).",
+    params: {
+      snippet: { type: "string", required: true, description: "Snippet id from add_snippet" },
+      code: { type: "string", required: true, description: "ETAL statements" },
+    },
+    run: (args) => {
+      const err = setSnippetCode(str(args["snippet"]), str(args["code"]));
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: `snippet ${args["snippet"]} set` };
     },
   },
   {
@@ -691,11 +722,25 @@ function blockOf(args: Record<string, unknown>): Block | null {
     if (!str(args["scene"])) return null;
     return { op, scene: str(args["scene"]) };
   }
-  if (op === "destroy") return { op };
+  if (op === "destroy") {
+    const target = str(args["target"]);
+    if (target && target !== "self") return { op, target };
+    return { op };
+  }
   if (op === "wait") return { op, ticks: num(args["ticks"], 30) };
+  if (op === "sprite") {
+    if (!str(args["sprite"])) return null;
+    return { op, sprite: str(args["sprite"]) };
+  }
+  if (op === "show") return { op };
+  if (op === "hide") return { op };
   if (op === "code") {
     if (!str(args["code"]).trim()) return null;
     return { op, code: str(args["code"]) };
+  }
+  if (op === "run") {
+    if (!str(args["snippet"])) return null;
+    return { op, snippet: str(args["snippet"]) };
   }
   if (op === "button") {
     if (!str(args["label"]).trim()) return null;

@@ -16,7 +16,7 @@ import {
   spriteSelStore,
   viewportStore,
 } from "../lib/store";
-import { TILE_PX, flattenScene, spritePxOf } from "../lib/project";
+import { TILE_PX, flattenScene, spritePxOf, spriteTiles } from "../lib/project";
 import type { FlatLeaf } from "../lib/project";
 
 const TILE = TILE_PX;
@@ -87,19 +87,27 @@ export default function SceneLayer() {
     const accent = cssVar("--ctp-mauve", "#cba6f7");
     const grid = cssVar("--ctp-surface1", "#45475a");
     const pal = themeColors(project.theme);
-    const sprites = new Map(project.sprites.map((s) => [s.id, s.pixels]));
+    const sprites = new Map(project.sprites.map((s) => [s.id, s]));
     for (const o of leaves) {
-      const pixels = sprites.get(o.sprite) ?? [];
-      for (let r = 0; r < TILE; r++) {
-        for (let c = 0; c < TILE; c++) {
-          ctx.fillStyle = pal[(pixels[r * 8 + c] ?? 0) & 3];
-          ctx.fillRect(o.x + c, o.y + r, 1, 1);
+      const spr = sprites.get(o.sprite);
+      const [tw, th] = spr ? spriteTiles(spr) : [1, 1];
+      const pixels = spr?.pixels ?? [];
+      const W = tw * TILE;
+      const H = th * TILE;
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const tx = Math.floor(x / 8);
+          const ty = Math.floor(y / 8);
+          const idx = (tx + ty * tw) * 64 + (y % 8) * 8 + (x % 8);
+          ctx.fillStyle = pal[(pixels[idx] ?? 0) & 3];
+          ctx.fillRect(o.x + x, o.y + y, 1, 1);
         }
       }
       if (o.path === selection) {
+        const [sw, sh] = spritePxOf(project, o.sprite);
         ctx.strokeStyle = accent;
         ctx.lineWidth = 1;
-        ctx.strokeRect(o.x - 1.5, o.y - 1.5, TILE + 3, TILE + 3);
+        ctx.strokeRect(o.x - 1.5, o.y - 1.5, sw + 3, sh + 3);
       }
     }
     if (vp.grid) {

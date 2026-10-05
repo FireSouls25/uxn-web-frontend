@@ -538,9 +538,9 @@ describe("object events", () => {
   });
 
   it("lowers every block to fixed lines", async () => {
-    const { previewBlocks, soundMap } = await import("./project");
+    const { previewBlocks, soundMap, snippetMap, tileDimsOf } = await import("./project");
     const p = evProject();
-    const ctx = { slot: "slot", w: 128, h: 128, sounds: soundMap(p) };
+    const ctx = { slot: "slot", w: 128, h: 128, sounds: soundMap(p), snippets: snippetMap(p), tiles: tileDimsOf(p) };
     expect(previewBlocks([{ op: "move", dx: 2, dy: -3 }], ctx)).toEqual([
       "if ox[slot] + ow[slot] < 129 { ox[slot] = ox[slot] + 2; }",
       "if oy[slot] >= 3 { oy[slot] = oy[slot] - 3; }",
@@ -567,6 +567,39 @@ describe("object events", () => {
       "oflags[slot] = oflags[slot] & 247;",
     ]);
     expect(previewBlocks([{ op: "wait", ticks: 30 }], ctx)).toEqual(["oat[slot] = 30;"]);
+    expect(previewBlocks([{ op: "show" }], ctx)).toEqual(["oflags[slot] = oflags[slot] | 8;"]);
+    expect(previewBlocks([{ op: "hide" }], ctx)).toEqual(["oflags[slot] = oflags[slot] & 247;"]);
+    expect(previewBlocks([{ op: "destroy" }], { ...ctx, destroyFn: "destroy_x" })).toEqual([
+      "destroy_x(slot);",
+      "oflags[slot] = oflags[slot] & 247;",
+    ]);
+    expect(previewBlocks([{ op: "destroy", target: "self" }], ctx)).toEqual([
+      "oflags[slot] = oflags[slot] & 247;",
+    ]);
+    expect(previewBlocks([{ op: "destroy", target: "any" }], ctx)).toEqual(["( destroy 'any' matches nothing )"]);
+  });
+
+  it("lowers sprite swaps and targeted destroy with victim fns", async () => {
+    const { previewBlocks, soundMap, snippetMap, tileDimsOf } = await import("./project");
+    const p = structuredClone(SAMPLE_PROJECT);
+    const tiles = tileDimsOf(p);
+    const ctx = { slot: "slot", w: 128, h: 128, sounds: soundMap(p), snippets: snippetMap(p), tiles };
+    const [tw, th] = tiles.get("wall") ?? [1, 1];
+    expect(previewBlocks([{ op: "sprite", sprite: "wall" }], ctx)).toEqual([
+      "ot[slot] = &spr_wall;",
+      `ow[slot] = ${tw * 8}; oh[slot] = ${th * 8};`,
+    ]);
+    expect(previewBlocks([{ op: "sprite", sprite: "nope" }], ctx)).toEqual(["( unknown sprite 'nope' )"]);
+    const victims = [{ slot: "3", fn: "destroy_def_coin" }, { slot: "5" }];
+    expect(previewBlocks([{ op: "destroy", target: "def:coin" }], { ...ctx, victimsOf: () => victims })).toEqual([
+      "if oflags[3] & 8 != 0 {",
+      "    destroy_def_coin(3);",
+      "    oflags[3] = oflags[3] & 247;",
+      "}",
+      "if oflags[5] & 8 != 0 {",
+      "    oflags[5] = oflags[5] & 247;",
+      "}",
+    ]);
   });
 
   it("wires fns, dispatch and alive guards through the frame", () => {
@@ -841,8 +874,8 @@ describe("named inputs", () => {
 
 describe("execute + button blocks", () => {
   it("lowers code verbatim and button to a comment", async () => {
-    const { previewBlocks, soundMap } = await import("./project");
-    const ctx = { slot: "slot", w: 128, h: 128, sounds: soundMap(SAMPLE_PROJECT) };
+    const { previewBlocks, soundMap, snippetMap, tileDimsOf } = await import("./project");
+    const ctx = { slot: "slot", w: 128, h: 128, sounds: soundMap(SAMPLE_PROJECT), snippets: snippetMap(SAMPLE_PROJECT), tiles: tileDimsOf(SAMPLE_PROJECT) };
     expect(previewBlocks([{ op: "code", code: "ox[slot] = ox[slot];\noy[slot] = 4;" }], ctx)).toEqual([
       "ox[slot] = ox[slot];",
       "oy[slot] = 4;",
@@ -881,6 +914,103 @@ describe("execute + button blocks", () => {
       blocks: [{ op: "button", label: "ok", action: "x".repeat(65) }],
     });
     expect(validateProject(badAction).some((e) => e.includes("at most 64"))).toBe(true);
+  });
+
+  it("lowers run blocks from snippets and rejects bad refs", async () => {
+    const { previewBlocks, snippetMap } = await import("./project");
+    const withSnip = structuredClone(SAMPLE_PROJECT);
+    withSnip.snippets = [{ id: "hop", code: "oy[slot] = oy[slot] - 2;" }];
+    const ctx = { slot: "slot", w: 128, h: 128, sounds: new Map(), snippets: snippetMap(withSnip) };
+    expect(previewBlocks([{ op: "run", snippet: "hop" }], ctx)).toEqual(["oy[slot] = oy[slot] - 2;"]);
+    expect(previewBlocks([{ op: "run", snippet: "nope" }], ctx)).toEqual(["( unknown snippet 'nope' )"]);
+    const badRef = structuredClone(withSnip);
+    badRef.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_9", trigger: "step", blocks: [{ op: "run", snippet: "nope" }] },
+    ];
+    expect(validateProject(badRef).some((e) => e.includes("known snippet"))).toBe(true);
+    const badCode = structuredClone(withSnip);
+    badCode.snippets = [{ id: "hop", code: "scene: u8 = 1;" }];
+    expect(validateProject(badCode).some((e) => e.includes("collides"))).toBe(true);
+    const dup = structuredClone(withSnip);
+    dup.snippets = [
+      { id: "hop", code: "ox[slot] = 1;" },
+      { id: "hop", code: "ox[slot] = 2;" },
+    ];
+    expect(validateProject(dup).some((e) => e.includes("duplicate snippet"))).toBe(true);
+    const ok = structuredClone(withSnip);
+    ok.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_9", trigger: "step", blocks: [{ op: "run", snippet: "hop" }] },
+    ];
+    expect(validateProject(ok)).toEqual([]);
+    expect(emitProject(ok)["main.ux"]).toContain("oy[slot] = oy[slot] - 2;");
+  });
+
+  it("validates sprite swaps and targeted destroy", () => {
+    const badTarget = structuredClone(SAMPLE_PROJECT);
+    badTarget.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_9", trigger: "step", blocks: [{ op: "destroy", target: "def:nope" }] },
+    ];
+    expect(validateProject(badTarget).some((e) => e.includes("destroy target must be"))).toBe(true);
+    const badSprite = structuredClone(SAMPLE_PROJECT);
+    badSprite.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_9", trigger: "step", blocks: [{ op: "sprite", sprite: "nope" }] },
+    ];
+    expect(validateProject(badSprite).some((e) => e.includes("needs a known sprite"))).toBe(true);
+    const badSize = structuredClone(SAMPLE_PROJECT);
+    badSize.sprites.find((s) => s.id === "wall")!.w = 2;
+    badSize.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_9", trigger: "step", blocks: [{ op: "sprite", sprite: "wall" }] },
+    ];
+    expect(validateProject(badSize).some((e) => e.includes("must match 1×1 tiles"))).toBe(true);
+    const noHits = structuredClone(SAMPLE_PROJECT);
+    noHits.scenes[0].nodes = noHits.scenes[0].nodes.filter((o) => o.id === "hero");
+    noHits.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_9", trigger: "step", blocks: [{ op: "destroy", target: "movable" }] },
+    ];
+    expect(validateProject(noHits).some((e) => e.includes("matches nothing"))).toBe(true);
+    const many = structuredClone(SAMPLE_PROJECT);
+    for (let i = 0; i < 14; i++)
+      many.scenes[0].nodes.push({ id: `crate${i}`, x: 0, y: 0, sprite: "wall", kind: "static", solid: true });
+    many.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_9", trigger: "step", blocks: [{ op: "destroy", target: "solid" }] },
+    ];
+    expect(validateProject(many).some((e) => e.includes("max 12"))).toBe(true);
+  });
+
+  it("emits sprite, visibility and targeted destroy lines", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      {
+        id: "ev_9",
+        trigger: "step",
+        blocks: [
+          { op: "sprite", sprite: "wall" },
+          { op: "hide" },
+          { op: "show" },
+          { op: "destroy", target: "solid" },
+        ],
+      },
+    ];
+    expect(validateProject(p)).toEqual([]);
+    const main = emitProject(p)["main.ux"];
+    expect(main).toContain("ot[slot] = &spr_wall;");
+    expect(main).toContain("ow[slot] = 8; oh[slot] = 8;");
+    expect(main).toContain("oflags[slot] = oflags[slot] & 247;");
+    expect(main).toContain("oflags[slot] = oflags[slot] | 8;");
+    expect(main).toContain("oflags[1] = oflags[1] & 247;");
+    expect(main).toContain("oflags[2] = oflags[2] & 247;");
+    const etal =
+      process.env.ETAL_BIN ?? "/home/grim/Documents/projects/uxn-dsl/build/linux-x86/etal";
+    if (!existsSync(etal)) {
+      console.warn("skip: no etal binary");
+      return;
+    }
+    const dir = mkdtempSync(join(tmpdir(), "uxn-phasea-"));
+    for (const [name, content] of Object.entries(emitProject(p))) {
+      writeFileSync(join(dir, name), content);
+    }
+    execFileSync(etal, ["-r", join(dir, "main.ux"), "-o", join(dir, "main.rom")], { stdio: "pipe" });
+    expect(existsSync(join(dir, "main.rom"))).toBe(true);
   });
 
   it("emits new blocks inline and keeps old projects byte-identical", () => {

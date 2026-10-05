@@ -107,6 +107,23 @@ export interface BlockGoto {
 }
 export interface BlockDestroy {
   op: "destroy";
+  /** Who goes quiet: undefined/self = this leaf (runs its destroy
+      event first); otherwise a collide-style target resolved
+      statically like collide pairs (victim destroy fns run first,
+      guarded by the alive bit). */
+  target?: string;
+}
+export interface BlockSprite {
+  op: "sprite";
+  /** Swap art at runtime: tile address + ow/oh dims. Must share the
+      leaf's tile dims (the draw loop unrolls the declared size). */
+  sprite: string;
+}
+export interface BlockShow {
+  op: "show";
+}
+export interface BlockHide {
+  op: "hide";
 }
 export interface BlockWait {
   op: "wait";
@@ -114,9 +131,17 @@ export interface BlockWait {
 }
 export interface BlockCode {
   op: "code";
-  /** Raw ETAL statements spliced verbatim (the Execute-ETAL hatch:
-      what tick/initCode textareas become in the logic graph). */
+  /** Legacy inline ETAL (the old Execute-ETAL hatch). Kept lowering
+      so old projects emit byte-identical bytes; the UI no longer
+      authors it — convert to a snippet + run block instead. */
   code: string;
+}
+export interface BlockRun {
+  op: "run";
+  /** Named snippet id (Code page library). Spliced verbatim like the
+      old code hatch, but authored once in Code and connected to any
+      number of object events. */
+  snippet: string;
 }
 export interface BlockButton {
   op: "button";
@@ -127,10 +152,23 @@ export interface BlockButton {
   action: string;
 }
 
-/** One visual action = one ETAL lowering (see previewBlocks). `code`
-    splices raw ETAL (validated like tick text); `button` lowers to a
-    comment. Old projects use neither, so their emit is untouched. */
-export type Block = BlockMove | BlockPos | BlockPlay | BlockGoto | BlockDestroy | BlockWait | BlockCode | BlockButton;
+/** One visual action = one ETAL lowering (see previewBlocks). `run`
+    splices a named snippet (Code page); legacy `code` splices raw
+    ETAL in place; `button` lowers to a comment. Old projects use
+    neither new form, so their emit is untouched. */
+export type Block =
+  | BlockMove
+  | BlockPos
+  | BlockPlay
+  | BlockGoto
+  | BlockDestroy
+  | BlockWait
+  | BlockCode
+  | BlockRun
+  | BlockButton
+  | BlockSprite
+  | BlockShow
+  | BlockHide;
 
 export interface ObjectEvent {
   /** Stable id for agent/UI targeting (ev_N). */
@@ -141,6 +179,26 @@ export interface ObjectEvent {
   /** collide trigger: any|solid|player|movable|def:<id>. */
   target?: string;
   blocks: Block[];
+}
+
+/** A named ETAL snippet: authored once on the Code page, connected
+    to any number of object events via run blocks. The replacement
+    for inline Execute-ETAL — same verbatim splice, one home. */
+export interface CodeSnippet {
+  id: string;
+  code: string;
+}
+
+/** Canvas chrome positions: where scene/object blocks sit on the
+    free-form Blocks canvas. Pure UI state — validation and emit
+    ignore it, migration passes it through untouched. */
+export interface CanvasPos {
+  x: number;
+  y: number;
+}
+export interface CanvasLayout {
+  scenes?: Record<string, CanvasPos>;
+  objects?: Record<string, Record<string, CanvasPos>>;
 }
 
 /** An object template: the GameMaker Object in our Object ≠ Sprite ≠
@@ -343,6 +401,12 @@ export interface Project {
   sound?: { voices: Voice[] };
   /** Named one-shot SFX library (Phase 3). Absent = none yet. */
   sounds?: SoundDef[];
+  /** Named ETAL snippet library (Code page). Absent = none yet;
+      run blocks reference these by id. */
+  snippets?: CodeSnippet[];
+  /** Free-canvas block positions (Blocks view). Absent = cascade
+      defaults; ignored by validation and emit. */
+  layout?: CanvasLayout;
   /** Visual only: raw top-level ETAL spliced into main.ux. May define
       custom_setup() and/or custom_frame() hooks (called when present). */
   customCode?: string;
@@ -566,9 +630,21 @@ function maskFits(m: HitBox, dims: [number, number]): boolean {
     budget (~1200) no matter how the statements stack. */
 export const MAX_COLLIDE_PAIRS = 48;
 
+/** Max static destroy victims per block (same unroll-budget reason
+    as collide pairs, but tighter: victims cost ~3 lines each). */
+export const MAX_DESTROY_TARGETS = 12;
+
 const TRIGGERS: EventTrigger[] = ["create", "step", "destroy", "key", "collide", "click", "alarm"];
 
-function validateBlocks(blocks: Block[], label: string, sceneIds: Set<string>, soundIds: Set<string>): string[] {
+function validateBlocks(
+  blocks: Block[],
+  label: string,
+  sceneIds: Set<string>,
+  soundIds: Set<string>,
+  snippetIds: Set<string>,
+  spriteIds: Set<string>,
+  defIds: Set<string>,
+): string[] {
   const errs: string[] = [];
   (blocks ?? []).forEach((b, i) => {
     const at = `${label} block ${i}`;
@@ -582,15 +658,24 @@ function validateBlocks(blocks: Block[], label: string, sceneIds: Set<string>, s
     } else if (b.op === "goto") {
       if (!sceneIds.has(b.scene)) errs.push(`${at}: goto unknown scene '${b.scene}'`);
     } else if (b.op === "destroy") {
-      void b;
+      if (b.target !== undefined && b.target !== "self" && !validTarget(b.target, defIds))
+        errs.push(`${at}: destroy target must be self|any|solid|player|movable|def:<id>`);
     } else if (b.op === "wait") {
       if (!Number.isInteger(b.ticks) || b.ticks < 1 || b.ticks > 255)
         errs.push(`${at}: ticks must be 1–255`);
+    } else if (b.op === "sprite") {
+      if (typeof b.sprite !== "string" || !spriteIds.has(b.sprite))
+        errs.push(`${at}: sprite needs a known sprite`);
+    } else if (b.op === "show" || b.op === "hide") {
+      void b;
     } else if (b.op === "code") {
       if (typeof b.code !== "string" || b.code.trim().length === 0)
         errs.push(`${at}: code needs ETAL statements`);
       else if (b.code.length > 4096) errs.push(`${at}: code exceeds 4KB`);
       else errs.push(...validateCustomCode(b.code).map((e) => `${at}: ${e}`));
+    } else if (b.op === "run") {
+      if (typeof b.snippet !== "string" || !snippetIds.has(b.snippet))
+        errs.push(`${at}: run needs a known snippet`);
     } else if (b.op === "button") {
       if (typeof b.label !== "string" || b.label.trim().length === 0 || b.label.length > 32)
         errs.push(`${at}: label must be 1–32 characters`);
@@ -617,6 +702,8 @@ function validateEvents(
   inputIds: Set<string>,
   defIds: Set<string>,
   soundIds: Set<string>,
+  snippetIds: Set<string>,
+  spriteIds: Set<string>,
 ): string[] {
   const errs: string[] = [];
   const ids = new Set((events ?? []).map((e) => e.id));
@@ -632,7 +719,7 @@ function validateEvents(
     const sig = `${e.trigger}|${e.key ?? ""}|${e.target ?? ""}`;
     if (seen.has(sig)) errs.push(`${label}: duplicate ${e.trigger} event`);
     seen.add(sig);
-    errs.push(...validateBlocks(e.blocks ?? [], `${label} '${e.id}'`, sceneIds, soundIds));
+    errs.push(...validateBlocks(e.blocks ?? [], `${label} '${e.id}'`, sceneIds, soundIds, snippetIds, spriteIds, defIds));
   }
   return errs;
 }
@@ -830,6 +917,16 @@ export function validateProject(p: Project): string[] {
     // VALID project). Reject the hole instead of working around it.
     if (s.voices.every((v) => v.vol === 0)) errs.push(`sound '${s.id}' is silent (all voices vol 0)`);
   }
+  const snippets = p.snippets ?? [];
+  const snippetIds = new Set(snippets.map((s) => s.id));
+  if (snippetIds.size !== snippets.length) errs.push("duplicate snippet id");
+  for (const s of snippets) {
+    if (!IDENT.test(s.id)) errs.push(`bad snippet id '${s.id}'`);
+    if (typeof s.code !== "string" || s.code.trim().length === 0)
+      errs.push(`snippet '${s.id}' needs ETAL statements`);
+    else if (s.code.length > 4096) errs.push(`snippet '${s.id}' exceeds 4KB`);
+    else errs.push(...validateCustomCode(s.code).map((e) => `snippet '${s.id}': ${e}`));
+  }
   const defs = projectDefs(p);
   const defIds = new Set(defs.map((d) => d.id));
   if (defIds.size !== defs.length) errs.push("duplicate object id");
@@ -848,7 +945,7 @@ export function validateProject(p: Project): string[] {
       if (dims && !maskFits(d.mask, dims))
         errs.push(`object '${d.id}': mask must fit inside its ${dims[0]}×${dims[1]}px sprite`);
     }
-    errs.push(...validateEvents(d.events ?? [], `object '${d.id}'`, sceneIds, inputIds, defIds, soundIds));
+    errs.push(...validateEvents(d.events ?? [], `object '${d.id}'`, sceneIds, inputIds, defIds, soundIds, snippetIds, spriteIds));
   }
   if (sceneIds.size !== p.scenes.length) errs.push("duplicate scene id");
   if (!sceneIds.has(p.start)) errs.push(`start scene '${p.start}' missing`);
@@ -878,7 +975,7 @@ export function validateProject(p: Project): string[] {
       if (!isBranch && o.def && (o.events?.length ?? 0) > 0)
         errs.push(`node '${o.id}': instances carry no events — edit object '${o.def}'`);
       if (!isBranch && !o.def)
-        errs.push(...validateEvents(o.events ?? [], `node '${o.id}'`, sceneIds, inputIds, defIds, soundIds));
+        errs.push(...validateEvents(o.events ?? [], `node '${o.id}'`, sceneIds, inputIds, defIds, soundIds, snippetIds, spriteIds));
       if (!isBranch && !o.sprite && !o.def) errs.push(`node '${o.id}': leaf needs a sprite or an object`);
       if (!isBranch) {
         if (o.sprite && !spriteIds.has(o.sprite)) errs.push(`node '${o.id}': unknown sprite '${o.sprite}'`);
@@ -934,6 +1031,28 @@ export function validateProject(p: Project): string[] {
           const frames = animDims.get(o.anim);
           if (leaf && frames && (leaf[0] !== frames[0] || leaf[1] !== frames[1]))
             errs.push(`scene '${s.id}': '${o.path}' sprite must match animation '${o.anim}' size`);
+        }
+        // Same rule for sprite-swap blocks: the draw loop unrolls
+        // the declared tile size, so swapped art must share it.
+        // Destroy-with-target unrolls per victim like collide pairs.
+        for (const e of o.events) {
+          for (const b of e.blocks) {
+            if (b.op === "sprite") {
+              const leaf = spriteDims.get(o.sprite);
+              const swap = spriteDims.get(b.sprite);
+              if (leaf && swap && (leaf[0] !== swap[0] || leaf[1] !== swap[1]))
+                errs.push(`scene '${s.id}': '${o.path}' sprite block must match ${leaf[0]}×${leaf[1]} tiles`);
+            }
+            if (b.op === "destroy" && b.target !== undefined && b.target !== "self") {
+              const hits = flat.filter((t, j) => matchTarget(t, j, flat.indexOf(o), b.target as string));
+              if (hits.length === 0)
+                errs.push(`scene '${s.id}': '${o.path}' destroy '${b.target}' matches nothing`);
+              else if (hits.length > MAX_DESTROY_TARGETS)
+                errs.push(
+                  `scene '${s.id}': '${o.path}' destroy '${b.target}' hits ${hits.length} (max ${MAX_DESTROY_TARGETS}) — narrow the target`,
+                );
+            }
+          }
         }
       }
       if (pairs > MAX_COLLIDE_PAIRS)
@@ -1139,12 +1258,29 @@ export interface BlockCtx {
   /** Named sounds for play blocks (unknown id previews as a comment;
       emit never sees one — validation throws first). */
   sounds: Map<string, SoundDef>;
+  /** Named snippets for run blocks (same degrade-to-comment rule). */
+  snippets: Map<string, string>;
+  /** Tile dims per sprite id, for sprite-swap ow/oh writes. */
+  tiles?: Map<string, [number, number]>;
+  /** Static destroy victims for a non-self target: literal slot +
+      victim destroy fn when it has one. Empty = comment line. */
+  victimsOf?: (target: string) => Array<{ slot: string; fn?: string }>;
+}
+
+/** Tile dims per sprite id. */
+export function tileDimsOf(p: Project): Map<string, [number, number]> {
+  return new Map(p.sprites.map((x) => [x.id, spriteTiles(x)] as const));
 }
 
 /** Named sounds by id (unknown ids are a validation error; the
     preview degrades to a comment line instead of throwing). */
 export function soundMap(p: Project): Map<string, SoundDef> {
   return new Map((p.sounds ?? []).map((s) => [s.id, s]));
+}
+
+/** Named snippets by id (same validation/preview contract as sounds). */
+export function snippetMap(p: Project): Map<string, string> {
+  return new Map((p.snippets ?? []).map((s) => [s.id, s.code]));
 }
 
 /** One block = fixed ETAL lines. THE lowering: the UI live preview
@@ -1181,12 +1317,38 @@ export function previewBlocks(blocks: Block[], ctx: BlockCtx): string[] {
       lines.push(`setup_${b.scene}();`);
       lines.push(`scene_go(SC_${b.scene.toUpperCase()});`);
     } else if (b.op === "destroy") {
-      if (ctx.destroyFn) lines.push(`${ctx.destroyFn}(${slot});`);
-      lines.push(`oflags[${slot}] = oflags[${slot}] & 247;`);
+      if (b.target === undefined || b.target === "self") {
+        if (ctx.destroyFn) lines.push(`${ctx.destroyFn}(${slot});`);
+        lines.push(`oflags[${slot}] = oflags[${slot}] & 247;`);
+      } else {
+        const victims = ctx.victimsOf ? ctx.victimsOf(b.target) : [];
+        if (victims.length === 0) lines.push(`( destroy '${b.target}' matches nothing )`);
+        for (const v of victims) {
+          lines.push(`if oflags[${v.slot}] & 8 != 0 {`);
+          if (v.fn) lines.push(`    ${v.fn}(${v.slot});`);
+          lines.push(`    oflags[${v.slot}] = oflags[${v.slot}] & 247;`);
+          lines.push(`}`);
+        }
+      }
     } else if (b.op === "wait") {
       lines.push(`oat[${slot}] = ${b.ticks};`);
+    } else if (b.op === "sprite") {
+      const dims = (ctx.tiles ?? new Map()).get(b.sprite);
+      if (!dims) lines.push(`( unknown sprite '${b.sprite}' )`);
+      else {
+        lines.push(`ot[${slot}] = &spr_${b.sprite};`);
+        lines.push(`ow[${slot}] = ${dims[0] * 8}; oh[${slot}] = ${dims[1] * 8};`);
+      }
+    } else if (b.op === "show") {
+      lines.push(`oflags[${slot}] = oflags[${slot}] | 8;`);
+    } else if (b.op === "hide") {
+      lines.push(`oflags[${slot}] = oflags[${slot}] & 247;`);
     } else if (b.op === "code") {
       for (const line of String(b.code).split("\n")) lines.push(line);
+    } else if (b.op === "run") {
+      const snippet = ctx.snippets.get(b.snippet);
+      if (snippet === undefined) lines.push(`( unknown snippet '${b.snippet}' )`);
+      else for (const line of snippet.split("\n")) lines.push(line);
     } else if (b.op === "button") {
       lines.push(`( button '${b.label}' -> ${b.action} )`);
     } else {
@@ -1217,6 +1379,24 @@ export function destroyFnName(
 export interface PreviewOwner {
   def?: string;
   leaf?: string;
+}
+
+/** Static destroy victims for a non-self target: literal slot per
+    matched leaf plus its destroy fn when it has one. Shared by the
+    UI preview and the emitter so both agree. */
+export function destroyVictims(
+  leaves: FlatLeaf[],
+  defs: Map<string, ObjectDef>,
+  rootId: string,
+  selfIdx: number,
+  target: string,
+): Array<{ slot: string; fn?: string }> {
+  const out: Array<{ slot: string; fn?: string }> = [];
+  leaves.forEach((t, j) => {
+    if (!matchTarget(t, j, selfIdx, target)) return;
+    out.push({ slot: String(j), fn: destroyFnName(defs, t, slotTag(rootId, t.path)) });
+  });
+  return out;
 }
 
 /** Exact body lines for one event, as the emitter writes them
@@ -1255,7 +1435,9 @@ export function previewOwnerEvent(
   }
   const ev = events.find((e) => e.id === eventId);
   if (!ev) return null;
-  const lines = previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, destroyFn, sounds: soundMap(p) });
+  const selfIdx = owner.leaf !== undefined ? leaves.findIndex((l) => l.path === owner.leaf) : -1;
+  const victimsOf = (target: string) => destroyVictims(leaves, defs, sceneId, selfIdx, target);
+  const lines = previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, destroyFn, sounds: soundMap(p), snippets: snippetMap(p), tiles: tileDimsOf(p), victimsOf });
   if (ev.trigger === "collide") {
     const hits = leaves.filter((t, j) => matchTarget(t, j, -1, ev.target ?? "")).map((t) => t.path);
     return [`( collide ${ev.target} → ${hits.join(", ") || "nothing"} )`, ...lines];
@@ -1277,12 +1459,15 @@ function emitLeafEvents(
   h: number,
   defs: Map<string, ObjectDef>,
   sounds: Map<string, SoundDef>,
+  snippets: Map<string, string>,
+  tiles: Map<string, [number, number]>,
 ): string[] {
   const lines: string[] = [];
   const ind = (ss: string[]): string[] => ss.map((l) => `    ${l}`);
   leaves.forEach((o, i) => {
     const tag = slotTag(rootId, o.path);
-    const ctx: BlockCtx = { slot: "slot", w, h, destroyFn: destroyFnName(defs, o, tag), sounds };
+    const victimsOf = (target: string) => destroyVictims(leaves, defs, rootId, i, target);
+    const ctx: BlockCtx = { slot: "slot", w, h, destroyFn: destroyFnName(defs, o, tag), sounds, snippets, tiles, victimsOf };
     const fn = (name: string, stmts: string[]): void => {
       if (stmts.length === 0) return;
       lines.push(`${name} :: fn(slot: u16) {`, ...ind(stmts), `}`);
@@ -1344,7 +1529,7 @@ function emitDefEvents(p: Project): string[] {
     const ev = (d.events ?? []).find((e) => e.trigger === "destroy" && e.blocks.length > 0);
     if (!ev) continue;
     lines.push(`destroy_def_${d.id} :: fn(slot: u16) {`);
-    for (const l of previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, sounds: soundMap(p) })) lines.push(`    ${l}`);
+    for (const l of previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, sounds: soundMap(p), snippets: snippetMap(p), tiles: tileDimsOf(p) })) lines.push(`    ${l}`);
     lines.push(`}`);
   }
   return lines;
@@ -1603,7 +1788,7 @@ export function emitProject(p: Project): Record<string, string> {
     flatEvents.some(
       (e) =>
         e.blocks.length > 0 &&
-        (e.trigger === "collide" || e.blocks.some((b) => b.op === "move")),
+        (e.trigger === "collide" || e.blocks.some((b) => b.op === "move" || b.op === "sprite")),
     ) ||
     customAll.includes("ow[") ||
     customAll.includes("oh[") ||
@@ -1692,7 +1877,7 @@ export function emitProject(p: Project): Record<string, string> {
   for (const s of scenes) {
     // Store order, not sorted: hierarchy drag-reorder defines draw order.
     const leaves = flat.get(s.id) as FlatLeaf[];
-    out.push(...emitLeafEvents(s.id, leaves, p.width, p.height, defs, soundMap(p)));
+    out.push(...emitLeafEvents(s.id, leaves, p.width, p.height, defs, soundMap(p), snippetMap(p), tileDims));
     out.push(emitSetup(s.id, leaves, pxDims, needsDims, needsAlarm));
     if (leaves.length > 0) out.push(emitDrawScene(s, leaves, tileDims));
     out.push(emitFrame(s, leaves, p.width, p.height, animMap, hasFrameHook, p, pxDims));

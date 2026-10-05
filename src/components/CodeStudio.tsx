@@ -1,9 +1,19 @@
 import { useMemo, useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
-import { Check, Copy, Download } from "lucide-react";
+import { Check, Copy, Download, Plus, Trash2 } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
 import { emitProject } from "../lib/project";
-import { codeFileStore, currentIdStore, projectStore, projectsStore } from "../lib/store";
+import {
+  addSnippet,
+  codeFileStore,
+  currentIdStore,
+  deleteSnippet,
+  projectStore,
+  projectsStore,
+  renameSnippet,
+  setSnippetCode,
+  snippetSelStore,
+} from "../lib/store";
 
 /* Full-page code studio.
    Coloring lives in the WEBPAGE, not the compiler, on purpose: the
@@ -254,8 +264,10 @@ export default function CodeStudio() {
   const lang = useLang();
   const project = useStore(projectStore);
   const file = useStore(codeFileStore);
+  const snippetSel = useStore(snippetSelStore);
   const [copied, setCopied] = useState(false);
   const [query, setQuery] = useState("");
+  const [snipError, setSnipError] = useState<string | null>(null);
   const gotoRef = useRef<((line: number) => void) | null>(null);
 
   const isCode = project.kind === "code";
@@ -271,14 +283,21 @@ export default function CodeStudio() {
   }, [project]);
   const custom = project.customCode ?? "";
   const customEditable = !isCode && !project.locked;
-  const text = isCode ? (project.codeFiles?.[active] ?? files[active] ?? "") : active === "custom.ux" ? custom : (files[active] ?? "");
-  const editable = !isCode && active === "custom.ux" && customEditable;
+  const snippet = !isCode ? ((project.snippets ?? []).find((s) => s.id === snippetSel) ?? null) : null;
+  const fileText = isCode ? (project.codeFiles?.[active] ?? files[active] ?? "") : active === "custom.ux" ? custom : (files[active] ?? "");
+  const text = snippet ? snippet.code : fileText;
+  const editable = snippet ? !project.locked : !isCode && active === "custom.ux" && customEditable;
 
   function setCustom(v: string) {
     const id = currentIdStore.get();
     const all = projectsStore.get();
     const p = all[id];
     if (p && p.kind === "visual") projectsStore.set({ ...all, [id]: { ...p, customCode: v, updatedAt: Date.now() } });
+  }
+
+  function setShown(v: string) {
+    if (snippet) setSnippetCode(snippet.id, v);
+    else setCustom(v);
   }
 
   const lineCount = text === "" ? 1 : text.split("\n").length;
@@ -304,7 +323,7 @@ export default function CodeStudio() {
     const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
     const a = document.createElement("a");
     a.href = url;
-    a.download = active;
+    a.download = snippet ? `${snippet.id}.ux` : active;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -323,7 +342,10 @@ export default function CodeStudio() {
               return (
                 <li key={f}>
                   <button
-                    onClick={() => codeFileStore.set(f)}
+                    onClick={() => {
+                      codeFileStore.set(f);
+                      snippetSelStore.set(null);
+                    }}
                     className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 font-mono text-[12px] transition-colors ${
                       active === f ? "bg-white text-black" : "text-subtext0 hover:bg-surface0 hover:text-text"
                     }`}
@@ -335,6 +357,47 @@ export default function CodeStudio() {
               );
             })}
           </ul>
+          {!isCode && (
+            <div className="mt-4">
+              <div className="flex items-center justify-between">
+                <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
+                  {t(lang, "code.snippets")} ({(project.snippets ?? []).length})
+                </p>
+                {!project.locked && (
+                  <button
+                    onClick={() => addSnippet("snippet")}
+                    title={t(lang, "ev.new_snippet")}
+                    aria-label={t(lang, "ev.new_snippet")}
+                    className="grid size-6 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
+                  >
+                    <Plus size={13} />
+                  </button>
+                )}
+              </div>
+              {(project.snippets ?? []).length === 0 ? (
+                <p className="mt-2 font-mono text-[11px] leading-relaxed text-overlay0">{t(lang, "code.snippets_empty")}</p>
+              ) : (
+                <ul className="mt-2 max-h-56 space-y-0.5 overflow-y-auto">
+                  {(project.snippets ?? []).map((s) => (
+                    <li key={s.id}>
+                      <button
+                        onClick={() => snippetSelStore.set(snippetSel === s.id ? null : s.id)}
+                        className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 font-mono text-[12px] transition-colors ${
+                          snippetSel === s.id ? "bg-white text-black" : "text-subtext0 hover:bg-surface0 hover:text-text"
+                        }`}
+                      >
+                        <span className="truncate">{s.id}</span>
+                        <span className={`ml-auto shrink-0 text-[10px] ${snippetSel === s.id ? "text-black/60" : "text-overlay0"}`}>
+                          {s.code === "" ? 1 : s.code.split("\n").length} ln
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {snipError && <p className="mt-1 text-[12px] text-red">{snipError}</p>}
+            </div>
+          )}
           <p className="mb-2 mt-4 font-mono text-[11px] uppercase tracking-widest text-subtext0">{t(lang, "studio.symbols")}</p>
           {symbols.length === 0 ? (
             <p className="font-mono text-[11px] text-overlay0">—</p>
@@ -359,7 +422,30 @@ export default function CodeStudio() {
             <span className={`rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest ${editable ? "bg-teal/15 text-teal" : "bg-white/10 text-subtext1"}`}>
               {editable ? t(lang, "studio.editable") : t(lang, "studio.readonly")}
             </span>
-            <span className="font-mono text-[11px] text-subtext0">{active} · {lineCount} {t(lang, "studio.lines")}</span>
+            <span className="font-mono text-[11px] text-subtext0">
+              {snippet ? snippet.id : active} · {lineCount} {t(lang, "studio.lines")}
+            </span>
+            {snippet && !project.locked && (
+              <>
+                <button
+                  onClick={() => {
+                    const name = window.prompt(t(lang, "sound.rename"), snippet.id);
+                    if (name !== null) setSnipError(renameSnippet(snippet.id, name) ?? null);
+                  }}
+                  title={t(lang, "sound.rename")}
+                  className="rounded-md px-2 py-1 font-mono text-[11px] text-subtext0 hover:bg-surface0 hover:text-text"
+                >
+                  {t(lang, "sound.rename")}
+                </button>
+                <button
+                  onClick={() => setSnipError(deleteSnippet(snippet.id) ?? null)}
+                  title={t(lang, "sound.delete")}
+                  className="grid size-7 place-items-center rounded-md text-subtext0 hover:bg-surface0 hover:text-red"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </>
+            )}
             <span className="ml-auto flex items-center gap-1">
               <input
                 value={query}
@@ -391,7 +477,7 @@ export default function CodeStudio() {
             </div>
           )}
           <div className="min-h-0 flex-1 overflow-auto">
-            <CodeEditor value={text} onChange={setCustom} readOnly={!editable} gotoRef={gotoRef} />
+            <CodeEditor value={text} onChange={setShown} readOnly={!editable} gotoRef={gotoRef} />
           </div>
           <p className="border-t border-surface0 px-3 py-1.5 font-mono text-[10px] text-overlay0">
             {isCode ? t(lang, "code.hand_note") : active === "custom.ux" ? t(lang, "code.custom_note") : t(lang, "code.note")}

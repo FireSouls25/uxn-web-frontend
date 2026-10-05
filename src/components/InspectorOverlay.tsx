@@ -1,19 +1,23 @@
 import { useStore } from "@nanostores/react";
 import { ChevronsLeft, ChevronsRight } from "lucide-react";
 import InspectorPanel from "./InspectorPanel";
+import LogicInspector from "./LogicInspector";
 import ObjectEditor from "./ObjectEditor";
+import RunCodeSection from "./RunCodeSection";
 import { t, useLang } from "../lib/i18n";
-import { defSelStore, overlayStore, projectStore, toggleOverlay } from "../lib/store";
+import { canvasModeStore, defSelStore, overlayStore, projectStore, toggleOverlay } from "../lib/store";
 
-/* Right canvas overlay: the slim inspector. Template selection shows
-   its object editor (with used-by), otherwise the instance inspector
-   with teal-dot overrides — both without code textareas (hideCode):
-   logic lives in the logic graph, one "Open" jump away. */
+/* Right canvas overlay. Scene mode: the slim inspector (template
+   editor or instance inspector, both codeless) + the run-code
+   connections. Blocks mode: the block picker instead — target
+   object + event, grouped palette, sound attach and snippet
+   connections. One panel, two jobs, switched by canvas mode. */
 export default function InspectorOverlay() {
   const lang = useLang();
   const project = useStore(projectStore);
   const defSel = useStore(defSelStore);
   const over = useStore(overlayStore);
+  const mode = useStore(canvasModeStore);
   const editingDef = !!defSel && (project.objectDefs ?? []).some((d) => d.id === defSel);
 
   if (!over.right) {
@@ -33,7 +37,7 @@ export default function InspectorOverlay() {
     <div className="dock absolute bottom-3 right-3 top-3 z-20 flex w-72 flex-col rounded-2xl p-3">
       <div className="mb-2 flex items-center justify-between">
         <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
-          {t(lang, "insp.title")}
+          {mode === "logic" ? t(lang, "hdr.mode_logic") : t(lang, "insp.title")}
         </p>
         <button
           onClick={() => toggleOverlay("right")}
@@ -44,8 +48,15 @@ export default function InspectorOverlay() {
           <ChevronsRight size={14} />
         </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto pr-0.5">
-        {editingDef && defSel ? <ObjectEditor id={defSel} hideCode /> : <InspectorPanel hideCode />}
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-0.5">
+        {mode === "logic" ? (
+          <LogicInspector />
+        ) : (
+          <>
+            {editingDef && defSel ? <ObjectEditor id={defSel} hideCode /> : <InspectorPanel hideCode />}
+            <RunCodeSection />
+          </>
+        )}
       </div>
     </div>
   );

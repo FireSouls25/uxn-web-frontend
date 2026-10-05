@@ -126,6 +126,39 @@ describe("agent tools", () => {
     expect(runTool("validate", {})).toMatchObject({ ok: true });
   });
 
+  it("authors snippets and run blocks through tools", () => {
+    expect(runTool("create_object_def", { name: "gear", sprite: "wall" }).ok).toBe(true);
+    expect(runTool("add_event", { def: "gear", trigger: "step" }).ok).toBe(true);
+    expect(runTool("add_snippet", { name: "spin", code: "ox[slot] = ox[slot] + 1;" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "gear", event: "ev_1", op: "run", snippet: "spin" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "gear", event: "ev_1", op: "run", snippet: "nope" }).ok).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: false });
+    expect(runTool("delete_block", { def: "gear", event: "ev_1", index: 1 }).ok).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+    expect(runTool("set_snippet_code", { snippet: "spin", code: "  " }).ok).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: false });
+    expect(runTool("set_snippet_code", { snippet: "spin", code: "ox[slot] = 1;" }).ok).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+  });
+
+  it("authors sprite, visibility and targeted destroy through tools", () => {
+    expect(runTool("create_object_def", { name: "mimic", sprite: "wall" }).ok).toBe(true);
+    expect(runTool("add_event", { def: "mimic", trigger: "step" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "mimic", event: "ev_1", op: "sprite", sprite: "hero" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "mimic", event: "ev_1", op: "sprite", sprite: "nope" }).ok).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: false });
+    expect(runTool("delete_block", { def: "mimic", event: "ev_1", index: 1 }).ok).toBe(true);
+    expect(runTool("add_block", { def: "mimic", event: "ev_1", op: "hide" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "mimic", event: "ev_1", op: "show" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "mimic", event: "ev_1", op: "destroy", target: "movable" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "mimic", event: "ev_1", op: "destroy", target: "bogus" }).ok).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: false });
+    const preview = runTool("preview_event", { def: "mimic", event: "ev_1" });
+    expect(preview.ok).toBe(true);
+    expect(preview.message as string).toContain("ot[slot] = &spr_hero;");
+    expect(preview.message as string).toContain("oflags[slot] = oflags[slot] & 247;");
+  });
+
   it("sets creation code and tunes animations", () => {
     expect(runTool("creation_code", { object: "wall", code: "ox[slot] = ox[slot];" }).ok).toBe(true);
     expect(runTool("creation_code", { object: "missing", code: "x" }).ok).toBe(false);

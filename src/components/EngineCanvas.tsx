@@ -1,17 +1,24 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
+import { ChevronRight, Map as MapIcon } from "lucide-react";
 import LogicGraphLayer from "./LogicGraphLayer";
 import SceneLayer from "./SceneLayer";
 import SceneMapLayer from "./SceneMapLayer";
-import { canvasModeStore, patchViewport, viewportStore } from "../lib/store";
+import { t, useLang } from "../lib/i18n";
+import { canvasModeStore, mapLevelStore, patchViewport, sceneIdStore, viewportStore } from "../lib/store";
 
-/* Canvas-first viewport shell: owns pan/zoom + the Scene|Logic mode
-   switch content. Scene mode is the pixel layer (select, drag, drop);
-   logic mode stacks the scene-map layer over the logic-graph layer.
-   Interactive children mark themselves data-nopan so background drags
-   pan without fighting canvas drags, text fields or node clicks. */
+/* Canvas-first viewport shell: owns pan/zoom + the Scene|Blocks
+   switch content. Scene mode is the pixel layer (select, drag,
+   drop); Blocks mode is two free-form levels — the scene map
+   first, double-click a scene to drill into its objects. Nodes on
+   both levels drag anywhere and stay where left. Interactive
+   children mark themselves data-nopan so background drags pan
+   without fighting canvas drags, text fields or node clicks. */
 export default function EngineCanvas() {
+  const lang = useLang();
   const mode = useStore(canvasModeStore);
+  const level = useStore(mapLevelStore);
+  const sceneId = useStore(sceneIdStore);
   const vp = useStore(viewportStore);
   const boxRef = useRef<HTMLDivElement>(null);
 
@@ -35,8 +42,10 @@ export default function EngineCanvas() {
   }, []);
 
   function onPointerDown(e: React.PointerEvent) {
+    // Pan on middle/right drag only: left is click/select everywhere
+    // (nodes, block rows, scene paint). Right never opens a menu here.
     if ((e.target as HTMLElement).closest("[data-nopan]")) return;
-    if (e.button !== 0 && e.button !== 1) return;
+    if (e.button !== 1 && e.button !== 2) return;
     e.preventDefault();
     const start = viewportStore.get();
     const sx = e.clientX;
@@ -56,6 +65,7 @@ export default function EngineCanvas() {
     <div
       ref={boxRef}
       onPointerDown={onPointerDown}
+      onContextMenu={(e) => e.preventDefault()}
       className="absolute inset-0 cursor-grab overflow-hidden bg-black active:cursor-grabbing"
     >
       {vp.grid && (
@@ -74,13 +84,24 @@ export default function EngineCanvas() {
       >
         {mode === "scene" ? (
           <SceneLayer />
+        ) : level === "map" ? (
+          <SceneMapLayer />
         ) : (
-          <div className="mx-auto w-full max-w-4xl space-y-6">
-            <SceneMapLayer />
-            <LogicGraphLayer />
-          </div>
+          <LogicGraphLayer />
         )}
       </div>
+      {mode === "logic" && level === "objects" && (
+        <button
+          data-nopan
+          onClick={() => mapLevelStore.set("map")}
+          title={t(lang, "logic.back_map")}
+          className="dock absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full px-3 py-1.5 font-mono text-[11px] text-subtext0 transition-colors hover:text-text"
+        >
+          <MapIcon size={12} /> {t(lang, "logic.map")}
+          <ChevronRight size={12} />
+          <span className="text-text">{sceneId}</span>
+        </button>
+      )}
     </div>
   );
 }

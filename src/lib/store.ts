@@ -124,11 +124,17 @@ export const voiceSelStore = atom<number>(0);
     with selectionStore: picking one clears the other. */
 export const soundSelStore = atom<string | null>(null);
 export const codeFileStore = atom<string>("main.ux");
+/** Selected named snippet (Code page edits it). Independent from
+    codeFileStore: files and snippets share the editor shell. */
+export const snippetSelStore = atom<string | null>(null);
 export const viewStore = atom<"scene" | "sprites" | "events" | "sound" | "code">("scene");
 
 /* Canvas-first studio chrome. viewStore above now only opens the
    sprite/sound/code dialogs; the canvas itself runs on these. */
 export const canvasModeStore = atom<"scene" | "logic">("scene");
+/** Blocks-view level: the scene map first, double-click a scene to
+    drill into its objects. */
+export const mapLevelStore = atom<"map" | "objects">("map");
 export const overlayStore = atom<{ left: boolean; right: boolean }>({ left: true, right: true });
 export function toggleOverlay(side: "left" | "right"): void {
   const cur = overlayStore.get();
@@ -159,6 +165,41 @@ export function patchViewport(patch: Partial<{ x: number; y: number; k: number; 
 }
 export function resetViewport(): void {
   viewportStore.set({ ...viewportStore.get(), x: 0, y: 0, k: 1 });
+}
+
+/* Free-canvas block positions (Blocks view): scenes on the map,
+   objects inside a drilled scene. Blocks stay where left; missing
+   entries cascade. Pure chrome — validation and emit ignore it. */
+export function sceneNodePos(p: Project, sceneId: string, index: number): { x: number; y: number } {
+  return (
+    p.layout?.scenes?.[sceneId] ?? { x: 60 + (index % 4) * 240, y: 80 + Math.floor(index / 4) * 140 }
+  );
+}
+export function setSceneNodePos(sceneId: string, x: number, y: number): void {
+  updateCurrent((prev) => ({
+    ...prev,
+    layout: {
+      ...(prev.layout ?? {}),
+      scenes: { ...(prev.layout?.scenes ?? {}), [sceneId]: { x: Math.round(x), y: Math.round(y) } },
+    },
+  }));
+}
+export function objectNodePos(p: Project, sceneId: string, path: string, index: number): { x: number; y: number } {
+  return (
+    p.layout?.objects?.[sceneId]?.[path] ?? { x: 60 + (index % 3) * 440, y: 60 + Math.floor(index / 3) * 200 }
+  );
+}
+export function setObjectNodePos(sceneId: string, path: string, x: number, y: number): void {
+  updateCurrent((prev) => ({
+    ...prev,
+    layout: {
+      ...(prev.layout ?? {}),
+      objects: {
+        ...(prev.layout?.objects ?? {}),
+        [sceneId]: { ...(prev.layout?.objects?.[sceneId] ?? {}), [path]: { x: Math.round(x), y: Math.round(y) } },
+      },
+    },
+  }));
 }
 
 if (typeof localStorage !== "undefined") {
@@ -487,7 +528,7 @@ export function deleteEvent(owner: EventOwner, eventId: string): boolean {
   return writeOwnerEvents(owner, (events) => events.filter((e) => e.id !== eventId));
 }
 
-const BLOCK_OPS = ["move", "set_pos", "play", "goto", "destroy", "wait", "code", "button"];
+const BLOCK_OPS = ["move", "set_pos", "play", "goto", "destroy", "wait", "code", "run", "button", "sprite", "show", "hide"];
 
 /** Append (or insert) a block. The op and required fields are
     checked; value ranges are validation's job (same gate as export). */
@@ -508,8 +549,9 @@ export function addBlock(owner: EventOwner, eventId: string, block: Block, index
 }
 
 /** Merge fields into one block (same op shape assumed; ranges are
-    validation's job). Powers the per-op editors. */
-export function patchBlock(owner: EventOwner, eventId: string, index: number, patch: Record<string, number | string>): boolean {
+    validation's job). `undefined` values clear the field. Powers the
+    per-op editors. */
+export function patchBlock(owner: EventOwner, eventId: string, index: number, patch: Record<string, number | string | undefined>): boolean {
   const p = projectStore.get();
   const cur = readOwnerEvents(p, owner);
   const ev = cur?.find((e) => e.id === eventId);
@@ -517,7 +559,13 @@ export function patchBlock(owner: EventOwner, eventId: string, index: number, pa
   return writeOwnerEvents(owner, (events) =>
     events.map((e) =>
       e.id === eventId
-        ? { ...e, blocks: e.blocks.map((b, i) => (i === index ? ({ ...b, ...patch } as Block) : b)) }
+        ? { ...e, blocks: e.blocks.map((b, i) => {
+            if (i !== index) return b;
+            const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+            const next = { ...b } as Record<string, unknown>;
+            for (const k of Object.keys(b)) if (patch[k] === undefined) delete next[k];
+            return { ...next, ...clean } as unknown as Block;
+          }) }
         : e,
     ),
   );
@@ -1221,4 +1269,99 @@ export function deleteSound(soundId: string): string | null {
   updateCurrent((prev) => ({ ...prev, sounds: (prev.sounds ?? []).filter((s) => s.id !== soundId) }));
   if (soundSelStore.get() === soundId) soundSelStore.set(null);
   return null;
+}
+
+/* Named ETAL snippets: the Code-page library behind run blocks.
+   Same contract as sounds (unique ids, refcounted delete) — run
+   blocks are connections from object events to these. */
+
+function cleanSnippetId(name: string): string {
+  let base = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24) || "snippet";
+  if (!/^[A-Za-z]/.test(base)) base = `s_${base}`;
+  return base;
+}
+
+/** Add a snippet (validates immediately) and select it. */
+export function addSnippet(name: string, code = "ox[slot] = ox[slot];"): string {
+  const p = projectStore.get();
+  let id = cleanSnippetId(name);
+  let n = 2;
+  const snippets = p.snippets ?? [];
+  while (snippets.some((s) => s.id === id)) id = `${cleanSnippetId(name)}_${n++}`;
+  updateCurrent((prev) => ({
+    ...prev,
+    snippets: [...(prev.snippets ?? []), { id, code }],
+  }));
+  snippetSelStore.set(id);
+  return id;
+}
+
+/** Rename a snippet id everywhere run blocks reference it. */
+export function renameSnippet(oldId: string, newId: string): string | null {
+  const clean = newId.trim().slice(0, 24);
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(clean)) return "bad id";
+  const p = projectStore.get();
+  if (oldId !== clean && (p.snippets ?? []).some((s) => s.id === clean)) return "duplicate id";
+  const retarget = (blocks: Block[]): Block[] =>
+    blocks.map((b) => (b.op === "run" && b.snippet === oldId ? { ...b, snippet: clean } : b));
+  updateCurrent((prev) => ({
+    ...prev,
+    snippets: (prev.snippets ?? []).map((s) => (s.id === oldId ? { ...s, id: clean } : s)),
+    objectDefs: projectDefs(prev).map((d) => ({
+      ...d,
+      events: (d.events ?? []).map((e) => ({ ...e, blocks: retarget(e.blocks) })),
+    })),
+    scenes: prev.scenes.map((s) => ({
+      ...s,
+      nodes: s.nodes.map((o) =>
+        !o.scene && !o.def && o.events ? { ...o, events: o.events.map((e) => ({ ...e, blocks: retarget(e.blocks) })) } : o,
+      ),
+    })),
+  }));
+  if (snippetSelStore.get() === oldId) snippetSelStore.set(clean);
+  return null;
+}
+
+/** Set a snippet's code (validated at export like all ETAL). */
+export function setSnippetCode(snippetId: string, code: string): string | null {
+  const p = projectStore.get();
+  if (!(p.snippets ?? []).some((s) => s.id === snippetId)) return `unknown snippet '${snippetId}'`;
+  updateCurrent((prev) => ({
+    ...prev,
+    snippets: (prev.snippets ?? []).map((s) => (s.id === snippetId ? { ...s, code } : s)),
+  }));
+  return null;
+}
+
+/** Delete a named snippet. Refused while a run block names it. */
+export function deleteSnippet(snippetId: string): string | null {
+  const p = projectStore.get();
+  if (!(p.snippets ?? []).some((s) => s.id === snippetId)) return `unknown snippet '${snippetId}'`;
+  const used =
+    projectDefs(p).some((d) => (d.events ?? []).some((e) => e.blocks.some((b) => b.op === "run" && b.snippet === snippetId))) ||
+    p.scenes.some((s) =>
+      s.nodes.some(
+        (o) => !o.scene && (o.events ?? []).some((e) => e.blocks.some((b) => b.op === "run" && b.snippet === snippetId)),
+      ),
+    );
+  if (used) return `snippet '${snippetId}' is used by a run block`;
+  updateCurrent((prev) => ({ ...prev, snippets: (prev.snippets ?? []).filter((s) => s.id !== snippetId) }));
+  if (snippetSelStore.get() === snippetId) snippetSelStore.set(null);
+  return null;
+}
+
+/** Convert a legacy inline code block into a snippet + run block
+    (same bytes out — the splice just moves to the library). */
+export function convertBlockToSnippet(owner: EventOwner, eventId: string, index: number): string | null {
+  const p = projectStore.get();
+  const ev = readOwnerEvents(p, owner)?.find((e) => e.id === eventId);
+  const b = ev?.blocks[index];
+  if (!b || b.op !== "code") return "not a code block";
+  const id = addSnippet("snippet", b.code);
+  const ok = writeOwnerEvents(owner, (events) =>
+    events.map((e) =>
+      e.id === eventId ? { ...e, blocks: e.blocks.map((x, i) => (i === index ? { op: "run", snippet: id } : x)) } : e,
+    ),
+  );
+  return ok ? id : null;
 }

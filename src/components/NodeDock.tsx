@@ -1,17 +1,28 @@
 import { useStore } from "@nanostores/react";
-import { ChevronsLeft, ChevronsRight } from "lucide-react";
+import { ChevronsLeft, ChevronsRight, Map as MapIcon, Plus } from "lucide-react";
 import AssetBrowser from "./AssetBrowser";
 import HierarchyPanel from "./HierarchyPanel";
 import SceneNav from "./SceneNav";
 import { t, useLang } from "../lib/i18n";
-import { overlayStore, toggleOverlay } from "../lib/store";
+import {
+  addObject,
+  addScene,
+  overlayStore,
+  projectStore,
+  spriteSelStore,
+  toggleOverlay,
+} from "../lib/store";
 
 /* Left canvas overlay: the node dock. Fuses the asset library
    (templates, drag onto canvas), the hierarchy tree and the scene
-   jump list into one collapsible rail over the viewport. */
+   jump list into one collapsible rail over the viewport, with
+   quick actions for new scenes and new objects up top. */
 export default function NodeDock() {
   const lang = useLang();
   const over = useStore(overlayStore);
+  const project = useStore(projectStore);
+  const spriteSel = useStore(spriteSelStore);
+  const locked = !!project.locked;
 
   if (!over.left) {
     return (
@@ -42,6 +53,29 @@ export default function NodeDock() {
         </button>
       </div>
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-0.5">
+        {!locked && (
+          <div className="flex gap-1.5">
+            <button
+              onClick={() => addScene()}
+              title={t(lang, "hier.new_scene")}
+              className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg bg-surface0 px-2 py-1.5 font-mono text-[11px] transition-colors hover:bg-surface1 hover:text-text"
+            >
+              <MapIcon size={12} /> {t(lang, "hier.new_scene")}
+            </button>
+            <button
+              onClick={() => {
+                const art = project.sprites.some((s) => s.id === spriteSel)
+                  ? spriteSel
+                  : (project.sprites[0]?.id ?? "hero");
+                addObject("static", "", art, 8, 8);
+              }}
+              title={t(lang, "dock.new_object")}
+              className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg bg-surface0 px-2 py-1.5 font-mono text-[11px] transition-colors hover:bg-surface1 hover:text-text"
+            >
+              <Plus size={12} /> {t(lang, "dock.new_object")}
+            </button>
+          </div>
+        )}
         <AssetBrowser />
         <hr className="border-surface0" />
         <HierarchyPanel />

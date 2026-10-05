@@ -412,6 +412,142 @@ overlays), keeping every byte of project data loading untouched.
   every new string, `tsc` clean, production build ok. Suites:
   frontend 101.
 
+### Phase 7 — Connected blocks ✅ DONE
+
+*Why:* sprites painted bigger than 1 tile still rendered 8×8 in the
+scene; logic showed no object-to-object relations; raw ETAL lived
+inline in the logic view instead of as connectable Code assets.
+* Model: one new block + one library, both total in
+  `previewBlocks`: `run {snippet}` splices a named snippet from the
+  new `snippets: {id, code}[]` library (tick-text gate, duplicate/bad
+  id/unknown-ref rejected, refcounted delete like sounds). Legacy
+  `code` keeps its lowering so old projects emit byte-identical
+  bytes, but the UI no longer authors it. Menus stay what they are:
+  button labels + click/key events + goto scene chains (no second
+  language, no interpreter in ROM) — the palette just says so now.
+* Emitter: **no shape change** — one new `previewBlocks` arm plus a
+  `snippets` map threaded through the existing `BlockCtx` sites.
+* UI:
+  * `SceneLayer` paints full multi-tile sprites (tile-major walk,
+    was first-tile-only) with full-bounds selection.
+  * `LogicGraphLayer`: collide events draw dashed sky edges to the
+    object nodes they can hit (capped, count chip beyond) with a
+    chain/goto/collide legend; add-palette grouped
+    Move/Sound/Flow/Code/Note; play rows show their trigger chip +
+    audition + Sound jump; `code` rows are read-only + To-snippet;
+    tick/initCode textareas are gone — collapsed Legacy scripts with
+    one-click move-to-snippet (same bytes out).
+  * Inspector `RunCodeSection`: the selected object's run blocks
+    (event + snippet + Code jump + remove) plus attach row
+    (snippet + trigger → run block on that event).
+  * `CodeStudio` edits the snippet library (select/rename/delete,
+    highlighted editor, same gate) next to files + custom.ux.
+  * `NodeDock` quick actions: New scene + New object (gallery
+    sprite) up top; per-row deletes unchanged.
+* Agent: `add_block` takes `run {snippet}`; new `add_snippet` /
+  `set_snippet_code` tools; both rag mirrors updated
+  (`frontend corpus` + `backend/rag/tools.md`).
+* Tests/docs: snippet lowering/validation/emit + tool flow (suites:
+  frontend 103), i18n en+es, `tsc` clean, production build ok.
+
+### Phase 8 — Blocks view owns connecting ✅ DONE
+
+*Why:* creation lived inside object nodes while the inspector showed
+the same object form in both modes; scene chips in the canvas
+duplicated navigation; the view name said Logic while its job is
+picking blocks.
+* UI:
+  * The Scene|Logic toggle is now Scene|Blocks (`hdr.mode_logic`,
+    en+es; inspector jump buttons follow). Internal ids
+    (`canvasMode "logic"`, `viewStore "events"`) unchanged.
+  * `LogicInspector` (new, right panel in Blocks mode): target
+    object select (follows canvas selection) + event select + new
+    event form (trigger/key/collide pickers) + grouped add-palette
+    (Move/Sound/Flow/Code/Note, valid-by-construction defaults via
+    shared `defaultBlockFor`) + sound attach (picker + audition +
+    attach + Sound jump) + snippet connections (`RunCodeSection`)
+    + Code jump. Nodes keep display + row edit/reorder/delete +
+    legacy convert; creation moved out entirely.
+  * Scene switching has one fixed home: the nodes dock (`SceneNav`
+    + hierarchy + header tabs). `LogicGraphLayer` lost its scenes
+    chip column (goto still a dropdown per row; flow stays visible
+    in `SceneMapLayer`, which no longer click-navigates).
+* Engine vs language (audited against `lib/*.ux` + language docs):
+  visual covers triggers (7 moments), move/set_pos (clamped),
+  one-shot play, goto-replace, self-destroy, single wait/alarm,
+  snippets-as-`run`; everything else is snippet/custom territory —
+  fix16/trig/lerp/u32 math, multi-timer pools (`timer.ux` ×4),
+  hold/drag gestures, menu index (`menu_*`), song tracks
+  (`track_next`/`song_tick`), runtime spawn (`obj_spawn`),
+  scene push/pop stack, strings/fonts, file/datetime, custom
+  devices, key combos/modes. No new runtime ops this phase.
+* Tests/docs: model untouched (no migration), i18n renames en+es,
+  `tsc` clean, suites still 103, production build ok.
+
+### Phase 9 — Phase A blocks + draggable canvas ✅ DONE
+
+*Why:* walk/appear/vanish/clear-room had no visual form, and blocks
+could only be appended in place — creation lived in per-object
+lists instead of a draggable GameMaker-style palette.
+* Model (all additive, old emits byte-identical): `sprite {sprite}`
+  (runtime art swap: `ot` + `ow/oh`, same tile dims enforced like
+  anim frames), `show`/`hide` (alive bit on/off without running
+  destroy events — hidden leaves skip drive/collide/handlers like
+  destroyed ones), `destroy {target?}` (self default, else
+  `any|solid|player|movable|def:<id>` unrolled statically like
+  collide pairs: alive-guarded victim destroy-fn call + bit clear,
+  max 12 victims, empty match is a validation error).
+  Deliberately NOT included: key press/down/release modes (both VMs
+  drop key-up info — `uxn2.c:1279` only clears buttons, `uxn5`
+  `controller.js:91-105` never reports release keys — so held-keys
+  are VM-impossible; arrows stay held-capable via drive buttons and
+  the palette says so nowhere because modes don't exist) and
+  standalone `random` (a statement block with nowhere to write
+  until Phase B vars land).
+* Emitter: three new `previewBlocks` arms + `victimsOf` resolver
+  (`destroyVictims`, shared by preview and emit); `ow/oh` buffers
+  now trigger on sprite blocks too.
+* UI: palette regrouped Move/Art/Sound/Flow/Code/Note with
+  valid-by-construction defaults; palette buttons are draggable
+  copy-sources, block rows draggable move-sources (grip, form
+  controls exempt), every event stack a drop target with
+  before/after indicators (reorder, cross-event and cross-object
+  moves); click-to-add kept as fallback. Inspector sound section
+  is now a single draggable music block — sound choice lives on
+  the placed block, never in the menu.
+* Agent: `add_block` takes `sprite/show/hide/destroy{target}`,
+  both rag mirrors updated.
+* Tests/docs: lowering snapshots (incl. real-etal assembly of a
+  Phase A project when the binary is present), validation
+  rejections (bad/unknown/mismatched sprite, bad/empty/crowded
+  destroy), tool flow, i18n en+es. Suites: 107.
+
+### Phase 10 — Free canvas with drill-down ✅ DONE
+
+*Why:* creation had left the nodes but nodes were still a fixed
+stack, and scene switching lived in the canvas. Blocks should be
+dragged around like a scene graph.
+* UI:
+  * `project.layout` (new optional field: scene + per-scene object
+    block positions; ignored by validation/emit, passes migration
+    untouched): every scene/object block stays where left, with
+    cascade defaults for untouched projects.
+  * Blocks view is two levels (`mapLevelStore`, default map):
+    `SceneMapLayer` renders scenes as free HTML blocks (fixed
+    184×64, bezier goto edges, single-click selects,
+    double-click drills = sets the scene + objects level);
+    `LogicGraphLayer` renders that scene's top-level objects as
+    free 400px blocks (chain wires inside, dashed collide wires
+    between, count chips beyond caps). Viewport pan/zoom unchanged
+    (drags are zoom-aware, `data-nopan` keeps gestures apart);
+    breadcrumb pill returns to the map.
+  * Object nodes gain a `+` quick-add (first unused trigger moment)
+    and full-node drag (interactive children exempt); nested
+    branches stay dock-only. Scene switching lives in the nodes
+    dock + header tabs — canvas nodes never navigate.
+* Tests/docs: model additive (no migration), i18n
+  map/back/drill/hint en+es, suites still 107, build ok.
+
 ## 4. How the graphical version compiles to our DSL
 
 Same pipeline as today, one new lowering in the middle:
