@@ -141,6 +141,26 @@ describe("agent tools", () => {
     expect(runTool("validate", {})).toMatchObject({ ok: true });
   });
 
+  it("authors variables, set/if and nested paths through tools", () => {
+    expect(runTool("add_variable", { name: "score", init: 0 }).ok).toBe(true);
+    expect(runTool("add_variable", { name: "score" }).ok).toBe(true); // score_2
+    expect(runTool("set_variable", { variable: "score", init: 5 }).ok).toBe(true);
+    expect(runTool("set_variable", { variable: "nope", init: 1 }).ok).toBe(false);
+    expect(runTool("create_object_def", { name: "counter", sprite: "wall" }).ok).toBe(true);
+    expect(runTool("add_event", { def: "counter", trigger: "step" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "counter", event: "ev_1", op: "set", variable: "score", set_mode: "add", set_value: 1 }).ok).toBe(true);
+    expect(runTool("add_block", { def: "counter", event: "ev_1", op: "if", if_left: "var:score", if_op: "gte", if_right: "const:10" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "counter", event: "ev_1", op: "show", path: "1.then" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "counter", event: "ev_1", op: "show", path: "bogus" }).ok).toBe(false);
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+    const preview = runTool("preview_event", { def: "counter", event: "ev_1" });
+    expect(preview.ok).toBe(true);
+    expect(preview.message as string).toContain("if var_score[0] >= 10 {");
+    expect(runTool("delete_block", { def: "counter", event: "ev_1", index: 0, path: "1.then" }).ok).toBe(true);
+    expect(runTool("delete_variable", { variable: "score" }).ok).toBe(false); // still referenced
+    expect(runTool("rename_variable", { from: "score", to: "points" }).ok).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+  });
   it("authors sprite, visibility and targeted destroy through tools", () => {
     expect(runTool("create_object_def", { name: "mimic", sprite: "wall" }).ok).toBe(true);
     expect(runTool("add_event", { def: "mimic", trigger: "step" }).ok).toBe(true);

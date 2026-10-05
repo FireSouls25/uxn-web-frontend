@@ -5,13 +5,17 @@ import { t, useLang } from "../lib/i18n";
 import { emitProject } from "../lib/project";
 import {
   addSnippet,
+  addVariable,
   codeFileStore,
   currentIdStore,
   deleteSnippet,
+  deleteVariable,
   projectStore,
   projectsStore,
   renameSnippet,
+  renameVariable,
   setSnippetCode,
+  setVariableInit,
   snippetSelStore,
 } from "../lib/store";
 
@@ -396,6 +400,69 @@ export default function CodeStudio() {
                 </ul>
               )}
               {snipError && <p className="mt-1 text-[12px] text-red">{snipError}</p>}
+            </div>
+          )}
+          {!isCode && (
+            <div className="mt-4">
+              <div className="flex items-center justify-between">
+                <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
+                  {t(lang, "code.variables")} ({(project.vars ?? []).length})
+                </p>
+                {!project.locked && (
+                  <button
+                    onClick={() => addVariable("var")}
+                    title={t(lang, "code.var_add")}
+                    aria-label={t(lang, "code.var_add")}
+                    className="grid size-6 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
+                  >
+                    <Plus size={13} />
+                  </button>
+                )}
+              </div>
+              {(project.vars ?? []).length === 0 ? (
+                <p className="mt-2 font-mono text-[11px] leading-relaxed text-overlay0">{t(lang, "code.vars_empty")}</p>
+              ) : (
+                <ul className="mt-2 max-h-56 space-y-1 overflow-y-auto">
+                  {(project.vars ?? []).map((v) => (
+                    <li key={v.id} className="flex items-center gap-1.5 rounded-lg border border-surface0 px-2 py-1">
+                      <button
+                        onClick={() => {
+                          if (project.locked) return;
+                          const name = window.prompt(t(lang, "sound.rename"), v.id);
+                          if (name !== null) setSnipError(renameVariable(v.id, name) ?? null);
+                        }}
+                        title={v.id}
+                        className="min-w-0 flex-1 truncate text-left font-mono text-[12px] hover:text-teal"
+                      >
+                        {v.id}
+                      </button>
+                      <input
+                        type="number"
+                        value={v.init}
+                        min={0}
+                        max={65535}
+                        disabled={!!project.locked}
+                        onChange={(e) => {
+                          const n = Math.round(e.target.valueAsNumber);
+                          if (!Number.isNaN(n)) setSnipError(setVariableInit(v.id, n) ?? null);
+                        }}
+                        aria-label={t(lang, "code.var_init")}
+                        className="w-16 rounded-md border border-surface1 bg-base px-1.5 py-1 text-right font-mono text-[11px] outline-none focus:border-mauve"
+                      />
+                      {!project.locked && (
+                        <button
+                          onClick={() => setSnipError(deleteVariable(v.id) ?? null)}
+                          title={t(lang, "insp.remove")}
+                          aria-label={`${t(lang, "insp.remove")} ${v.id}`}
+                          className="grid size-6 shrink-0 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-red"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
           <p className="mb-2 mt-4 font-mono text-[11px] uppercase tracking-widest text-subtext0">{t(lang, "studio.symbols")}</p>

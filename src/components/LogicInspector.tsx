@@ -53,6 +53,7 @@ export default function LogicInspector() {
   const [newTrigger, setNewTrigger] = useState<EventTrigger>("step");
   const [newKey, setNewKey] = useState("");
   const [newTarget, setNewTarget] = useState("any");
+  const [newSlot, setNewSlot] = useState(0);
   const sounds = project.sounds ?? [];
 
   const locked = !!project.locked;
@@ -77,7 +78,9 @@ export default function LogicInspector() {
           ? { key: newKey || project.inputs[0]?.id }
           : newTrigger === "collide"
             ? { target: newTarget }
-            : undefined,
+            : newTrigger === "alarm"
+              ? { alarm: newSlot }
+              : undefined,
       ) ?? null
     );
   }
@@ -172,6 +175,20 @@ export default function LogicInspector() {
                 {["any", "solid", "player", "movable", ...(project.objectDefs ?? []).map((d) => `def:${d.id}`)].map((tg) => (
                   <option key={tg} value={tg}>
                     {tg}
+                  </option>
+                ))}
+              </select>
+            )}
+            {newTrigger === "alarm" && (
+              <select
+                aria-label={t(lang, "ev.alarm_slot")}
+                value={newSlot}
+                onChange={(e) => setNewSlot(Number(e.target.value))}
+                className="select select-sm"
+              >
+                {[0, 1, 2, 3].map((s) => (
+                  <option key={s} value={s}>
+                    s{s}
                   </option>
                 ))}
               </select>

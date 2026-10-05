@@ -6,21 +6,24 @@ import { atom, computed } from "nanostores";
 import {
   MAX_SPRITE_TILES,
   SAMPLE_PROJECT,
+  eachBlock,
   flattenScene,
   migrateProject,
   projectDefs,
   spritePxOf,
   spriteTiles,
-  type HitBox,
-  type Animation,
   type Block,
+  type BlockPath,
   type EventTrigger,
   type FlatLeaf,
+  type HitBox,
+  type Animation,
   type ObjectDef,
   type ObjectEvent,
   type ObjectKind,
   type Project,
   type SceneNode,
+  type ValueOperand,
 } from "./project";
 import { getSession } from "./session";
 
@@ -493,8 +496,13 @@ function writeOwnerEvents(owner: EventOwner, fn: (events: ObjectEvent[]) => Obje
 const EVENT_ID = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 /** Add an event; returns its id (ev_N). Unknown owner, bad trigger
-    or dangling key/target refs are refused. */
-export function addEvent(owner: EventOwner, trigger: EventTrigger, params?: { key?: string; target?: string }): string | null {
+    or dangling key/target refs are refused. Alarm events take an
+    optional slot 0–3 (default 0, stored only when nonzero). */
+export function addEvent(
+  owner: EventOwner,
+  trigger: EventTrigger,
+  params?: { key?: string; target?: string; alarm?: number },
+): string | null {
   const p = projectStore.get();
   const cur = readOwnerEvents(p, owner);
   if (!cur) return null;
@@ -508,14 +516,18 @@ export function addEvent(owner: EventOwner, trigger: EventTrigger, params?: { ke
       (t.startsWith("def:") && projectDefs(p).some((d) => d.id === t.slice(4)));
     if (!ok) return null;
   }
+  if (trigger === "alarm" && params?.alarm !== undefined && (!Number.isInteger(params.alarm) || params.alarm < 0 || params.alarm > 3))
+    return null;
   let id = "ev_1";
   let n = 2;
   while (cur.some((e) => e.id === id)) id = `ev_${n++}`;
+  const alarm = trigger === "alarm" ? (params?.alarm ?? 0) : undefined;
   const event: ObjectEvent = {
     id,
     trigger,
     ...(trigger === "key" ? { key: params?.key } : {}),
     ...(trigger === "collide" ? { target: params?.target } : {}),
+    ...(alarm ? { alarm } : {}),
     blocks: [],
   };
   return writeOwnerEvents(owner, (events) => [...events, event]) ? id : null;
@@ -528,22 +540,103 @@ export function deleteEvent(owner: EventOwner, eventId: string): boolean {
   return writeOwnerEvents(owner, (events) => events.filter((e) => e.id !== eventId));
 }
 
-const BLOCK_OPS = ["move", "set_pos", "play", "goto", "destroy", "wait", "code", "run", "button", "sprite", "show", "hide"];
+const BLOCK_OPS = ["move", "set_pos", "play", "goto", "destroy", "wait", "code", "run", "button", "sprite", "show", "hide", "set", "if"];
+
+/** Immutable read of a (possibly nested) list. */
+function readBlocksAt(blocks: Block[], parent: (number | "then" | "else")[]): Block[] | null {
+  let arr = blocks;
+  let i = 0;
+  while (i < parent.length) {
+    const idx = parent[i];
+    const br = parent[i + 1];
+    if (typeof idx !== "number" || (br !== "then" && br !== "else")) return null;
+    const b = arr[idx];
+    if (!b || b.op !== "if") return null;
+    arr = br === "then" ? (b.then ?? []) : (b.else ?? []);
+    i += 2;
+  }
+  return arr;
+}
+
+/** Immutable rewrite of one nested list. */
+function writeBlocksAt(
+  blocks: Block[],
+  parent: (number | "then" | "else")[],
+  fn: (arr: Block[]) => Block[],
+): Block[] | null {
+  if (parent.length === 0) return fn(blocks);
+  const [idx, br, ...rest] = parent;
+  if (typeof idx !== "number" || (br !== "then" && br !== "else")) return null;
+  let ok = true;
+  const next = blocks.map((b, i) => {
+    if (i !== idx || b.op !== "if") return b;
+    const child = br === "then" ? [...(b.then ?? [])] : [...(b.else ?? [])];
+    const patched = writeBlocksAt(child, rest, fn);
+    if (!patched) {
+      ok = false;
+      return b;
+    }
+    return br === "then" ? { ...b, then: patched } : { ...b, else: patched };
+  });
+  const target = blocks[idx];
+  if (!target || target.op !== "if" || !ok) return null;
+  return next;
+}
+
+/** Append (or insert) a block. The op and required fields are
+    checked; value ranges are validation's job (same gate as export).
+    `path` addresses a nested if branch (default top level). */
+export function addBlockAt(owner: EventOwner, eventId: string, block: Block, index: number | undefined, path: BlockPath = []): boolean {
+  if (!block || !BLOCK_OPS.includes(block.op)) return false;
+  const p = projectStore.get();
+  const cur = readOwnerEvents(p, owner);
+  const ev = cur?.find((e) => e.id === eventId);
+  if (!ev) return false;
+  if (path.length > 0 && !readBlocksAt(ev.blocks, path)) return false;
+  const at = (n: number): number => (index === undefined ? n : Math.min(Math.max(0, index), n));
+  return writeOwnerEvents(owner, (events) =>
+    events.map((e) => {
+      if (e.id !== eventId) return e;
+      const next = writeBlocksAt(e.blocks, path, (arr) => {
+        const copy = [...arr];
+        copy.splice(at(arr.length), 0, block);
+        return copy;
+      });
+      return next ? { ...e, blocks: next } : e;
+    }),
+  );
+}
 
 /** Append (or insert) a block. The op and required fields are
     checked; value ranges are validation's job (same gate as export). */
 export function addBlock(owner: EventOwner, eventId: string, block: Block, index?: number): boolean {
-  if (!block || !BLOCK_OPS.includes(block.op)) return false;
+  return addBlockAt(owner, eventId, block, index, []);
+}
+
+/** Merge fields into one block (same op shape assumed; ranges are
+    validation's job). `undefined` values clear the field. Powers the
+    per-op editors. `path` addresses a nested if branch. Values may be
+    objects (conditions), which replace wholesale. */
+export function patchBlockAt(owner: EventOwner, eventId: string, index: number, patch: Record<string, unknown>, path: BlockPath = []): boolean {
   const p = projectStore.get();
   const cur = readOwnerEvents(p, owner);
-  if (!cur || !cur.some((e) => e.id === eventId)) return false;
+  const ev = cur?.find((e) => e.id === eventId);
+  if (!ev) return false;
+  const arr = path.length === 0 ? ev.blocks : readBlocksAt(ev.blocks, path);
+  if (!arr || index < 0 || index >= arr.length) return false;
   return writeOwnerEvents(owner, (events) =>
     events.map((e) => {
       if (e.id !== eventId) return e;
-      const blocks = [...e.blocks];
-      const at = index === undefined ? blocks.length : Math.min(Math.max(0, index), blocks.length);
-      blocks.splice(at, 0, block);
-      return { ...e, blocks };
+      const next = writeBlocksAt(e.blocks, path, (list) =>
+        list.map((b, i) => {
+          if (i !== index) return b;
+          const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+          const nextB = { ...b } as Record<string, unknown>;
+          for (const k of Object.keys(b)) if (patch[k] === undefined) delete nextB[k];
+          return { ...nextB, ...clean } as unknown as Block;
+        }),
+      );
+      return next ? { ...e, blocks: next } : e;
     }),
   );
 }
@@ -551,50 +644,53 @@ export function addBlock(owner: EventOwner, eventId: string, block: Block, index
 /** Merge fields into one block (same op shape assumed; ranges are
     validation's job). `undefined` values clear the field. Powers the
     per-op editors. */
-export function patchBlock(owner: EventOwner, eventId: string, index: number, patch: Record<string, number | string | undefined>): boolean {
+export function patchBlock(owner: EventOwner, eventId: string, index: number, patch: Record<string, unknown>): boolean {
+  return patchBlockAt(owner, eventId, index, patch, []);
+}
+
+export function deleteBlockAt(owner: EventOwner, eventId: string, index: number, path: BlockPath = []): boolean {
   const p = projectStore.get();
   const cur = readOwnerEvents(p, owner);
   const ev = cur?.find((e) => e.id === eventId);
-  if (!ev || index < 0 || index >= ev.blocks.length) return false;
+  if (!ev) return false;
+  const arr = path.length === 0 ? ev.blocks : readBlocksAt(ev.blocks, path);
+  if (!arr || index < 0 || index >= arr.length) return false;
   return writeOwnerEvents(owner, (events) =>
-    events.map((e) =>
-      e.id === eventId
-        ? { ...e, blocks: e.blocks.map((b, i) => {
-            if (i !== index) return b;
-            const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
-            const next = { ...b } as Record<string, unknown>;
-            for (const k of Object.keys(b)) if (patch[k] === undefined) delete next[k];
-            return { ...next, ...clean } as unknown as Block;
-          }) }
-        : e,
-    ),
+    events.map((e) => {
+      if (e.id !== eventId) return e;
+      const next = writeBlocksAt(e.blocks, path, (list) => list.filter((_, i) => i !== index));
+      return next ? { ...e, blocks: next } : e;
+    }),
   );
 }
 
 export function deleteBlock(owner: EventOwner, eventId: string, index: number): boolean {
+  return deleteBlockAt(owner, eventId, index, []);
+}
+
+export function moveBlockAt(owner: EventOwner, eventId: string, from: number, to: number, path: BlockPath = []): boolean {
   const p = projectStore.get();
   const cur = readOwnerEvents(p, owner);
   const ev = cur?.find((e) => e.id === eventId);
-  if (!ev || index < 0 || index >= ev.blocks.length) return false;
+  if (!ev) return false;
+  const arr = path.length === 0 ? ev.blocks : readBlocksAt(ev.blocks, path);
+  if (!arr || from < 0 || from >= arr.length || to < 0 || to >= arr.length) return false;
   return writeOwnerEvents(owner, (events) =>
-    events.map((e) => (e.id === eventId ? { ...e, blocks: e.blocks.filter((_, i) => i !== index) } : e)),
+    events.map((e) => {
+      if (e.id !== eventId) return e;
+      const next = writeBlocksAt(e.blocks, path, (list) => {
+        const copy = [...list];
+        const [b] = copy.splice(from, 1);
+        copy.splice(to, 0, b);
+        return copy;
+      });
+      return next ? { ...e, blocks: next } : e;
+    }),
   );
 }
 
 export function moveBlock(owner: EventOwner, eventId: string, from: number, to: number): boolean {
-  const p = projectStore.get();
-  const cur = readOwnerEvents(p, owner);
-  const ev = cur?.find((e) => e.id === eventId);
-  if (!ev || from < 0 || from >= ev.blocks.length || to < 0 || to >= ev.blocks.length) return false;
-  return writeOwnerEvents(owner, (events) =>
-    events.map((e) => {
-      if (e.id !== eventId) return e;
-      const blocks = [...e.blocks];
-      const [b] = blocks.splice(from, 1);
-      blocks.splice(to, 0, b);
-      return { ...e, blocks };
-    }),
-  );
+  return moveBlockAt(owner, eventId, from, to, []);
 }
 
 /** Set (or clear, when mask is undefined) the hitbox on a template
@@ -1347,6 +1443,103 @@ export function deleteSnippet(snippetId: string): string | null {
   if (used) return `snippet '${snippetId}' is used by a run block`;
   updateCurrent((prev) => ({ ...prev, snippets: (prev.snippets ?? []).filter((s) => s.id !== snippetId) }));
   if (snippetSelStore.get() === snippetId) snippetSelStore.set(null);
+  return null;
+}
+
+/* Named u16 variables: the Phase B library behind set/if blocks.
+   Same contract as sounds/snippets (unique ids, refcounted delete);
+   set/if blocks and hand snippets share the `var_<id>[0]` cells. */
+
+function cleanVarId(name: string): string {
+  let base = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24) || "var";
+  if (!/^[A-Za-z]/.test(base)) base = `v_${base}`;
+  return base;
+}
+
+/** Add a variable with a boot init (validates immediately). */
+export function addVariable(name: string, init = 0): string {
+  const p = projectStore.get();
+  let id = cleanVarId(name);
+  let n = 2;
+  const vars = p.vars ?? [];
+  while (vars.some((v) => v.id === id)) id = `${cleanVarId(name)}_${n++}`;
+  const clean = Number.isInteger(init) && init >= 0 && init <= 65535 ? init : 0;
+  updateCurrent((prev) => ({
+    ...prev,
+    vars: [...(prev.vars ?? []), { id, init: clean }],
+  }));
+  return id;
+}
+
+function varUsed(p: Project, id: string): boolean {
+  const hitsEvents = (events: ObjectEvent[]): boolean =>
+    eachBlock(events).some(
+      (b) =>
+        (b.op === "set" && b.name === id) ||
+        (b.op === "if" &&
+          !!b.cond &&
+          ((b.cond.left as { name?: string }).name === id || (b.cond.right as { name?: string }).name === id)),
+    );
+  if (projectDefs(p).some((d) => hitsEvents(d.events ?? []))) return true;
+  return p.scenes.some((s) => s.nodes.some((o) => !o.scene && hitsEvents(o.events ?? [])));
+}
+
+/** Rename a variable id everywhere set/if blocks reference it. */
+export function renameVariable(oldId: string, newId: string): string | null {
+  const clean = newId.trim().slice(0, 24);
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(clean)) return "bad id";
+  const p = projectStore.get();
+  if (oldId !== clean && (p.vars ?? []).some((v) => v.id === clean)) return "duplicate id";
+  const retarget = (blocks: Block[]): Block[] =>
+    blocks.map((b) => {
+      if (b.op === "set" && b.name === oldId) return { ...b, name: clean };
+      if (b.op === "if") {
+        const fix = (o: ValueOperand): ValueOperand =>
+          o && o.kind === "var" && o.name === oldId ? { ...o, name: clean } : o;
+        return {
+          ...b,
+          ...(b.cond ? { cond: { ...b.cond, left: fix(b.cond.left), right: fix(b.cond.right) } } : {}),
+          then: retarget(b.then ?? []),
+          ...(b.else ? { else: retarget(b.else) } : {}),
+        };
+      }
+      return b;
+    });
+  updateCurrent((prev) => ({
+    ...prev,
+    vars: (prev.vars ?? []).map((v) => (v.id === oldId ? { ...v, id: clean } : v)),
+    objectDefs: projectDefs(prev).map((d) => ({
+      ...d,
+      events: (d.events ?? []).map((e) => ({ ...e, blocks: retarget(e.blocks) })),
+    })),
+    scenes: prev.scenes.map((s) => ({
+      ...s,
+      nodes: s.nodes.map((o) =>
+        !o.scene && !o.def && o.events ? { ...o, events: o.events.map((e) => ({ ...e, blocks: retarget(e.blocks) })) } : o,
+      ),
+    })),
+  }));
+  return null;
+}
+
+/** Set a variable's boot init. */
+export function setVariableInit(variableId: string, init: number): string | null {
+  const p = projectStore.get();
+  if (!(p.vars ?? []).some((v) => v.id === variableId)) return `unknown variable '${variableId}'`;
+  if (!Number.isInteger(init) || init < 0 || init > 65535) return "init must be 0–65535";
+  updateCurrent((prev) => ({
+    ...prev,
+    vars: (prev.vars ?? []).map((v) => (v.id === variableId ? { ...v, init } : v)),
+  }));
+  return null;
+}
+
+/** Delete a named variable. Refused while a set/if block names it. */
+export function deleteVariable(variableId: string): string | null {
+  const p = projectStore.get();
+  if (!(p.vars ?? []).some((v) => v.id === variableId)) return `unknown variable '${variableId}'`;
+  if (varUsed(p, variableId)) return `variable '${variableId}' is used by a set/if block`;
+  updateCurrent((prev) => ({ ...prev, vars: (prev.vars ?? []).filter((v) => v.id !== variableId) }));
   return null;
 }
 

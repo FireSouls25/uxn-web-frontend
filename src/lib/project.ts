@@ -128,6 +128,10 @@ export interface BlockHide {
 export interface BlockWait {
   op: "wait";
   ticks: number;
+  /** Alarm slot 0–3 (default 0). Slots 1–3 need an alarm event with
+      the same slot on the same owner; slot 0 keeps the legacy
+      single-timer lowering byte-identical. */
+  slot?: number;
 }
 export interface BlockCode {
   op: "code";
@@ -136,12 +140,60 @@ export interface BlockCode {
       authors it — convert to a snippet + run block instead. */
   code: string;
 }
+/** Address of a block inside an event: descent segments through if
+    branches (`[1, "then", 0]` = blocks[1].then[0]); a lone `[i]`
+    addresses top level. Empty paths are never valid. */
+export type BlockPath = (number | "then" | "else")[];
+
+/** A named u16 game variable (score, health, flags): one `var_<id>`
+    buffer slot, initialized once in `start()`. Snippets address the
+    same `var_<id>[0]` cells, so visual and hand code share state. */
+export interface GameVar {
+  id: string;
+  /** Boot value, 0–65535. */
+  init: number;
+}
+
 export interface BlockRun {
   op: "run";
   /** Named snippet id (Code page library). Spliced verbatim like the
       old code hatch, but authored once in Code and connected to any
       number of object events. */
   snippet: string;
+}
+
+export type CmpOp = "eq" | "neq" | "lt" | "lte" | "gt" | "gte";
+
+/** A value inside an `if` condition. `btn` reads the live dpad
+    (`Controller.button` bits — arrows are buttons on both VMs, so
+    held works); keyboard keys have no held state on either VM
+    (keyup carries no key info), so there is deliberately no
+    held-key operand — key events are press-edge. */
+export type ValueOperand =
+  | { kind: "var"; name: string }
+  | { kind: "const"; value: number }
+  | { kind: "pos"; axis: "x" | "y" }
+  | { kind: "btn"; dir: "up" | "down" | "left" | "right" };
+
+export interface Cond {
+  left: ValueOperand;
+  op: CmpOp;
+  right: ValueOperand;
+}
+
+export interface BlockSet {
+  op: "set";
+  /** Named variable id. */
+  name: string;
+  /** set, or += / -= a constant. */
+  mode: "set" | "add" | "sub";
+  value: number;
+}
+export interface BlockIf {
+  op: "if";
+  cond: Cond;
+  then: Block[];
+  else?: Block[];
 }
 export interface BlockButton {
   op: "button";
@@ -168,7 +220,9 @@ export type Block =
   | BlockButton
   | BlockSprite
   | BlockShow
-  | BlockHide;
+  | BlockHide
+  | BlockSet
+  | BlockIf;
 
 export interface ObjectEvent {
   /** Stable id for agent/UI targeting (ev_N). */
@@ -178,6 +232,9 @@ export interface ObjectEvent {
   key?: string;
   /** collide trigger: any|solid|player|movable|def:<id>. */
   target?: string;
+  /** alarm trigger: slot 0–3 (default 0), armed by wait blocks
+      with the same slot. Slot 0 keeps the legacy fn name. */
+  alarm?: number;
   blocks: Block[];
 }
 
@@ -407,6 +464,9 @@ export interface Project {
   /** Free-canvas block positions (Blocks view). Absent = cascade
       defaults; ignored by validation and emit. */
   layout?: CanvasLayout;
+  /** Named u16 variables (Phase B). Absent = none yet; set/if
+      blocks and snippets share the `var_<id>[0]` cells. */
+  vars?: GameVar[];
   /** Visual only: raw top-level ETAL spliced into main.ux. May define
       custom_setup() and/or custom_frame() hooks (called when present). */
   customCode?: string;
@@ -636,6 +696,16 @@ export const MAX_DESTROY_TARGETS = 12;
 
 const TRIGGERS: EventTrigger[] = ["create", "step", "destroy", "key", "collide", "click", "alarm"];
 
+/** Max `if` nesting inside one branch (each level unrolls inline —
+    deeper belongs in a snippet). */
+export const MAX_IF_DEPTH = 3;
+
+function validOperand(o: ValueOperand, varIds: Set<string>): string | null {
+  if (o.kind === "var" && !varIds.has(o.name)) return `unknown variable '${o.name}'`;
+  if (o.kind === "const" && !u16(o.value)) return `const must be 0–65535`;
+  return null;
+}
+
 function validateBlocks(
   blocks: Block[],
   label: string,
@@ -644,6 +714,8 @@ function validateBlocks(
   snippetIds: Set<string>,
   spriteIds: Set<string>,
   defIds: Set<string>,
+  varIds: Set<string>,
+  depth = 0,
 ): string[] {
   const errs: string[] = [];
   (blocks ?? []).forEach((b, i) => {
@@ -663,6 +735,30 @@ function validateBlocks(
     } else if (b.op === "wait") {
       if (!Number.isInteger(b.ticks) || b.ticks < 1 || b.ticks > 255)
         errs.push(`${at}: ticks must be 1–255`);
+      if (b.slot !== undefined && (!Number.isInteger(b.slot) || b.slot < 0 || b.slot > 3))
+        errs.push(`${at}: wait slot must be 0–3`);
+    } else if (b.op === "set") {
+      if (typeof b.name !== "string" || !varIds.has(b.name))
+        errs.push(`${at}: set needs a known variable`);
+      if (b.mode !== "set" && b.mode !== "add" && b.mode !== "sub")
+        errs.push(`${at}: set mode must be set|add|sub`);
+      if (!u16(b.value)) errs.push(`${at}: set value must be 0–65535`);
+    } else if (b.op === "if") {
+      if (depth + 1 > MAX_IF_DEPTH) errs.push(`${at}: if nests past ${MAX_IF_DEPTH} — move it to a snippet`);
+      else {
+        const c = (b as { cond?: Cond }).cond;
+        const cmp = ["eq", "neq", "lt", "lte", "gt", "gte"] as const;
+        if (!c || !c.left || !c.right || !cmp.includes((c.op ?? "") as (typeof cmp)[number]))
+          errs.push(`${at}: bad condition`);
+        else {
+          for (const side of [c.left, c.right] as ValueOperand[]) {
+            const bad = validOperand(side, varIds);
+            if (bad) errs.push(`${at}: ${bad}`);
+          }
+        }
+        errs.push(...validateBlocks(b.then ?? [], `${at} then`, sceneIds, soundIds, snippetIds, spriteIds, defIds, varIds, depth + 1));
+        if (b.else) errs.push(...validateBlocks(b.else, `${at} else`, sceneIds, soundIds, snippetIds, spriteIds, defIds, varIds, depth + 1));
+      }
     } else if (b.op === "sprite") {
       if (typeof b.sprite !== "string" || !spriteIds.has(b.sprite))
         errs.push(`${at}: sprite needs a known sprite`);
@@ -704,6 +800,7 @@ function validateEvents(
   soundIds: Set<string>,
   snippetIds: Set<string>,
   spriteIds: Set<string>,
+  varIds: Set<string>,
 ): string[] {
   const errs: string[] = [];
   const ids = new Set((events ?? []).map((e) => e.id));
@@ -716,10 +813,30 @@ function validateEvents(
       errs.push(`${label} '${e.id}': key event needs a known input`);
     if (e.trigger === "collide" && (e.target === undefined || !validTarget(e.target, defIds)))
       errs.push(`${label} '${e.id}': collide target must be any|solid|player|movable|def:<id>`);
-    const sig = `${e.trigger}|${e.key ?? ""}|${e.target ?? ""}`;
+    if (e.trigger === "alarm" && e.alarm !== undefined && (!Number.isInteger(e.alarm) || e.alarm < 0 || e.alarm > 3))
+      errs.push(`${label} '${e.id}': alarm slot must be 0–3`);
+    const sig = `${e.trigger}|${e.key ?? ""}|${e.target ?? ""}|${e.trigger === "alarm" ? (e.alarm ?? 0) : ""}`;
     if (seen.has(sig)) errs.push(`${label}: duplicate ${e.trigger} event`);
     seen.add(sig);
-    errs.push(...validateBlocks(e.blocks ?? [], `${label} '${e.id}'`, sceneIds, soundIds, snippetIds, spriteIds, defIds));
+    errs.push(...validateBlocks(e.blocks ?? [], `${label} '${e.id}'`, sceneIds, soundIds, snippetIds, spriteIds, defIds, varIds));
+    // Every waited slot needs its alarm event on the same owner.
+    const waited = new Set<number>();
+    const collectWaits = (blocks: Block[]): void => {
+      for (const b of blocks ?? []) {
+        if (b.op === "wait") waited.add(b.slot ?? 0);
+        else if (b.op === "if") {
+          collectWaits(b.then ?? []);
+          if (b.else) collectWaits(b.else);
+        }
+      }
+    };
+    collectWaits(e.blocks ?? []);
+    for (const slot of waited) {
+      const has = (events ?? []).some(
+        (x) => x.trigger === "alarm" && (x.alarm ?? 0) === slot && x.blocks.length > 0,
+      );
+      if (!has) errs.push(`${label} '${e.id}': waits on slot ${slot} with no alarm event for it`);
+    }
   }
   return errs;
 }
@@ -832,6 +949,25 @@ export function matchTarget(t: FlatLeaf, index: number, self: number, target: st
   return target.startsWith("def:") && t.def === target.slice(4);
 }
 
+/** Every block in an event list, descending into if then/else
+    branches. Buffer/device detection must see nested blocks too —
+    otherwise a nested play/move/wait assembles against missing
+    declarations on a VALID project. */
+export function eachBlock(events: ObjectEvent[]): Block[] {
+  const out: Block[] = [];
+  const walk = (blocks: Block[]): void => {
+    for (const b of blocks ?? []) {
+      out.push(b);
+      if (b.op === "if") {
+        walk(b.then ?? []);
+        if (b.else) walk(b.else);
+      }
+    }
+  };
+  for (const e of events ?? []) walk(e.blocks ?? []);
+  return out;
+}
+
 export function validateProject(p: Project): string[] {
   const errs: string[] = [];
   if (!p.name || /["\\]/.test(p.name)) errs.push("name must be non-empty without quotes/backslashes");
@@ -927,6 +1063,13 @@ export function validateProject(p: Project): string[] {
     else if (s.code.length > 4096) errs.push(`snippet '${s.id}' exceeds 4KB`);
     else errs.push(...validateCustomCode(s.code).map((e) => `snippet '${s.id}': ${e}`));
   }
+  const vars = p.vars ?? [];
+  const varIds = new Set(vars.map((v) => v.id));
+  if (varIds.size !== vars.length) errs.push("duplicate variable id");
+  for (const v of vars) {
+    if (!IDENT.test(v.id)) errs.push(`bad variable id '${v.id}'`);
+    if (!u16(v.init)) errs.push(`variable '${v.id}': init must be 0–65535`);
+  }
   const defs = projectDefs(p);
   const defIds = new Set(defs.map((d) => d.id));
   if (defIds.size !== defs.length) errs.push("duplicate object id");
@@ -945,7 +1088,7 @@ export function validateProject(p: Project): string[] {
       if (dims && !maskFits(d.mask, dims))
         errs.push(`object '${d.id}': mask must fit inside its ${dims[0]}×${dims[1]}px sprite`);
     }
-    errs.push(...validateEvents(d.events ?? [], `object '${d.id}'`, sceneIds, inputIds, defIds, soundIds, snippetIds, spriteIds));
+    errs.push(...validateEvents(d.events ?? [], `object '${d.id}'`, sceneIds, inputIds, defIds, soundIds, snippetIds, spriteIds, varIds));
   }
   if (sceneIds.size !== p.scenes.length) errs.push("duplicate scene id");
   if (!sceneIds.has(p.start)) errs.push(`start scene '${p.start}' missing`);
@@ -975,7 +1118,7 @@ export function validateProject(p: Project): string[] {
       if (!isBranch && o.def && (o.events?.length ?? 0) > 0)
         errs.push(`node '${o.id}': instances carry no events — edit object '${o.def}'`);
       if (!isBranch && !o.def)
-        errs.push(...validateEvents(o.events ?? [], `node '${o.id}'`, sceneIds, inputIds, defIds, soundIds, snippetIds, spriteIds));
+        errs.push(...validateEvents(o.events ?? [], `node '${o.id}'`, sceneIds, inputIds, defIds, soundIds, snippetIds, spriteIds, varIds));
       if (!isBranch && !o.sprite && !o.def) errs.push(`node '${o.id}': leaf needs a sprite or an object`);
       if (!isBranch) {
         if (o.sprite && !spriteIds.has(o.sprite)) errs.push(`node '${o.id}': unknown sprite '${o.sprite}'`);
@@ -1009,10 +1152,8 @@ export function validateProject(p: Project): string[] {
           if (dims && !maskFits(o.mask, dims))
             errs.push(`scene '${s.id}': '${o.path}' mask must fit inside its ${dims[0]}×${dims[1]}px sprite`);
         }
-        const hasWait = o.events.some((e) => e.blocks.some((b) => b.op === "wait"));
-        const hasAlarm = o.events.some((e) => e.trigger === "alarm" && e.blocks.length > 0);
-        if (hasWait && !hasAlarm)
-          errs.push(`scene '${s.id}': '${o.path}' waits with no alarm event to fire`);
+        // Wait/alarm slot pairing is checked per owner inside
+        // validateEvents (defs and leaves both flow through it).
         for (const e of o.events) {
           if (e.trigger !== "collide" || e.blocks.length === 0) continue;
           const hits = flat.filter((t, j) => matchTarget(t, j, flat.indexOf(o), e.target ?? ""));
@@ -1157,13 +1298,11 @@ function usedVoices(p: Project): number[] {
   const snds = soundMap(p);
   for (const s of p.scenes) {
     for (const o of flattenScene(p, s.id)) {
-      for (const e of o.events) {
-        for (const b of e.blocks) {
-          if (b.op !== "play") continue;
-          snds.get(b.sound)?.voices.forEach((v, i) => {
-            if (i < 4 && v.vol > 0) out.add(i);
-          });
-        }
+      for (const b of eachBlock(o.events)) {
+        if (b.op !== "play") continue;
+        snds.get(b.sound)?.voices.forEach((v, i) => {
+          if (i < 4 && v.vol > 0) out.add(i);
+        });
       }
     }
   }
@@ -1201,8 +1340,12 @@ function emitSetup(
       const [pw, ph] = dims.get(o.sprite) ?? [TILE_PX, TILE_PX];
       line += ` ow[${i}] = ${pw}; oh[${i}] = ${ph};`;
     }
-    if (withAlarm && o.events.some((e) => e.trigger === "alarm" && e.blocks.length > 0))
+    if (withAlarm && o.events.some((e) => e.trigger === "alarm" && (e.alarm ?? 0) === 0 && e.blocks.length > 0))
       line += ` oat[${i}] = 0;`;
+    for (const sl of [1, 2, 3]) {
+      if (o.events.some((e) => e.trigger === "alarm" && e.alarm === sl && e.blocks.length > 0))
+        line += ` oat${sl}[${i}] = 0;`;
+    }
     lines.push(line);
   }
   for (let i = 0; i < leaves.length; i++) {
@@ -1283,6 +1426,17 @@ export function snippetMap(p: Project): Map<string, string> {
   return new Map((p.snippets ?? []).map((s) => [s.id, s.code]));
 }
 
+/** Dpad bit per direction (same masks the keyboard driver reads). */
+const BTN_MASK = { up: 16, down: 32, left: 64, right: 128 } as const;
+const CMP_OP: Record<CmpOp, string> = { eq: "==", neq: "!=", lt: "<", lte: "<=", gt: ">", gte: ">=" };
+
+function lowerOperand(o: ValueOperand, slot: string): string {
+  if (o.kind === "var") return `var_${o.name}[0]`;
+  if (o.kind === "const") return String(o.value);
+  if (o.kind === "pos") return o.axis === "x" ? `ox[${slot}]` : `oy[${slot}]`;
+  return `(Controller.button & ${BTN_MASK[o.dir]})`;
+}
+
 /** One block = fixed ETAL lines. THE lowering: the UI live preview
     and the emitter both call this, so what you see is what assembles.
     Move clamps read ow/oh (emitted whenever blocks need them); every
@@ -1331,7 +1485,27 @@ export function previewBlocks(blocks: Block[], ctx: BlockCtx): string[] {
         }
       }
     } else if (b.op === "wait") {
-      lines.push(`oat[${slot}] = ${b.ticks};`);
+      const ws = b.slot ?? 0;
+      if (ws === 0) lines.push(`oat[${slot}] = ${b.ticks};`);
+      else lines.push(`oat${ws}[${slot}] = ${b.ticks};`);
+    } else if (b.op === "set") {
+      const cell = `var_${b.name}[0]`;
+      if (b.mode === "add") lines.push(`${cell} = ${cell} + ${b.value};`);
+      else if (b.mode === "sub") lines.push(`${cell} = ${cell} - ${b.value};`);
+      else lines.push(`${cell} = ${b.value};`);
+    } else if (b.op === "if") {
+      const c = (b as { cond?: Cond }).cond;
+      if (!c || !c.left || !c.right) lines.push(`( if: bad condition )`);
+      else {
+        const ind = (ss: string[]): string[] => ss.map((l) => `    ${l}`);
+        lines.push(`if ${lowerOperand(c.left, slot)} ${CMP_OP[c.op] ?? "=="} ${lowerOperand(c.right, slot)} {`);
+        lines.push(...ind(previewBlocks(b.then ?? [], ctx)));
+        if (b.else && b.else.length > 0) {
+          lines.push(`} else {`);
+          lines.push(...ind(previewBlocks(b.else, ctx)));
+        }
+        lines.push(`}`);
+      }
     } else if (b.op === "sprite") {
       const dims = (ctx.tiles ?? new Map()).get(b.sprite);
       if (!dims) lines.push(`( unknown sprite '${b.sprite}' )`);
@@ -1483,8 +1657,10 @@ function emitLeafEvents(
     for (const e of o.events) {
       if (e.blocks.length === 0 || e.trigger === "create") continue;
       if (e.trigger === "destroy" && !o.def) fn(`destroy_${tag}`, previewBlocks(e.blocks, ctx));
-      else if (e.trigger === "alarm") fn(`alarm_${tag}`, previewBlocks(e.blocks, ctx));
-      else if (e.trigger === "key" && e.key) fn(`key_${tag}_${e.key}`, previewBlocks(e.blocks, ctx));
+      else if (e.trigger === "alarm") {
+        const slot = e.alarm ?? 0;
+        fn(slot === 0 ? `alarm_${tag}` : `alarm_${tag}_${slot}`, previewBlocks(e.blocks, ctx));
+      } else if (e.trigger === "key" && e.key) fn(`key_${tag}_${e.key}`, previewBlocks(e.blocks, ctx));
       else if (e.trigger === "click") fn(`click_${tag}`, previewBlocks(e.blocks, ctx));
     }
     let ci = 0;
@@ -1710,7 +1886,7 @@ function emitFrame(
     }
   });
   leaves.forEach((o, i) => {
-    if (!o.events.some((e) => e.trigger === "alarm" && e.blocks.length > 0)) return;
+    if (!o.events.some((e) => e.trigger === "alarm" && (e.alarm ?? 0) === 0 && e.blocks.length > 0)) return;
     lines.push(`    if oat[${i}] > 0 {`);
     lines.push(`        oat[${i}] = oat[${i}] - 1;`);
     lines.push(`        if oat[${i}] == 0 {`);
@@ -1718,6 +1894,17 @@ function emitFrame(
     lines.push(`        }`);
     lines.push(`    }`);
   });
+  for (const sl of [1, 2, 3]) {
+    leaves.forEach((o, i) => {
+      if (!o.events.some((e) => e.trigger === "alarm" && e.alarm === sl && e.blocks.length > 0)) return;
+      lines.push(`    if oat${sl}[${i}] > 0 {`);
+      lines.push(`        oat${sl}[${i}] = oat${sl}[${i}] - 1;`);
+      lines.push(`        if oat${sl}[${i}] == 0 {`);
+      lines.push(`            alarm_${slotTag(s.id, o.path)}_${sl}(${i});`);
+      lines.push(`        }`);
+      lines.push(`    }`);
+    });
+  }
   if (frameHook) lines.push(`    custom_frame();`);
   if (s.frameCode) {
     lines.push(`    ( --- scene script: ${s.id} --- )`);
@@ -1788,15 +1975,22 @@ export function emitProject(p: Project): Record<string, string> {
     flatEvents.some(
       (e) =>
         e.blocks.length > 0 &&
-        (e.trigger === "collide" || e.blocks.some((b) => b.op === "move" || b.op === "sprite")),
+        (e.trigger === "collide" || eachBlock([e]).some((b) => b.op === "move" || b.op === "sprite")),
     ) ||
     customAll.includes("ow[") ||
     customAll.includes("oh[") ||
     customAll.includes("overlapwh");
-  const needsAlarm =
+  const alarmUse = (slot: number): boolean =>
     flatEvents.some(
-      (e) => e.blocks.length > 0 && (e.trigger === "alarm" || e.blocks.some((b) => b.op === "wait")),
-    ) || customAll.includes("oat[");
+      (e) =>
+        e.blocks.length > 0 &&
+        ((e.trigger === "alarm" && (e.alarm ?? 0) === slot) ||
+          eachBlock([e]).some((b) => b.op === "wait" && (b.slot ?? 0) === slot)),
+    );
+  const needsAlarm = alarmUse(0) || customAll.includes("oat[");
+  const needsAlarmX = [1, 2, 3].map(
+    (s) => alarmUse(s) || customAll.includes(`oat${s}[`),
+  );
   out.push(`buffer ox[${MAX_OBJECTS}]: u16;`);
   out.push(`buffer oy[${MAX_OBJECTS}]: u16;`);
   out.push(`buffer ot[${MAX_OBJECTS}]: u16;`);
@@ -1806,6 +2000,11 @@ export function emitProject(p: Project): Record<string, string> {
     out.push(`buffer oh[${MAX_OBJECTS}]: u16;`);
   }
   if (needsAlarm) out.push(`buffer oat[${MAX_OBJECTS}]: u8;`);
+  needsAlarmX.forEach((need, i) => {
+    if (need) out.push(`buffer oat${i + 1}[${MAX_OBJECTS}]: u8;`);
+  });
+  const vars = [...(p.vars ?? [])].sort((a, b) => (a.id < b.id ? -1 : 1));
+  for (const v of vars) out.push(`buffer var_${v.id}[1]: u16;`);
   out.push(`ocount: u8 = 0;`);
   out.push(`scene: u8 = 0;`);
   const needsKey = scenes.some((x) => x.keys.length > 0);
@@ -1911,6 +2110,7 @@ export function emitProject(p: Project): Record<string, string> {
   out.push(`    Screen.x = 0;`);
   out.push(`    Screen.y = 0;`);
   out.push(`    Screen.pixel = 128;`);
+  for (const v of vars) out.push(`    var_${v.id}[0] = ${v.init};`);
   for (const v of usedVoices(p)) {
     const voice = (p.sound?.voices ?? [])[v];
     out.push(`    Audio${v}.addr = &sq32;`);

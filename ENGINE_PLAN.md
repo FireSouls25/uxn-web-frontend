@@ -548,6 +548,37 @@ dragged around like a scene graph.
 * Tests/docs: model additive (no migration), i18n
   map/back/drill/hint en+es, suites still 107, build ok.
 
+### Phase 11 — Variables, conditions, multi-alarm ✅ DONE
+
+*Why:* scores, health, counters, combos and menus had no visual
+form; timers were single-slot; keyboard-held was implied but
+VM-impossible.
+* Model (all additive, old emits byte-identical): `vars: {id,
+  init}[]` (one `var_<id>[1]` buffer each, boot init in `start()`,
+  shared with hand snippets); `set {name, mode set|add|sub,
+  value}` (constants); `if {cond, then, else?}` (operands
+  var/const/pos-x-y/btn-up-down-left-right over live dpad bits —
+  deliberately NO held-key operand: both VMs drop key-up info, so
+  key events stay press-edge and this is documented, not faked);
+  `wait`/`alarm` gain slot 0–3 (slot 0 keeps legacy `oat`/fn
+  names; slots 1–3 get `oat1..3` buffers only when used).
+* Emitter: fixed `previewBlocks` arms (recursive, indented);
+  per-slot alarm fns + dispatch + setup; buffer/device detection
+  (`eachBlock`) now descends into branches so nested play/move/
+  wait can't assemble against missing declarations. Depth cap 3.
+* UI: set/if editors + recursive branch stacks (same editors,
+  drag-move, compact add rows, chain wires fork from the if row);
+  grouped Data palette; alarm slot pickers on wait rows and the
+  new-event form; variables library in CodeStudio (new/rename/
+  init/delete, refcounted); event summaries show alarm slots.
+* Agent: `add/rename/set/delete_variable`, `add_block`
+  set/if (+ nested `path`), `delete_block` path, `add_event`
+  alarm slot, `wait_slot`; both rag mirrors updated.
+* Tests/docs: lowering snapshots (all operand kinds, nesting),
+  validation (dup/bad var, bad cond/operands, depth cap, slot
+  pairing/ranges), multi-alarm emit + real-etal assembly,
+  agent flows. Suites: 111.
+
 ## 4. How the graphical version compiles to our DSL
 
 Same pipeline as today, one new lowering in the middle:

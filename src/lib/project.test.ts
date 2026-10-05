@@ -9,6 +9,7 @@ import {
   flattenScene,
   migrateProject,
   validateProject,
+  type Block,
   type Project,
 } from "./project";
 
@@ -1006,6 +1007,118 @@ describe("execute + button blocks", () => {
       return;
     }
     const dir = mkdtempSync(join(tmpdir(), "uxn-phasea-"));
+    for (const [name, content] of Object.entries(emitProject(p))) {
+      writeFileSync(join(dir, name), content);
+    }
+    execFileSync(etal, ["-r", join(dir, "main.ux"), "-o", join(dir, "main.rom")], { stdio: "pipe" });
+    expect(existsSync(join(dir, "main.rom"))).toBe(true);
+  });
+
+  it("lowers set/if blocks with every operand kind", async () => {
+    const { previewBlocks, tileDimsOf, soundMap, snippetMap } = await import("./project");
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.vars = [{ id: "score", init: 0 }];
+    const ctx = { slot: "slot", w: 128, h: 128, sounds: soundMap(p), snippets: snippetMap(p), tiles: tileDimsOf(p) };
+    expect(previewBlocks([{ op: "set", name: "score", mode: "set", value: 5 }], ctx)).toEqual(["var_score[0] = 5;"]);
+    expect(previewBlocks([{ op: "set", name: "score", mode: "add", value: 2 }], ctx)).toEqual(["var_score[0] = var_score[0] + 2;"]);
+    expect(previewBlocks([{ op: "set", name: "score", mode: "sub", value: 1 }], ctx)).toEqual(["var_score[0] = var_score[0] - 1;"]);
+    expect(
+      previewBlocks(
+        [{ op: "if", cond: { left: { kind: "var", name: "score" }, op: "gte", right: { kind: "const", value: 10 } }, then: [{ op: "destroy" }], else: [{ op: "show" }] }],
+        ctx,
+      ),
+    ).toEqual([
+      "if var_score[0] >= 10 {",
+      "    oflags[slot] = oflags[slot] & 247;",
+      "} else {",
+      "    oflags[slot] = oflags[slot] | 8;",
+      "}",
+    ]);
+    expect(
+      previewBlocks(
+        [{ op: "if", cond: { left: { kind: "btn", dir: "left" }, op: "neq", right: { kind: "const", value: 0 } }, then: [{ op: "move", dx: -2, dy: 0 }] }],
+        ctx,
+      ),
+    ).toEqual([
+      "if (Controller.button & 64) != 0 {",
+      "    if ox[slot] >= 2 { ox[slot] = ox[slot] - 2; }",
+      "}",
+    ]);
+    expect(
+      previewBlocks(
+        [{ op: "if", cond: { left: { kind: "pos", axis: "y" }, op: "lt", right: { kind: "var", name: "score" } }, then: [] }],
+        ctx,
+      ),
+    ).toEqual(["if oy[slot] < var_score[0] {", "}"]);
+  });
+
+  it("validates variables, conditions and slot pairing", () => {
+    const dup = structuredClone(SAMPLE_PROJECT);
+    dup.vars = [{ id: "score", init: 0 }, { id: "score", init: 1 }];
+    expect(validateProject(dup).some((e) => e.includes("duplicate variable"))).toBe(true);
+    const badId = structuredClone(SAMPLE_PROJECT);
+    badId.vars = [{ id: "9lives", init: 3 }];
+    expect(validateProject(badId).some((e) => e.includes("bad variable id"))).toBe(true);
+    const badInit = structuredClone(SAMPLE_PROJECT);
+    badInit.vars = [{ id: "score", init: 70000 }];
+    expect(validateProject(badInit).some((e) => e.includes("init must be"))).toBe(true);
+    const badRef = structuredClone(SAMPLE_PROJECT);
+    badRef.vars = [{ id: "score", init: 0 }];
+    badRef.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_9", trigger: "step", blocks: [{ op: "set", name: "nope", mode: "set", value: 1 }] },
+    ];
+    expect(validateProject(badRef).some((e) => e.includes("known variable"))).toBe(true);
+    const badCond = structuredClone(SAMPLE_PROJECT);
+    badCond.vars = [{ id: "score", init: 0 }];
+    badCond.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_9", trigger: "step", blocks: [{ op: "if", cond: { left: { kind: "var", name: "ghost" }, op: "eq", right: { kind: "const", value: 0 } }, then: [] }] },
+    ];
+    expect(validateProject(badCond).some((e) => e.includes("unknown variable"))).toBe(true);
+    const deep = structuredClone(SAMPLE_PROJECT);
+    deep.vars = [{ id: "score", init: 0 }];
+    const mkIf = (then: Block[]): Block => ({
+      op: "if",
+      cond: { left: { kind: "const", value: 1 }, op: "eq", right: { kind: "const", value: 1 } },
+      then,
+    });
+    const nest = (d: number): Block => (d === 0 ? mkIf([]) : mkIf([nest(d - 1)]));
+    deep.scenes[0].nodes.find((o) => o.id === "hero")!.events = [{ id: "ev_9", trigger: "step", blocks: [nest(3)] }];
+    expect(validateProject(deep).some((e) => e.includes("nests past"))).toBe(true);
+    const unpaired = structuredClone(SAMPLE_PROJECT);
+    unpaired.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_9", trigger: "step", blocks: [{ op: "wait", ticks: 10, slot: 2 }] },
+    ];
+    expect(validateProject(unpaired).some((e) => e.includes("slot 2"))).toBe(true);
+    const badSlot = structuredClone(SAMPLE_PROJECT);
+    badSlot.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_9", trigger: "alarm", alarm: 5, blocks: [{ op: "show" }] },
+    ];
+    expect(validateProject(badSlot).some((e) => e.includes("alarm slot"))).toBe(true);
+  });
+
+  it("emits multi-alarm buffers, slot fns and var init", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.vars = [{ id: "score", init: 7 }];
+    p.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_9", trigger: "step", blocks: [{ op: "set", name: "score", mode: "add", value: 1 }, { op: "wait", ticks: 5, slot: 2 }] },
+      { id: "ev_8", trigger: "alarm", alarm: 2, blocks: [{ op: "show" }] },
+    ];
+    expect(validateProject(p)).toEqual([]);
+    const main = emitProject(p)["main.ux"];
+    expect(main).toContain("buffer var_score[1]: u16;");
+    expect(main).toContain("var_score[0] = 7;");
+    expect(main).toContain("buffer oat2[128]: u8;");
+    expect(main).not.toContain("buffer oat1[128]");
+    expect(main).toContain("oat2[slot] = 5;");
+    expect(main).toContain("alarm_title_hero_2 :: fn(slot: u16) {");
+    expect(main).toContain("var_score[0] = var_score[0] + 1;");
+    const etal =
+      process.env.ETAL_BIN ?? "/home/grim/Documents/projects/uxn-dsl/build/linux-x86/etal";
+    if (!existsSync(etal)) {
+      console.warn("skip: no etal binary");
+      return;
+    }
+    const dir = mkdtempSync(join(tmpdir(), "uxn-phaseb-"));
     for (const [name, content] of Object.entries(emitProject(p))) {
       writeFileSync(join(dir, name), content);
     }

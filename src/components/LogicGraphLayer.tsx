@@ -7,27 +7,37 @@ import { testTone } from "./SoundMixer";
 import { t, useLang, type Lang } from "../lib/i18n";
 import {
   flattenScene,
+  MAX_IF_DEPTH,
   previewOwnerEvent,
   type Block,
+  type BlockPath,
+  type CmpOp,
+  type Cond,
   type EventTrigger,
   type FlatLeaf,
   type ObjectEvent,
   type Project,
+  type ValueOperand,
 } from "../lib/project";
 import {
   addBlock,
+  addBlockAt,
   addEvent,
   addSnippet,
   addSound,
+  addVariable,
   codeFileStore,
   convertBlockToSnippet,
   currentScene,
   deleteBlock,
+  deleteBlockAt,
   deleteObject,
   mapLevelStore,
   moveBlock,
+  moveBlockAt,
   objectNodePos,
   patchBlock,
+  patchBlockAt,
   patchDef,
   patchObject,
   projectStore,
@@ -41,7 +51,7 @@ import {
   type EventOwner,
 } from "../lib/store";
 
-const OPS = ["move", "set_pos", "sprite", "show", "hide", "play", "goto", "destroy", "wait", "run", "button"] as const;
+const OPS = ["move", "set_pos", "sprite", "show", "hide", "play", "goto", "destroy", "wait", "run", "button", "set", "if"] as const;
 /** Add-palette grouped by what the block does. `code` (legacy
     inline ETAL) is deliberately absent — convert it to a snippet +
     run block instead. Menus are button labels + click/key events +
@@ -51,9 +61,16 @@ export const PALETTE: Array<{ group: string; ops: Array<(typeof OPS)[number]> }>
   { group: "ev.cat_art", ops: ["sprite", "show", "hide"] },
   { group: "ev.cat_sound", ops: ["play"] },
   { group: "ev.cat_flow", ops: ["goto", "wait", "destroy"] },
+  { group: "ev.cat_data", ops: ["set", "if"] },
   { group: "ev.cat_code", ops: ["run"] },
   { group: "ev.cat_note", ops: ["button"] },
 ];
+
+const DEFAULT_COND: Cond = {
+  left: { kind: "btn", dir: "up" },
+  op: "neq",
+  right: { kind: "const", value: 0 },
+};
 
 /** Valid-by-construction defaults for a fresh block: move nudges a
     tile, set_pos keeps the leaf's place, sprite keeps current art,
@@ -77,6 +94,8 @@ export function defaultBlockFor(
   if (op === "sprite") return { op, sprite: spriteId ?? p.sprites[0]?.id ?? "hero" };
   if (op === "show") return { op };
   if (op === "hide") return { op };
+  if (op === "set") return { op, name: p.vars?.[0]?.id ?? addVariable("score"), mode: "set", value: 0 };
+  if (op === "if") return { op, cond: { ...DEFAULT_COND, left: { ...DEFAULT_COND.left }, right: { ...DEFAULT_COND.right } }, then: [], else: [] };
   if (op === "button") return { op, label: "button", action: "" };
   return { op: "destroy" };
 }
@@ -88,6 +107,7 @@ function triggerLabel(lang: Lang, t_: EventTrigger): string {
 export function eventSummary(lang: Lang, e: ObjectEvent): string {
   if (e.trigger === "key") return `${triggerLabel(lang, "key")} ${e.key ?? ""}`;
   if (e.trigger === "collide") return `${triggerLabel(lang, "collide")} ${e.target ?? ""}`;
+  if (e.trigger === "alarm") return `${triggerLabel(lang, "alarm")} s${e.alarm ?? 0}`;
   return triggerLabel(lang, e.trigger);
 }
 
@@ -137,30 +157,40 @@ function collidePaths(leaves: FlatLeaf[], self: string, target: string): string[
 }
 
 /* One block row: op-specific compact editors + reorder + delete.
-   `run` connects a Code-page snippet (the replacement for inline
-   ETAL); legacy `code` renders read-only with a convert button.
-   `play` shows its trigger context (the event IS the condition —
-   a play in a key event fires on that key) plus audition + jump.
-   `button` is a labeled annotation (comment-only; menus are button
-   labels + click/key events + goto scene chains). */
+   Addressed by full path (`addr`), so rows nest inside if then/else
+   branches with the same editors. `run` connects a Code-page
+   snippet; legacy `code` renders read-only with a convert button.
+   `play` shows its trigger context plus audition + jump. `set`
+   writes a named variable; `if` branches on var/const/pos/dpad. */
 function BlockRow({
   owner,
   eventId,
-  index,
+  addr,
   block,
-  path,
+  leafPath,
   eventLabel,
+  at,
+  onOver,
+  onCommit,
+  drop,
 }: {
   owner: EventOwner;
   eventId: string;
-  index: number;
+  addr: BlockPath;
   block: Block;
-  path: string;
+  leafPath: string;
   eventLabel: string;
+  at: { x: number; y: number };
+  onOver: (e: React.DragEvent, listAddr: BlockPath) => void;
+  onCommit: (e: React.DragEvent, listAddr: BlockPath) => void;
+  drop: { eventId: string; list: BlockPath; index: number | null } | null;
 }) {
   const lang = useLang();
   const project = useStore(projectStore);
   const locked = !!project.locked;
+  const index = addr[addr.length - 1] as number;
+  const parent = addr.slice(0, -1) as BlockPath;
+  const anchor = `bin:${leafPath}:${eventId}:${addr.join(".")}`;
   const num = (v: number, fn: (n: number) => void, min?: number, max?: number, w = "w-14") => (
     <input
       type="number"
@@ -175,7 +205,7 @@ function BlockRow({
       className={`${w} rounded-md border border-surface1 bg-base px-1.5 py-1 font-mono text-[11px] outline-none focus:border-mauve`}
     />
   );
-  const set = (patch: Record<string, number | string | undefined>) => patchBlock(owner, eventId, index, patch);
+  const set = (patch: Record<string, unknown>) => patchBlockAt(owner, eventId, index, patch, parent);
   const fields =
     block.op === "move" ? (
       <>
@@ -273,7 +303,23 @@ function BlockRow({
         ))}
       </select>
     ) : block.op === "wait" ? (
-      <>{num(block.ticks, (ticks) => set({ ticks }), 1, 255)}</>
+      <span className="flex min-w-0 flex-1 items-center gap-1.5">
+        {num(block.ticks, (ticks) => set({ ticks }), 1, 255)}
+        <select
+          value={block.slot ?? 0}
+          disabled={locked}
+          onChange={(e) => set({ slot: Number(e.target.value) === 0 ? undefined : Number(e.target.value) })}
+          title={t(lang, "ev.alarm_slot")}
+          aria-label={t(lang, "ev.alarm_slot")}
+          className="select select-sm"
+        >
+          {[0, 1, 2, 3].map((s) => (
+            <option key={s} value={s}>
+              s{s}
+            </option>
+          ))}
+        </select>
+      </span>
     ) : block.op === "code" ? (
       <span className="flex min-w-0 flex-1 items-center gap-1.5">
         <pre className="max-h-16 min-w-0 flex-1 overflow-auto rounded-md border border-surface0 bg-crust p-1.5 font-mono text-[10px] leading-relaxed text-subtext0">
@@ -332,6 +378,36 @@ function BlockRow({
           </>
         )}
       </span>
+    ) : block.op === "set" ? (
+      <span className="flex min-w-0 flex-1 items-center gap-1.5">
+        <select
+          value={(project.vars ?? []).some((v) => v.id === block.name) ? block.name : ""}
+          disabled={locked}
+          onChange={(e) => set({ name: e.target.value })}
+          className="select min-w-0 flex-1"
+        >
+          {(project.vars ?? []).length === 0 && <option value="">{t(lang, "ev.no_vars")}</option>}
+          {(project.vars ?? []).map((v) => (
+            <option key={v.id} value={v.id}>
+              {v.id}
+            </option>
+          ))}
+        </select>
+        <select
+          value={block.mode}
+          disabled={locked}
+          onChange={(e) => set({ mode: e.target.value })}
+          aria-label={t(lang, "ev.set_mode")}
+          className="select select-sm"
+        >
+          <option value="set">=</option>
+          <option value="add">+=</option>
+          <option value="sub">-=</option>
+        </select>
+        {num(block.value, (value) => set({ value }), 0, 65535, "w-16")}
+      </span>
+    ) : block.op === "if" ? (
+      <IfEditor owner={owner} eventId={eventId} addr={addr} block={block} />
     ) : block.op === "button" ? (
       <span className="flex min-w-0 flex-1 items-center gap-1.5">
         <input
@@ -357,8 +433,9 @@ function BlockRow({
       <span className="font-mono text-[11px] text-subtext0">{t(lang, block.op === "show" ? "ev.show_self" : block.op === "hide" ? "ev.hide_self" : "ev.destroy_self")}</span>
     );
   return (
+    <>
     <div
-      data-bidx={index}
+      data-bpath={addr.join(".")}
       draggable={!locked}
       onDragStart={(e) => {
         if ((e.target as HTMLElement).closest("input,select,textarea,button")) {
@@ -366,12 +443,12 @@ function BlockRow({
           return;
         }
         e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("application/x-block-move", JSON.stringify({ owner, eventId, index, block }));
+        e.dataTransfer.setData("application/x-block-move", JSON.stringify({ owner, eventId, path: addr, block }));
       }}
       className="relative flex items-center gap-1.5 rounded-lg border border-surface0 bg-crust/70 px-2 py-1.5"
     >
       <span
-        data-anchor={`bin:${path}:${eventId}:${index}`}
+        data-anchor={anchor}
         className="grid size-3 shrink-0 place-items-center rounded-full bg-teal/60"
       />
       <span title={t(lang, "logic.drag_block")} className="shrink-0 cursor-grab font-mono text-[10px] text-overlay0 active:cursor-grabbing">
@@ -382,7 +459,7 @@ function BlockRow({
       {!locked && (
         <span className="flex shrink-0 items-center">
           <button
-            onClick={() => moveBlock(owner, eventId, index, index - 1)}
+            onClick={() => moveBlockAt(owner, eventId, index, index - 1, parent)}
             disabled={index === 0}
             aria-label={t(lang, "ev.move_up")}
             className="grid size-6 place-items-center rounded text-subtext0 hover:bg-surface0 hover:text-text disabled:opacity-30"
@@ -390,20 +467,283 @@ function BlockRow({
             <ArrowUp size={12} />
           </button>
           <button
-            onClick={() => moveBlock(owner, eventId, index, index + 1)}
+            onClick={() => moveBlockAt(owner, eventId, index, index + 1, parent)}
             aria-label={t(lang, "ev.move_down")}
             className="grid size-6 place-items-center rounded text-subtext0 hover:bg-surface0 hover:text-text"
           >
             <ArrowDown size={12} />
           </button>
           <button
-            onClick={() => deleteBlock(owner, eventId, index)}
+            onClick={() => deleteBlockAt(owner, eventId, index, parent)}
             aria-label={t(lang, "ev.delete_block")}
             className="grid size-6 place-items-center rounded text-subtext0 hover:bg-surface0 hover:text-red"
           >
             <Trash2 size={12} />
           </button>
         </span>
+      )}
+    </div>
+    {block.op === "if" && (
+      <>
+        <BranchStack
+          owner={owner}
+          eventId={eventId}
+          ifAddr={addr}
+          branch="then"
+          blocks={block.then ?? []}
+          leafPath={leafPath}
+          eventLabel={eventLabel}
+          at={at}
+          onOver={onOver}
+          onCommit={onCommit}
+          drop={drop}
+          depth={(addr.length + 1) / 2}
+        />
+        {((block.else ?? []).length > 0 || !locked) && (
+          <BranchStack
+            owner={owner}
+            eventId={eventId}
+            ifAddr={addr}
+            branch="else"
+            blocks={block.else ?? []}
+            leafPath={leafPath}
+            eventLabel={eventLabel}
+            at={at}
+            onOver={onOver}
+            onCommit={onCommit}
+            drop={drop}
+            depth={(addr.length + 1) / 2}
+          />
+        )}
+      </>
+    )}
+    </>
+  );
+}
+
+/* Condition editors for an if block: operand pickers on both sides
+   of a comparison. Operands address vars (Code library), constants,
+   the slot position, or live dpad buttons. */
+function OperandEditor({
+  value,
+  onChange,
+  vars,
+}: {
+  value: ValueOperand;
+  onChange: (v: ValueOperand) => void;
+  vars: { id: string }[];
+}) {
+  const lang = useLang();
+  const project = useStore(projectStore);
+  const locked = !!project.locked;
+  const pick = (kind: ValueOperand["kind"]) => {
+    if (kind === "var") onChange({ kind, name: vars[0]?.id ?? "" });
+    else if (kind === "const") onChange({ kind, value: 0 });
+    else if (kind === "pos") onChange({ kind, axis: "x" });
+    else onChange({ kind: "btn", dir: "up" });
+  };
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1">
+      <select
+        value={value.kind}
+        disabled={locked}
+        onChange={(e) => pick(e.target.value as ValueOperand["kind"])}
+        aria-label={t(lang, "ev.operand")}
+        className="select select-sm"
+      >
+        <option value="var">{t(lang, "ev.operand_var")}</option>
+        <option value="const">#</option>
+        <option value="pos">pos</option>
+        <option value="btn">btn</option>
+      </select>
+      {value.kind === "var" ? (
+        <select
+          value={vars.some((v) => v.id === value.name) ? value.name : ""}
+          disabled={locked}
+          onChange={(e) => onChange({ kind: "var", name: e.target.value })}
+          className="select select-sm min-w-0 max-w-24"
+        >
+          {vars.length === 0 && <option value="">{t(lang, "ev.no_vars")}</option>}
+          {vars.map((v) => (
+            <option key={v.id} value={v.id}>
+              {v.id}
+            </option>
+          ))}
+        </select>
+      ) : value.kind === "const" ? (
+        <input
+          type="number"
+          value={value.value}
+          min={0}
+          max={65535}
+          disabled={locked}
+          onChange={(e) => {
+            const n = Math.round(e.target.valueAsNumber);
+            if (!Number.isNaN(n)) onChange({ kind: "const", value: Math.min(65535, Math.max(0, n)) });
+          }}
+          className="w-16 rounded-md border border-surface1 bg-base px-1.5 py-1 font-mono text-[11px] outline-none focus:border-mauve"
+        />
+      ) : value.kind === "pos" ? (
+        <select
+          value={value.axis}
+          disabled={locked}
+          onChange={(e) => onChange({ kind: "pos", axis: e.target.value as "x" | "y" })}
+          className="select select-sm"
+        >
+          <option value="x">x</option>
+          <option value="y">y</option>
+        </select>
+      ) : (
+        <select
+          value={value.dir}
+          disabled={locked}
+          onChange={(e) => onChange({ kind: "btn", dir: e.target.value as ValueOperand extends { kind: "btn"; dir: infer D } ? D : never })}
+          className="select select-sm"
+        >
+          {(["up", "down", "left", "right"] as const).map((d) => (
+            <option key={d} value={d}>
+              {d}
+            </option>
+          ))}
+        </select>
+      )}
+    </span>
+  );
+}
+
+function IfEditor({
+  owner,
+  eventId,
+  addr,
+  block,
+}: {
+  owner: EventOwner;
+  eventId: string;
+  addr: BlockPath;
+  block: Extract<Block, { op: "if" }>;
+}) {
+  const lang = useLang();
+  const project = useStore(projectStore);
+  const locked = !!project.locked;
+  const index = addr[addr.length - 1] as number;
+  const parent = addr.slice(0, -1) as BlockPath;
+  const cond = block.cond ?? { ...DEFAULT_COND };
+  const setCond = (patch: Partial<Cond>) =>
+    patchBlockAt(owner, eventId, index, { cond: { ...cond, ...patch } }, parent);
+  const vars = project.vars ?? [];
+  return (
+    <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+      <span className="font-mono text-[11px] text-teal">if</span>
+      <OperandEditor value={cond.left} onChange={(left) => setCond({ left })} vars={vars} />
+      <select
+        value={cond.op}
+        disabled={locked}
+        onChange={(e) => setCond({ op: e.target.value as CmpOp })}
+        aria-label={t(lang, "ev.compare")}
+        className="select select-sm"
+      >
+        {(["eq", "neq", "lt", "lte", "gt", "gte"] as const).map((op) => (
+          <option key={op} value={op}>
+            {op === "eq" ? "==" : op === "neq" ? "!=" : op === "lt" ? "<" : op === "lte" ? "<=" : op === "gt" ? ">" : ">="}
+          </option>
+        ))}
+      </select>
+      <OperandEditor value={cond.right} onChange={(right) => setCond({ right })} vars={vars} />
+    </span>
+  );
+}
+
+/* One branch of an if block: nested rows with the same editors,
+   drag-move and a compact add row. Depth past the cap is a
+   validation error, so the add row hides the if op when full. */
+function BranchStack({
+  owner,
+  eventId,
+  ifAddr,
+  branch,
+  blocks,
+  leafPath,
+  eventLabel,
+  at,
+  onOver,
+  onCommit,
+  drop,
+  depth,
+}: {
+  owner: EventOwner;
+  eventId: string;
+  ifAddr: BlockPath;
+  branch: "then" | "else";
+  blocks: Block[];
+  leafPath: string;
+  eventLabel: string;
+  at: { x: number; y: number };
+  onOver: (e: React.DragEvent, listAddr: BlockPath) => void;
+  onCommit: (e: React.DragEvent, listAddr: BlockPath) => void;
+  drop: { eventId: string; list: BlockPath; index: number | null } | null;
+  depth: number;
+}) {
+  const lang = useLang();
+  const project = useStore(projectStore);
+  const locked = !!project.locked;
+  const listAddr: BlockPath = [...ifAddr, branch];
+  const here = drop && drop.eventId === eventId && JSON.stringify(drop.list) === JSON.stringify(listAddr);
+  return (
+    <div
+      className="ml-4 space-y-1 border-l-2 border-surface1 pl-2"
+      onDragOver={(ev) => {
+        if (locked) return;
+        ev.stopPropagation();
+        onOver(ev, listAddr);
+      }}
+      onDrop={(ev) => {
+        ev.stopPropagation();
+        onCommit(ev, listAddr);
+      }}
+    >
+      <p className="font-mono text-[10px] uppercase tracking-widest text-overlay0">
+        {branch === "then" ? t(lang, "ev.then") : t(lang, "ev.else")}
+      </p>
+      {here && <div className="h-0.5 rounded bg-teal" />}
+      {blocks.map((b, j) => (
+        <div key={j}>
+          {here && drop.index === j && <div className="mb-1 h-0.5 rounded bg-teal" />}
+          <BlockRow
+            owner={owner}
+            eventId={eventId}
+            addr={[...listAddr, j]}
+            block={b}
+            leafPath={leafPath}
+            eventLabel={eventLabel}
+            at={at}
+            onOver={onOver}
+            onCommit={onCommit}
+            drop={drop}
+          />
+        </div>
+      ))}
+      {here && (drop.index === null || drop.index >= blocks.length) && <div className="h-0.5 rounded bg-teal" />}
+      {blocks.length === 0 && (
+        <p className={`rounded-md border border-dashed px-2 py-1.5 text-center font-mono text-[10px] ${here ? "border-teal text-teal" : "border-surface1 text-overlay0"}`}>
+          {t(lang, "ev.drop_block")}
+        </p>
+      )}
+      {!locked && (
+        <div className="flex flex-wrap gap-1">
+          {PALETTE.flatMap((cat) => cat.ops)
+            .filter((op) => op !== "if" || depth < MAX_IF_DEPTH - 1)
+            .map((op) => (
+              <button
+                key={op}
+                onClick={() =>
+                  addBlockAt(owner, eventId, defaultBlockFor(project, op, at, t(lang, "sound.default_name")), undefined, listAddr)
+                }
+                className="rounded-md bg-surface0 px-1.5 py-0.5 font-mono text-[10px] text-subtext0 transition-colors hover:bg-surface1 hover:text-text"
+              >
+                +{t(lang, `ev.op_${op}`)}
+              </button>
+            ))}
+        </div>
       )}
     </div>
   );
@@ -429,27 +769,30 @@ function ObjectNode({ leaf, pos }: { leaf: FlatLeaf; pos: { x: number; y: number
   const Icon = KIND_ICON[leaf.kind] ?? KIND_ICON.static;
   const selected = selection === leaf.path;
   const previewOwner = leaf.def ? { def: leaf.def } : { leaf: leaf.path };
-  const [drop, setDrop] = useState<{ eventId: string; index: number | null } | null>(null);
+  const [drop, setDrop] = useState<{ eventId: string; list: BlockPath; index: number | null } | null>(null);
   useEffect(() => {
     const clear = () => setDrop(null);
     window.addEventListener("dragend", clear);
     return () => window.removeEventListener("dragend", clear);
   }, []);
+  const sameList = (a: BlockPath, b: BlockPath): boolean => JSON.stringify(a) === JSON.stringify(b);
 
-  /** Drop position inside an event stack: the row under the cursor
-      (insert before it) or the end. Reads HTML5 payloads from block
-      rows (move) and the inspector palette (new). */
-  function dropPayload(e: React.DragEvent): { kind: "move"; owner: EventOwner; eventId: string; index: number; block: Block } | { kind: "new"; op: string } | null {
+  /** Drop position inside a block list: the row under the cursor
+      (insert before it) or the end. Only rows of THIS list count —
+      deeper lists handle their own hover. Reads HTML5 payloads from
+      block rows (move) and the inspector palette (new). */
+  function dropPayload(e: React.DragEvent): { kind: "move"; owner: EventOwner; eventId: string; path: BlockPath; block: Block } | { kind: "new"; op: string } | null {
     const types = e.dataTransfer.types;
     try {
       if (types.includes("application/x-block-move")) {
         const raw = JSON.parse(e.dataTransfer.getData("application/x-block-move")) as {
           owner: EventOwner;
           eventId: string;
-          index: number;
+          path: BlockPath;
           block: Block;
         };
-        if (raw && raw.block && typeof raw.index === "number") return { kind: "move", ...raw };
+        if (raw && raw.block && Array.isArray(raw.path) && typeof raw.path[raw.path.length - 1] === "number")
+          return { kind: "move", ...raw };
       }
       if (types.includes("application/x-block-new")) {
         const raw = JSON.parse(e.dataTransfer.getData("application/x-block-new")) as { op: string };
@@ -461,39 +804,53 @@ function ObjectNode({ leaf, pos }: { leaf: FlatLeaf; pos: { x: number; y: number
     return null;
   }
 
-  function dropIndex(e: React.DragEvent, el: HTMLElement): number | null {
-    const row = (e.target as HTMLElement).closest("[data-bidx]");
-    if (row && el.contains(row)) {
-      const n = Number(row.getAttribute("data-bidx"));
-      if (Number.isInteger(n)) return n;
-    }
-    return null;
+  function dropIndex(e: React.DragEvent, listAddr: BlockPath): number | null {
+    const row = (e.target as HTMLElement).closest("[data-bpath]");
+    if (!row) return null;
+    const segs: (number | "then" | "else")[] = (row.getAttribute("data-bpath") ?? "").split(".").map((s) =>
+      s === "then" || s === "else" ? s : Number(s),
+    );
+    if (segs.length !== listAddr.length + 1) return null;
+    for (let i = 0; i < listAddr.length; i++) if (segs[i] !== listAddr[i]) return null;
+    const last = segs[segs.length - 1];
+    return typeof last === "number" && Number.isInteger(last) ? last : null;
   }
 
-  function commitDrop(e: React.DragEvent, eventId: string) {
+  function overList(e: React.DragEvent, eventId: string, listAddr: BlockPath) {
+    if (locked) return;
+    if (!(e.dataTransfer.types.includes("application/x-block-move") || e.dataTransfer.types.includes("application/x-block-new"))) return;
     e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "move";
+    setDrop({ eventId, list: listAddr, index: dropIndex(e, listAddr) });
+  }
+
+  function commitDrop(e: React.DragEvent, eventId: string, listAddr: BlockPath) {
+    e.preventDefault();
+    e.stopPropagation();
     setDrop(null);
     if (!owner || locked) return;
     const payload = dropPayload(e);
     if (!payload) return;
     if (payload.kind === "new") {
-      if (!(["move", "set_pos", "sprite", "show", "hide", "play", "goto", "destroy", "wait", "run", "button"] as string[]).includes(payload.op)) return;
-      addBlock(owner, eventId, defaultBlockFor(project, payload.op as Parameters<typeof defaultBlockFor>[1], { x: leaf.x, y: leaf.y }, t(lang, "sound.default_name"), "snippet", leaf.sprite));
+      if (!(["move", "set_pos", "sprite", "show", "hide", "play", "goto", "destroy", "wait", "run", "button", "set", "if"] as string[]).includes(payload.op)) return;
+      const at = dropIndex(e, listAddr);
+      addBlockAt(owner, eventId, defaultBlockFor(project, payload.op as Parameters<typeof defaultBlockFor>[1], { x: leaf.x, y: leaf.y }, t(lang, "sound.default_name"), "snippet", leaf.sprite), at ?? undefined, listAddr);
       return;
     }
-    const at = dropIndex(e, e.currentTarget as HTMLElement);
-    const dst = at ?? events.find((x) => x.id === eventId)?.blocks.length ?? 0;
-    const same =
+    const srcParent = payload.path.slice(0, -1) as BlockPath;
+    const srcIdx = payload.path[payload.path.length - 1] as number;
+    const at = dropIndex(e, listAddr);
+    const sameOwner =
       ("def" in payload.owner && owner && "def" in owner && payload.owner.def === owner.def) ||
       ("leaf" in payload.owner && owner && "leaf" in owner && payload.owner.leaf === owner.leaf);
-    if (same && payload.eventId === eventId) {
-      if (payload.index === dst || payload.index + 1 === dst) return;
-      const shifted = payload.index < dst ? dst - 1 : dst;
-      deleteBlock(payload.owner, payload.eventId, payload.index);
-      addBlock(owner, eventId, payload.block, shifted);
+    if (sameOwner && payload.eventId === eventId && sameList(srcParent, listAddr)) {
+      if (srcIdx === at) return;
+      deleteBlockAt(payload.owner, payload.eventId, srcIdx, srcParent);
+      addBlockAt(owner, eventId, payload.block, at === null ? undefined : srcIdx < at ? at - 1 : at, listAddr);
     } else {
-      addBlock(owner, eventId, payload.block, dst);
-      deleteBlock(payload.owner, payload.eventId, payload.index);
+      addBlockAt(owner, eventId, payload.block, at ?? undefined, listAddr);
+      deleteBlockAt(payload.owner, payload.eventId, srcIdx, srcParent);
     }
   }
 
@@ -679,30 +1036,35 @@ function ObjectNode({ leaf, pos }: { leaf: FlatLeaf; pos: { x: number; y: number
                 </div>
                 <div
                   className="space-y-1"
-                  onDragOver={(ev) => {
-                    if (!locked && (ev.dataTransfer.types.includes("application/x-block-move") || ev.dataTransfer.types.includes("application/x-block-new"))) {
-                      ev.preventDefault();
-                      ev.dataTransfer.dropEffect = "move";
-                      setDrop({ eventId: e.id, index: dropIndex(ev, ev.currentTarget as HTMLElement) });
-                    }
-                  }}
-                  onDragLeave={() => setDrop((d) => (d && d.eventId === e.id ? null : d))}
-                  onDrop={(ev) => commitDrop(ev, e.id)}
+                  onDragOver={(ev) => overList(ev, e.id, [])}
+                  onDragLeave={() => setDrop((d) => (d && d.eventId === e.id && d.list.length === 0 ? null : d))}
+                  onDrop={(ev) => commitDrop(ev, e.id, [])}
                 >
-                  {drop && drop.eventId === e.id && drop.index === 0 && e.blocks.length > 0 && (
+                  {drop && drop.eventId === e.id && drop.list.length === 0 && drop.index === 0 && e.blocks.length > 0 && (
                     <div className="h-0.5 rounded bg-teal" />
                   )}
                   {e.blocks.map((b, i) => (
                     <div key={i}>
-                      {drop && drop.eventId === e.id && drop.index === i && <div className="mb-1 h-0.5 rounded bg-teal" />}
-                      <BlockRow owner={owner as EventOwner} eventId={e.id} index={i} block={b} path={leaf.path} eventLabel={eventSummary(lang, e)} />
+                      {drop && drop.eventId === e.id && drop.list.length === 0 && drop.index === i && <div className="mb-1 h-0.5 rounded bg-teal" />}
+                      <BlockRow
+                        owner={owner as EventOwner}
+                        eventId={e.id}
+                        addr={[i]}
+                        block={b}
+                        leafPath={leaf.path}
+                        eventLabel={eventSummary(lang, e)}
+                        at={{ x: leaf.x, y: leaf.y }}
+                        onOver={(ev, list) => overList(ev, e.id, list)}
+                        onCommit={(ev, list) => commitDrop(ev, e.id, list)}
+                        drop={drop}
+                      />
                     </div>
                   ))}
-                  {drop && drop.eventId === e.id && (drop.index === null || drop.index >= e.blocks.length) && (
+                  {drop && drop.eventId === e.id && drop.list.length === 0 && (drop.index === null || drop.index >= e.blocks.length) && (
                     <div className="h-0.5 rounded bg-teal" />
                   )}
                   {e.blocks.length === 0 && !locked && (
-                    <p className={`rounded-md border border-dashed px-2 py-1.5 text-center font-mono text-[10px] ${drop && drop.eventId === e.id ? "border-teal text-teal" : "border-surface1 text-overlay0"}`}>
+                    <p className={`rounded-md border border-dashed px-2 py-1.5 text-center font-mono text-[10px] ${drop && drop.eventId === e.id && drop.list.length === 0 ? "border-teal text-teal" : "border-surface1 text-overlay0"}`}>
                       {t(lang, "ev.drop_block")}
                     </p>
                   )}
@@ -805,18 +1167,30 @@ export default function LogicGraphLayer() {
   }, [positions]);
 
   // Wire pairs, derived purely from data; measured after paint.
+  // Chain runs port → blocks down each list, forking into if
+  // branches from the if row itself — mirroring the anchor ids the
+  // rows render (`bin:<path>:<ev>:<addr…>`).
   const pairs: Array<{ from: string; to: string; kind: "chain" | "collide" }> = [];
   let collideCount = 0;
+  const anchorId = (leafPath: string, eventId: string, addr: BlockPath): string =>
+    `bin:${leafPath}:${eventId}:${addr.join(".")}`;
   for (const o of leaves) {
     if (o.path.includes("/")) continue;
     for (const e of o.events) {
-      e.blocks.forEach((_, i) => {
-        pairs.push({
-          from: i === 0 ? `port:${o.path}:${e.id}` : `bin:${o.path}:${e.id}:${i - 1}`,
-          to: `bin:${o.path}:${e.id}:${i}`,
-          kind: "chain",
+      const seq = (blocks: Block[], addrPrefix: BlockPath, entryFrom: string): void => {
+        let prev = entryFrom;
+        blocks.forEach((b, j) => {
+          const a = [...addrPrefix, j];
+          const id = anchorId(o.path, e.id, a);
+          pairs.push({ from: prev, to: id, kind: "chain" });
+          prev = id;
+          if (b.op === "if") {
+            seq(b.then ?? [], [...a, "then"], id);
+            if (b.else) seq(b.else, [...a, "else"], id);
+          }
         });
-      });
+      };
+      seq(e.blocks, [], `port:${o.path}:${e.id}`);
       if (e.trigger === "collide" && e.target) {
         const hits = collidePaths(leaves, o.path, e.target);
         if (hits.length <= 6) {

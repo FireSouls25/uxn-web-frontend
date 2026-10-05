@@ -66,6 +66,9 @@ Every tool validates like the UI; the backend compiler is final arbiter.
   guard, max 12 victims),
   `wait {ticks 1-255}` (arms the alarm event — a waiter without one
   is rejected, single timer per object),
+  `wait {ticks, slot 0-3}` (one timer per slot; each waited slot
+  needs an alarm event with the same slot on the same owner —
+  alarm events carry the slot, slot 0 keeps the legacy fn name),
   `run {snippet}` (named ETAL snippet from the Code library — see
   below; the replacement for inline code),
   `code {code}` (legacy inline ETAL, same reserved-name gate as
@@ -78,6 +81,18 @@ Every tool validates like the UI; the backend compiler is final arbiter.
   authored once and connected to any event with run blocks.
   `delete` is refused while a run block names the snippet (same
   refcount rule as sounds).
+* Variables, conditions, multi-alarm (visual rules with the same
+  gate): `add_variable {name, init?}` (u16, boot init, one buffer
+  slot each — hand snippets share `var_<id>[0]`),
+  `rename_variable` (retargets set/if), `set_variable {variable,
+  init}`, `delete_variable` (refused while referenced);
+  `set {variable, set_mode set|add|sub, set_value}` (constant
+  assign/+=/-=); `if {if_left, if_op, if_right}` (operands
+  `kind:ref` — `var:id`, `const:N`, `pos:x|y`, `btn:up|down|left|
+  right` over the live dpad; keyboard keys have no held state on
+  either VM, so there is no held-key operand — key events stay
+  press-edge); then/else hold nested block lists (max depth 3,
+  addressed `1.then` in add/delete_block `path`).
 * `preview_event {def|object, event}` — the exact lines the emitter
   writes (same function; preview and build cannot disagree).
   `delete_event` / `delete_block {index}` for iteration.

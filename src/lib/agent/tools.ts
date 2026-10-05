@@ -11,6 +11,7 @@ import {
   addAnimFrame,
   addBinding,
   addBlock,
+  addBlockAt,
   addDef,
   addEvent,
   addInstance,
@@ -20,11 +21,14 @@ import {
   addSnippet,
   addSound,
   addSprite,
+  addVariable,
   createProject,
   deleteBlock,
+  deleteBlockAt,
   deleteEvent,
   deleteNode,
   deleteSound,
+  deleteVariable,
   extractObject,
   moveNode,
   openProject,
@@ -35,6 +39,7 @@ import {
   readList,
   renameObject,
   renameSound,
+  renameVariable,
   reorderNodes,
   sceneIdStore,
   selectionStore,
@@ -45,10 +50,11 @@ import {
   setSoundVoice,
   setSpritePixels,
   setTheme,
+  setVariableInit,
   setVoice,
 } from "../store";
 import { emitProject, previewOwnerEvent, projectDefs, validateProject } from "../project";
-import type { Block, EventTrigger, ObjectKind } from "../project";
+import type { Block, BlockPath, EventTrigger, ObjectKind, ValueOperand } from "../project";
 import type { EventOwner } from "../store";
 
 export interface ToolResult {
@@ -201,13 +207,14 @@ export const TOOLS: ToolDef[] = [
   {
     name: "add_event",
     description:
-      "Add an event to a template ({def}) or an inline leaf ({object}, top-level of current scene). Triggers: create (scene enter), step (every frame), destroy, key (named input), collide (overlap vs any|solid|player|movable|def:<id>), click (press on it), alarm (slot countdown hits 0, set by wait blocks). One event per trigger+key/target.",
+      "Add an event to a template ({def}) or an inline leaf ({object}, top-level of current scene). Triggers: create (scene enter), step (every frame), destroy, key (named input), collide (overlap vs any|solid|player|movable|def:<id>), click (press on it), alarm (slot 0-3 countdown hits 0, set by wait blocks with the same slot). One event per trigger+key/target/slot.",
     params: {
       def: { type: "string", description: "Object template id (exactly one of def/object)" },
       object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
       trigger: { type: "string", required: true, description: "create|step|destroy|key|collide|click|alarm" },
       key: { type: "string", description: "Named input id (key trigger)" },
       target: { type: "string", description: "any|solid|player|movable|def:<id> (collide trigger)" },
+      alarm: { type: "number", description: "Slot 0-3 (alarm trigger, default 0)" },
     },
     run: (args) => {
       const owner = ownerOf(args);
@@ -215,20 +222,21 @@ export const TOOLS: ToolDef[] = [
       const id = addEvent(owner, str(args["trigger"]) as EventTrigger, {
         key: str(args["key"]) || undefined,
         target: str(args["target"]) || undefined,
+        alarm: args["alarm"] === undefined ? undefined : num(args["alarm"]),
       });
-      if (!id) return { ok: false, message: "event refused (unknown owner, trigger, key, or target)" };
+      if (!id) return { ok: false, message: "event refused (unknown owner, trigger, key, target, or slot)" };
       return { ok: true, message: `event ${id}`, data: { id } };
     },
   },
   {
     name: "add_block",
     description:
-      "Append a visual action to an event (see add_event). Ops: move {dx,dy} (pixels, clamped), set_pos {x,y}, sprite {sprite} (swap art, same tile size), show/hide (alive bit, no destroy event), play {sound} (named one-shot SFX — see create_sound), goto {scene}, destroy {target?} (self default, else any|solid|player|movable|def:<id> unrolled like collide), wait {ticks 1-255} (arms the alarm event), run {snippet} (named ETAL snippet — see add_snippet), code {code} (legacy inline ETAL, prefer run), button {label, action} (labeled annotation, lowers to a comment). Every op lowers to fixed ETAL — use preview_event to see it.",
+      "Append a visual action to an event (see add_event). Ops: move {dx,dy} (pixels, clamped), set_pos {x,y}, sprite {sprite} (swap art, same tile size), show/hide (alive bit, no destroy event), play {sound} (named one-shot SFX — see create_sound), goto {scene}, destroy {target?} (self default, else any|solid|player|movable|def:<id> unrolled like collide), wait {ticks 1-255, slot?} (arms the alarm event with the same slot), run {snippet} (named ETAL snippet — see add_snippet), code {code} (legacy inline ETAL, prefer run), button {label, action} (labeled annotation, lowers to a comment), set {variable, set_mode, set_value} (named u16 variable — see add_variable), if {if_left, if_op, if_right} (branch with then/else block lists; operands kind:ref). Every op lowers to fixed ETAL — use preview_event to see it.",
     params: {
       def: { type: "string", description: "Object template id (exactly one of def/object)" },
       object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
       event: { type: "string", required: true, description: "Event id from add_event" },
-      op: { type: "string", required: true, description: "move|set_pos|sprite|show|hide|play|goto|destroy|wait|run|code|button" },
+      op: { type: "string", required: true, description: "move|set_pos|sprite|show|hide|play|goto|destroy|wait|run|code|button|set|if" },
       dx: { type: "number", description: "move: pixels" },
       dy: { type: "number", description: "move: pixels" },
       x: { type: "number", description: "set_pos: pixels" },
@@ -238,10 +246,18 @@ export const TOOLS: ToolDef[] = [
       target: { type: "string", description: "destroy: self default, else any|solid|player|movable|def:<id>" },
       sprite: { type: "string", description: "sprite: sprite id, same tile size as the leaf" },
       ticks: { type: "number", description: "wait: 1-255" },
+      wait_slot: { type: "number", description: "wait: alarm slot 0-3, default 0" },
       code: { type: "string", description: "code: raw ETAL statements (legacy inline; prefer run)" },
       snippet: { type: "string", description: "run: named snippet id (see add_snippet)" },
       label: { type: "string", description: "button: 1-32 character label" },
       action: { type: "string", description: "button: named action (at most 64 characters)" },
+      variable: { type: "string", description: "set: variable id (see add_variable)" },
+      set_mode: { type: "string", description: "set: set|=|+=|-=, default set" },
+      set_value: { type: "number", description: "set: 0-65535" },
+      if_left: { type: "string", description: "if: left operand kind:ref — var:score, const:5, pos:x|y, btn:up|down|left|right" },
+      if_op: { type: "string", description: "if: eq|neq|lt|lte|gt|gte, default neq" },
+      if_right: { type: "string", description: "if: right operand, same encoding, default const:0" },
+      path: { type: "string", description: "Nested if branch 1.then (default top level)" },
       index: { type: "number", description: "Insert position, default append" },
     },
     run: (args) => {
@@ -249,8 +265,10 @@ export const TOOLS: ToolDef[] = [
       if (!owner) return { ok: false, message: "name exactly one of def/object" };
       const block = blockOf(args);
       if (!block) return { ok: false, message: `bad op or missing fields for '${args["op"]}'` };
-      const ok = addBlock(owner, str(args["event"]), block, args["index"] === undefined ? undefined : num(args["index"]));
-      if (!ok) return { ok: false, message: "block refused (unknown owner or event)" };
+      const path = parsePath(str(args["path"]));
+      if (!path) return { ok: false, message: "bad path (want 1.then)" };
+      const ok = addBlockAt(owner, str(args["event"]), block, args["index"] === undefined ? undefined : num(args["index"]), path);
+      if (!ok) return { ok: false, message: "block refused (unknown owner, event or path)" };
       return { ok: true, message: `${(block as Block).op} added`, data: {} };
     },
   },
@@ -271,17 +289,20 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "delete_block",
-    description: "Delete one block of an event by index.",
+    description: "Delete one block of an event by index (path addresses a nested if branch, e.g. 1.then).",
     params: {
       def: { type: "string", description: "Object template id (exactly one of def/object)" },
       object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
       event: { type: "string", required: true, description: "Event id" },
       index: { type: "number", required: true, description: "Block index" },
+      path: { type: "string", description: "Nested if branch 1.then (default top level)" },
     },
     run: (args) => {
       const owner = ownerOf(args);
       if (!owner) return { ok: false, message: "name exactly one of def/object" };
-      if (!deleteBlock(owner, str(args["event"]), num(args["index"]))) return { ok: false, message: "unknown owner, event, or index" };
+      const path = parsePath(str(args["path"]));
+      if (!path) return { ok: false, message: "bad path (want 1.then)" };
+      if (!deleteBlockAt(owner, str(args["event"]), num(args["index"]), path)) return { ok: false, message: "unknown owner, event, path or index" };
       return { ok: true, message: "block deleted" };
     },
   },
@@ -477,6 +498,57 @@ export const TOOLS: ToolDef[] = [
       const err = setSnippetCode(str(args["snippet"]), str(args["code"]));
       if (err) return { ok: false, message: err };
       return { ok: true, message: `snippet ${args["snippet"]} set` };
+    },
+  },
+  {
+    name: "add_variable",
+    description:
+      "Add a named u16 game variable (score, health, flags — one buffer slot, initialized once at boot). Read/written by set/if blocks and shared with hand snippets as var_<id>[0].",
+    params: {
+      name: { type: "string", required: true, description: "Display name, becomes the id when valid" },
+      init: { type: "number", description: "Boot value 0-65535, default 0" },
+    },
+    run: (args) => {
+      const id = addVariable(str(args["name"], "var"), args["init"] === undefined ? 0 : num(args["init"]));
+      return { ok: true, message: `variable ${id}`, data: { id } };
+    },
+  },
+  {
+    name: "rename_variable",
+    description: "Rename a variable id everywhere set/if blocks reference it.",
+    params: {
+      from: { type: "string", required: true, description: "Current variable id" },
+      to: { type: "string", required: true, description: "New id (letter first, letters/digits/_)" },
+    },
+    run: (args) => {
+      const err = renameVariable(str(args["from"]), str(args["to"]));
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: `variable ${args["to"]}` };
+    },
+  },
+  {
+    name: "set_variable",
+    description: "Set a variable's boot init value (0-65535).",
+    params: {
+      variable: { type: "string", required: true, description: "Variable id from add_variable" },
+      init: { type: "number", required: true, description: "Boot value 0-65535" },
+    },
+    run: (args) => {
+      const err = setVariableInit(str(args["variable"]), num(args["init"]));
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: `variable ${args["variable"]} set` };
+    },
+  },
+  {
+    name: "delete_variable",
+    description: "Delete a variable. Refused while a set/if block names it.",
+    params: {
+      variable: { type: "string", required: true, description: "Variable id" },
+    },
+    run: (args) => {
+      const err = deleteVariable(str(args["variable"]));
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: "variable deleted" };
     },
   },
   {
@@ -710,6 +782,34 @@ function ownerOf(args: Record<string, unknown>): EventOwner | null {
   return null;
 }
 
+function parseOperand(s: string): ValueOperand | null {
+  const i = s.indexOf(":");
+  const kind = i < 0 ? s : s.slice(0, i);
+  const ref = i < 0 ? "" : s.slice(i + 1);
+  if (kind === "var" && ref) return { kind, name: ref };
+  if (kind === "const" && ref !== "" && Number.isInteger(Number(ref))) return { kind, value: Number(ref) };
+  if (kind === "pos" && (ref === "x" || ref === "y")) return { kind, axis: ref };
+  if (kind === "btn" && (ref === "up" || ref === "down" || ref === "left" || ref === "right"))
+    return { kind, dir: ref };
+  return null;
+}
+
+/** "1.then" → [1, "then"] (parent list address inside nested if
+    branches); "" → top level. Null on malformed. */
+function parsePath(s: string): BlockPath | null {
+  if (!s) return [];
+  const out: BlockPath = [];
+  const segs = s.split(".");
+  if (segs.length % 2 !== 0) return null;
+  for (let i = 0; i < segs.length; i += 2) {
+    const idx = segs[i];
+    const br = segs[i + 1];
+    if (!/^\d+$/.test(idx) || (br !== "then" && br !== "else")) return null;
+    out.push(Number(idx), br);
+  }
+  return out;
+}
+
 function blockOf(args: Record<string, unknown>): Block | null {
   const op = str(args["op"]);
   if (op === "move") return { op, dx: num(args["dx"]), dy: num(args["dy"]) };
@@ -727,7 +827,11 @@ function blockOf(args: Record<string, unknown>): Block | null {
     if (target && target !== "self") return { op, target };
     return { op };
   }
-  if (op === "wait") return { op, ticks: num(args["ticks"], 30) };
+  if (op === "wait") {
+    const slot = num(args["wait_slot"], 0);
+    if (!Number.isInteger(slot) || slot < 0 || slot > 3) return null;
+    return slot === 0 ? { op, ticks: num(args["ticks"], 30) } : { op, ticks: num(args["ticks"], 30), slot };
+  }
   if (op === "sprite") {
     if (!str(args["sprite"])) return null;
     return { op, sprite: str(args["sprite"]) };
@@ -741,6 +845,20 @@ function blockOf(args: Record<string, unknown>): Block | null {
   if (op === "run") {
     if (!str(args["snippet"])) return null;
     return { op, snippet: str(args["snippet"]) };
+  }
+  if (op === "set") {
+    if (!str(args["variable"])) return null;
+    const mode = str(args["set_mode"], "set");
+    if (mode !== "set" && mode !== "add" && mode !== "sub") return null;
+    return { op, name: str(args["variable"]), mode, value: num(args["set_value"]) };
+  }
+  if (op === "if") {
+    const left = parseOperand(str(args["if_left"], "btn:up"));
+    const right = parseOperand(str(args["if_right"], "const:0"));
+    const cmp = str(args["if_op"], "neq");
+    if (!left || !right) return null;
+    if (cmp !== "eq" && cmp !== "neq" && cmp !== "lt" && cmp !== "lte" && cmp !== "gt" && cmp !== "gte") return null;
+    return { op, cond: { left, op: cmp, right }, then: [], else: [] };
   }
   if (op === "button") {
     if (!str(args["label"]).trim()) return null;
