@@ -10,6 +10,7 @@
    pool, literal everything. */
 
 import { pixelsToPlanar, monoToPixels, THEME_R, THEME_G, THEME_B } from "./palette";
+import { glyphRows } from "./font";
 
 /** One sprite → ROM blob: each 8×8 tile becomes 16 planar bytes
     (channel one, then two), tiles concatenated in row-major order so
@@ -119,6 +120,24 @@ export interface BlockSprite {
       leaf's tile dims (the draw loop unrolls the declared size). */
   sprite: string;
 }
+export interface BlockSong {
+  op: "song";
+  /** Named song id: start its loop (copies tracks to the live
+      buffers, shared sequencer ticks it every frame). */
+  song: string;
+}
+export interface BlockSongStop {
+  op: "song_stop";
+}
+export interface BlockOverlay {
+  op: "overlay";
+  /** Push the current scene and enter a fresh instance (menu
+      navigation stack — NOT freeze-pause: setup re-runs). */
+  scene: string;
+}
+export interface BlockBack {
+  op: "back";
+}
 export interface BlockShow {
   op: "show";
 }
@@ -152,6 +171,25 @@ export interface GameVar {
   id: string;
   /** Boot value, 0–65535. */
   init: number;
+}
+
+/** One song step: MIDI pitch 0–107 (127 = rest) held for len ticks.
+    Mirrors lib/song.ux Note (pitch u8, len u8). */
+export interface SongNote {
+  pitch: number;
+  len: number;
+}
+/** One of four sequencer voices: up to 16 steps looping, one shared
+    square wave at vol. Empty notes = silent voice (skipped). */
+export interface SongTrack {
+  notes: SongNote[];
+  vol: number;
+}
+/** A named 4-voice loop: data blobs per voice plus a generated
+    start fn; play_song points the shared live buffers at it. */
+export interface SongDef {
+  id: string;
+  tracks: SongTrack[];
 }
 
 export interface BlockRun {
@@ -222,7 +260,11 @@ export type Block =
   | BlockShow
   | BlockHide
   | BlockSet
-  | BlockIf;
+  | BlockIf
+  | BlockSong
+  | BlockSongStop
+  | BlockOverlay
+  | BlockBack;
 
 export interface ObjectEvent {
   /** Stable id for agent/UI targeting (ev_N). */
@@ -329,6 +371,10 @@ export interface SceneNode {
   anim?: string;
   /** Leaves only: per-object script, wrapped as tick_<root>_<path>. */
   tick?: string;
+  /** Leaves only: dialogue label drawn at the leaf position (1–24
+      printable ASCII chars, 8px 1bpp tiles prerendered at emit).
+      Always instance state, never inherited from a def. */
+  label?: string;
   /** Leaves only: creation code — ETAL statements spliced after the
       leaf's create-event blocks in its create fn (GameMaker Creation
       Code: per-instance patch, runs on scene enter). Always instance
@@ -458,6 +504,9 @@ export interface Project {
   sound?: { voices: Voice[] };
   /** Named one-shot SFX library (Phase 3). Absent = none yet. */
   sounds?: SoundDef[];
+  /** Named song loops (Phase 12). Absent = none yet; song blocks
+      reference these by id. */
+  songs?: SongDef[];
   /** Named ETAL snippet library (Code page). Absent = none yet;
       run blocks reference these by id. */
   snippets?: CodeSnippet[];
@@ -485,8 +534,10 @@ const RESERVED_EXACT = new Set([
   "ox", "oy", "ot", "oflags", "ocount", "scene", "kb", "mb", "mouse_last",
   "dpad", "draw_all", "pt_in_rect", "overlap88", "scene_go", "start", "main", "sq32",
   "custom_setup", "custom_frame",
+  // Phase C runtime: sequencer state, scene stack, prerendered labels.
+  "sg_on", "ovst", "ovsp", "song_tick", "overlay_back",
 ]);
-const RESERVED_PREFIX = ["atick_", "afr_", "adir_", "spr_", "tick_"];
+const RESERVED_PREFIX = ["atick_", "afr_", "adir_", "spr_", "tick_", "sglp", "sgll", "sg_len", "sg_vol", "sg_pos", "sg_wait", "song_", "lbl_"];
 
 function declaredNames(code: string): string[] {
   const names: string[] = [];
@@ -700,6 +751,15 @@ const TRIGGERS: EventTrigger[] = ["create", "step", "destroy", "key", "collide",
     deeper belongs in a snippet). */
 export const MAX_IF_DEPTH = 3;
 
+/** Max steps per song voice. The live track buffers are 16 bytes per
+    voice, so this is a RAM cap as much as a UI one: 4 voices x 16
+    steps x 2 buffers = 128 bytes of main RAM. */
+export const MAX_SONG_STEPS = 16;
+
+/** A step is MIDI pitch 0–107; this is the rest marker lib/song.ux
+    uses and what the emitter skips firing. */
+export const SONG_REST = 127;
+
 function validOperand(o: ValueOperand, varIds: Set<string>): string | null {
   if (o.kind === "var" && !varIds.has(o.name)) return `unknown variable '${o.name}'`;
   if (o.kind === "const" && !u16(o.value)) return `const must be 0–65535`;
@@ -715,6 +775,7 @@ function validateBlocks(
   spriteIds: Set<string>,
   defIds: Set<string>,
   varIds: Set<string>,
+  songIds: Set<string>,
   depth = 0,
 ): string[] {
   const errs: string[] = [];
@@ -756,12 +817,19 @@ function validateBlocks(
             if (bad) errs.push(`${at}: ${bad}`);
           }
         }
-        errs.push(...validateBlocks(b.then ?? [], `${at} then`, sceneIds, soundIds, snippetIds, spriteIds, defIds, varIds, depth + 1));
-        if (b.else) errs.push(...validateBlocks(b.else, `${at} else`, sceneIds, soundIds, snippetIds, spriteIds, defIds, varIds, depth + 1));
+        errs.push(...validateBlocks(b.then ?? [], `${at} then`, sceneIds, soundIds, snippetIds, spriteIds, defIds, varIds, songIds, depth + 1));
+        if (b.else) errs.push(...validateBlocks(b.else, `${at} else`, sceneIds, soundIds, snippetIds, spriteIds, defIds, varIds, songIds, depth + 1));
       }
     } else if (b.op === "sprite") {
       if (typeof b.sprite !== "string" || !spriteIds.has(b.sprite))
         errs.push(`${at}: sprite needs a known sprite`);
+    } else if (b.op === "song") {
+      if (typeof b.song !== "string" || !songIds.has(b.song))
+        errs.push(`${at}: song needs a known song`);
+    } else if (b.op === "song_stop" || b.op === "back") {
+      void b;
+    } else if (b.op === "overlay") {
+      if (!sceneIds.has(b.scene)) errs.push(`${at}: overlay unknown scene '${b.scene}'`);
     } else if (b.op === "show" || b.op === "hide") {
       void b;
     } else if (b.op === "code") {
@@ -801,6 +869,7 @@ function validateEvents(
   snippetIds: Set<string>,
   spriteIds: Set<string>,
   varIds: Set<string>,
+  songIds: Set<string>,
 ): string[] {
   const errs: string[] = [];
   const ids = new Set((events ?? []).map((e) => e.id));
@@ -818,7 +887,7 @@ function validateEvents(
     const sig = `${e.trigger}|${e.key ?? ""}|${e.target ?? ""}|${e.trigger === "alarm" ? (e.alarm ?? 0) : ""}`;
     if (seen.has(sig)) errs.push(`${label}: duplicate ${e.trigger} event`);
     seen.add(sig);
-    errs.push(...validateBlocks(e.blocks ?? [], `${label} '${e.id}'`, sceneIds, soundIds, snippetIds, spriteIds, defIds, varIds));
+    errs.push(...validateBlocks(e.blocks ?? [], `${label} '${e.id}'`, sceneIds, soundIds, snippetIds, spriteIds, defIds, varIds, songIds));
     // Every waited slot needs its alarm event on the same owner.
     const waited = new Set<number>();
     const collectWaits = (blocks: Block[]): void => {
@@ -968,6 +1037,66 @@ export function eachBlock(events: ObjectEvent[]): Block[] {
   return out;
 }
 
+/** Songs referenced by any song block (defs + all scenes, nested
+    branches included), sorted for deterministic emission. */
+export function referencedSongs(p: Project): SongDef[] {
+  const ids = new Set<string>();
+  const scan = (events: ObjectEvent[]): void => {
+    for (const b of eachBlock(events)) if (b.op === "song") ids.add(b.song);
+  };
+  for (const d of projectDefs(p)) scan(d.events ?? []);
+  const seenScenes = new Set<string>();
+  for (const s of p.scenes) {
+    const walk = (nodes: SceneNode[]): void => {
+      for (const o of nodes) {
+        if (o.scene) {
+          if (seenScenes.has(o.scene)) continue;
+          seenScenes.add(o.scene);
+          const sub = p.scenes.find((x) => x.id === o.scene);
+          if (sub) walk(sub.nodes);
+        } else scan(o.events ?? []);
+      }
+    };
+    walk(s.nodes);
+  }
+  return [...ids]
+    .map((id) => (p.songs ?? []).find((x) => x.id === id))
+    .filter((x): x is SongDef => !!x)
+    .sort((a, b) => (a.id < b.id ? -1 : 1));
+}
+
+/** Voices any referenced song actually fires (non-empty track,
+    audible vol): the song_tick body and the Audio device decls must
+    agree exactly, or valid projects fail assembly on undeclared
+    ports. Sorted for determinism. */
+export function songVoices(p: Project): number[] {
+  const out = new Set<number>();
+  for (const s of referencedSongs(p)) {
+    s.tracks.forEach((tr, vi) => {
+      if (tr.notes.length > 0 && tr.vol > 0) out.add(vi);
+    });
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/** Any song/song_stop block anywhere (buffers + tick follow). */
+function usesSong(p: Project): boolean {
+  const scan = (events: ObjectEvent[]): boolean =>
+    eachBlock(events).some((b) => b.op === "song" || b.op === "song_stop");
+  if (projectDefs(p).some((d) => scan(d.events ?? []))) return true;
+  return p.scenes.some((s) => s.nodes.some((o) => !o.scene && scan(o.events ?? [])));
+}
+
+/** Any overlay/back block anywhere (stack buffers + helper follow).
+    Nested subscene nodes share the owner's events, so top-level
+    nodes suffice. */
+function usesOverlay(p: Project): boolean {
+  const scan = (events: ObjectEvent[]): boolean =>
+    eachBlock(events).some((b) => b.op === "overlay" || b.op === "back");
+  if (projectDefs(p).some((d) => scan(d.events ?? []))) return true;
+  return p.scenes.some((s) => s.nodes.some((o) => !o.scene && scan(o.events ?? [])));
+}
+
 export function validateProject(p: Project): string[] {
   const errs: string[] = [];
   if (!p.name || /["\\]/.test(p.name)) errs.push("name must be non-empty without quotes/backslashes");
@@ -1070,6 +1199,31 @@ export function validateProject(p: Project): string[] {
     if (!IDENT.test(v.id)) errs.push(`bad variable id '${v.id}'`);
     if (!u16(v.init)) errs.push(`variable '${v.id}': init must be 0–65535`);
   }
+  const songs = p.songs ?? [];
+  const songIds = new Set(songs.map((s) => s.id));
+  if (songIds.size !== songs.length) errs.push("duplicate song id");
+  for (const s of songs) {
+    if (!IDENT.test(s.id)) errs.push(`bad song id '${s.id}'`);
+    if (!Array.isArray(s.tracks) || s.tracks.length !== 4) {
+      errs.push(`song '${s.id}': needs exactly 4 tracks`);
+      continue;
+    }
+    let notes = 0;
+    s.tracks.forEach((tr, vi) => {
+      if (!Number.isInteger(tr.vol) || tr.vol < 0 || tr.vol > 255)
+        errs.push(`song '${s.id}' voice ${vi}: vol must be 0–255`);
+      if (!Array.isArray(tr.notes) || tr.notes.length > MAX_SONG_STEPS)
+        errs.push(`song '${s.id}' voice ${vi}: at most ${MAX_SONG_STEPS} steps`);
+      for (const n of tr.notes ?? []) {
+        if (!Number.isInteger(n.pitch) || !((n.pitch >= 0 && n.pitch <= 107) || n.pitch === SONG_REST))
+          errs.push(`song '${s.id}' voice ${vi}: pitch must be 0–107 or 127 (rest)`);
+        if (!Number.isInteger(n.len) || n.len < 1 || n.len > 255)
+          errs.push(`song '${s.id}' voice ${vi}: len must be 1–255`);
+        notes++;
+      }
+    });
+    if (notes === 0) errs.push(`song '${s.id}' has no notes`);
+  }
   const defs = projectDefs(p);
   const defIds = new Set(defs.map((d) => d.id));
   if (defIds.size !== defs.length) errs.push("duplicate object id");
@@ -1088,7 +1242,7 @@ export function validateProject(p: Project): string[] {
       if (dims && !maskFits(d.mask, dims))
         errs.push(`object '${d.id}': mask must fit inside its ${dims[0]}×${dims[1]}px sprite`);
     }
-    errs.push(...validateEvents(d.events ?? [], `object '${d.id}'`, sceneIds, inputIds, defIds, soundIds, snippetIds, spriteIds, varIds));
+    errs.push(...validateEvents(d.events ?? [], `object '${d.id}'`, sceneIds, inputIds, defIds, soundIds, snippetIds, spriteIds, varIds, songIds));
   }
   if (sceneIds.size !== p.scenes.length) errs.push("duplicate scene id");
   if (!sceneIds.has(p.start)) errs.push(`start scene '${p.start}' missing`);
@@ -1118,7 +1272,7 @@ export function validateProject(p: Project): string[] {
       if (!isBranch && o.def && (o.events?.length ?? 0) > 0)
         errs.push(`node '${o.id}': instances carry no events — edit object '${o.def}'`);
       if (!isBranch && !o.def)
-        errs.push(...validateEvents(o.events ?? [], `node '${o.id}'`, sceneIds, inputIds, defIds, soundIds, snippetIds, spriteIds, varIds));
+        errs.push(...validateEvents(o.events ?? [], `node '${o.id}'`, sceneIds, inputIds, defIds, soundIds, snippetIds, spriteIds, varIds, songIds));
       if (!isBranch && !o.sprite && !o.def) errs.push(`node '${o.id}': leaf needs a sprite or an object`);
       if (!isBranch) {
         if (o.sprite && !spriteIds.has(o.sprite)) errs.push(`node '${o.id}': unknown sprite '${o.sprite}'`);
@@ -1126,6 +1280,8 @@ export function validateProject(p: Project): string[] {
         if (o.anim && !animIds.has(o.anim)) errs.push(`node '${o.id}': unknown animation '${o.anim}'`);
       }
       if (o.tick) errs.push(...validateCustomCode(o.tick).map((e) => `node '${o.id}' tick: ${e}`));
+      if (o.label !== undefined && (typeof o.label !== "string" || o.label.length === 0 || o.label.length > 24 || /[^\x20-\x7e]/.test(o.label)))
+        errs.push(`node '${o.id}': label must be 1–24 printable ASCII chars`);
       if (o.initCode)
         errs.push(...validateCustomCode(o.initCode).map((e) => `node '${o.id}' creation code: ${e}`));
       if (o.kind !== undefined && o.kind !== "player" && o.kind !== "static" && o.kind !== "movable")
@@ -1306,6 +1462,11 @@ function usedVoices(p: Project): number[] {
       }
     }
   }
+  for (const s of referencedSongs(p)) {
+    s.tracks.forEach((tr, vi) => {
+      if (tr.notes.length > 0 && tr.vol > 0) out.add(vi);
+    });
+  }
   return [...out].sort((a, b) => a - b);
 }
 
@@ -1384,6 +1545,18 @@ function emitDrawScene(s: Scene, leaves: FlatLeaf[], dims: Map<string, [number, 
         lines.push(`        Screen.sprite = 129;`);
       }
     }
+    // Label glyphs: prerendered at emit time into lbl_<tag> (one
+    // 8-byte glyph per char, so the blit base is data + char*8),
+    // 1bpp mode 1, drawn on top of the art.
+    if (o.label) {
+      const tag = slotTag(s.id, o.path);
+      for (let c = 0; c < [...o.label].length; c++) {
+        lines.push(`        Screen.x = ox[${i}]${px(c * TILE_PX)};`);
+        lines.push(`        Screen.y = oy[${i}];`);
+        lines.push(`        Screen.addr = &lbl_${tag} + ${c * 8};`);
+        lines.push(`        Screen.sprite = 1;`);
+      }
+    }
     lines.push(`    }`);
   });
   lines.push(`}`);
@@ -1403,6 +1576,10 @@ export interface BlockCtx {
   sounds: Map<string, SoundDef>;
   /** Named snippets for run blocks (same degrade-to-comment rule). */
   snippets: Map<string, string>;
+  /** Named songs for song blocks (unknown id previews as a comment;
+      emit never sees one — validation throws first). Absent = no
+      song library, so song blocks preview as comments. */
+  songs?: Map<string, SongDef>;
   /** Tile dims per sprite id, for sprite-swap ow/oh writes. */
   tiles?: Map<string, [number, number]>;
   /** Static destroy victims for a non-self target: literal slot +
@@ -1424,6 +1601,11 @@ export function soundMap(p: Project): Map<string, SoundDef> {
 /** Named snippets by id (same validation/preview contract as sounds). */
 export function snippetMap(p: Project): Map<string, string> {
   return new Map((p.snippets ?? []).map((s) => [s.id, s.code]));
+}
+
+/** Named songs by id (same validation/preview contract). */
+export function songMap(p: Project): Map<string, SongDef> {
+  return new Map((p.songs ?? []).map((s) => [s.id, s]));
 }
 
 /** Dpad bit per direction (same masks the keyboard driver reads). */
@@ -1523,6 +1705,23 @@ export function previewBlocks(blocks: Block[], ctx: BlockCtx): string[] {
       const snippet = ctx.snippets.get(b.snippet);
       if (snippet === undefined) lines.push(`( unknown snippet '${b.snippet}' )`);
       else for (const line of snippet.split("\n")) lines.push(line);
+    } else if (b.op === "song") {
+      if (!ctx.songs?.has(b.song)) lines.push(`( unknown song '${b.song}' )`);
+      else {
+        lines.push(`song_${b.song}_start();`);
+        lines.push(`sg_on = 1;`);
+      }
+    } else if (b.op === "song_stop") {
+      lines.push(`sg_on = 0;`);
+    } else if (b.op === "overlay") {
+      lines.push(`if ovsp[0] < 8 {`);
+      lines.push(`    ovst[ovsp[0]] = scene;`);
+      lines.push(`    ovsp[0] = ovsp[0] + 1;`);
+      lines.push(`    setup_${b.scene}();`);
+      lines.push(`    scene_go(SC_${b.scene.toUpperCase()});`);
+      lines.push(`}`);
+    } else if (b.op === "back") {
+      lines.push(`overlay_back();`);
     } else if (b.op === "button") {
       lines.push(`( button '${b.label}' -> ${b.action} )`);
     } else {
@@ -1611,7 +1810,7 @@ export function previewOwnerEvent(
   if (!ev) return null;
   const selfIdx = owner.leaf !== undefined ? leaves.findIndex((l) => l.path === owner.leaf) : -1;
   const victimsOf = (target: string) => destroyVictims(leaves, defs, sceneId, selfIdx, target);
-  const lines = previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, destroyFn, sounds: soundMap(p), snippets: snippetMap(p), tiles: tileDimsOf(p), victimsOf });
+  const lines = previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, destroyFn, sounds: soundMap(p), snippets: snippetMap(p), tiles: tileDimsOf(p), victimsOf, songs: songMap(p) });
   if (ev.trigger === "collide") {
     const hits = leaves.filter((t, j) => matchTarget(t, j, -1, ev.target ?? "")).map((t) => t.path);
     return [`( collide ${ev.target} → ${hits.join(", ") || "nothing"} )`, ...lines];
@@ -1635,13 +1834,14 @@ function emitLeafEvents(
   sounds: Map<string, SoundDef>,
   snippets: Map<string, string>,
   tiles: Map<string, [number, number]>,
+  songs: Map<string, SongDef>,
 ): string[] {
   const lines: string[] = [];
   const ind = (ss: string[]): string[] => ss.map((l) => `    ${l}`);
   leaves.forEach((o, i) => {
     const tag = slotTag(rootId, o.path);
     const victimsOf = (target: string) => destroyVictims(leaves, defs, rootId, i, target);
-    const ctx: BlockCtx = { slot: "slot", w, h, destroyFn: destroyFnName(defs, o, tag), sounds, snippets, tiles, victimsOf };
+    const ctx: BlockCtx = { slot: "slot", w, h, destroyFn: destroyFnName(defs, o, tag), sounds, snippets, tiles, victimsOf, songs };
     const fn = (name: string, stmts: string[]): void => {
       if (stmts.length === 0) return;
       lines.push(`${name} :: fn(slot: u16) {`, ...ind(stmts), `}`);
@@ -1705,7 +1905,7 @@ function emitDefEvents(p: Project): string[] {
     const ev = (d.events ?? []).find((e) => e.trigger === "destroy" && e.blocks.length > 0);
     if (!ev) continue;
     lines.push(`destroy_def_${d.id} :: fn(slot: u16) {`);
-    for (const l of previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, sounds: soundMap(p), snippets: snippetMap(p), tiles: tileDimsOf(p) })) lines.push(`    ${l}`);
+    for (const l of previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, sounds: soundMap(p), snippets: snippetMap(p), tiles: tileDimsOf(p), songs: songMap(p) })) lines.push(`    ${l}`);
     lines.push(`}`);
   }
   return lines;
@@ -1957,6 +2157,29 @@ export function emitProject(p: Project): Record<string, string> {
   if (usedVoices(p).length > 0) {
     out.push(`data sq32 = [${SQ32.join(", ")}];`);
   }
+  const songList = referencedSongs(p);
+  for (const s of songList) {
+    s.tracks.forEach((tr, v) => {
+      const pitch = Array.from({ length: MAX_SONG_STEPS }, (_, i) => tr.notes[i]?.pitch ?? SONG_REST);
+      const len = Array.from({ length: MAX_SONG_STEPS }, (_, i) => tr.notes[i]?.len ?? 1);
+      out.push(`data sg_${s.id}_v${v}p = [${pitch.join(", ")}];`);
+      out.push(`data sg_${s.id}_v${v}l = [${len.join(", ")}];`);
+    });
+  }
+  // Labels prerender their glyphs into per-leaf blobs, so a labeled
+  // project pays only the glyphs it uses, not the whole font, and
+  // never imports lib/font.ux. font8x8 itself is emitted only as the
+  // reference copy tests diff against.
+  if (p.scenes.some((s) => flattenScene(p, s.id).some((o) => o.label))) {
+    for (const s of scenes) {
+      for (const o of flattenScene(p, s.id)) {
+        if (!o.label) continue;
+        const bytes = [...o.label].flatMap((ch) => glyphRows(ch.charCodeAt(0)));
+        const hex = bytes.map((b) => `0x${b.toString(16).padStart(2, "0")}`);
+        out.push(`data lbl_${slotTag(s.id, o.path)} = [${hex.join(", ")}];`);
+      }
+    }
+  }
   out.push(``);
   // Flattened once up front: setup/draw/frame all read it, and the
   // buffer decisions below need every leaf's flags and events.
@@ -1991,6 +2214,8 @@ export function emitProject(p: Project): Record<string, string> {
   const needsAlarmX = [1, 2, 3].map(
     (s) => alarmUse(s) || customAll.includes(`oat${s}[`),
   );
+  const needsSong = usesSong(p);
+  const needsOverlay = usesOverlay(p);
   out.push(`buffer ox[${MAX_OBJECTS}]: u16;`);
   out.push(`buffer oy[${MAX_OBJECTS}]: u16;`);
   out.push(`buffer ot[${MAX_OBJECTS}]: u16;`);
@@ -2003,6 +2228,24 @@ export function emitProject(p: Project): Record<string, string> {
   needsAlarmX.forEach((need, i) => {
     if (need) out.push(`buffer oat${i + 1}[${MAX_OBJECTS}]: u8;`);
   });
+  if (needsSong) {
+    // Per-voice scalars rather than voice-indexed arrays: each
+    // voice's copy loop writes its own names, and the assembler
+    // resolves them without runtime arithmetic.
+    for (let v = 0; v < 4; v++) {
+      out.push(`buffer sglp${v}[${MAX_SONG_STEPS}]: u8;`);
+      out.push(`buffer sgll${v}[${MAX_SONG_STEPS}]: u8;`);
+      out.push(`sg_pos${v}: u8 = 0;`);
+      out.push(`sg_wait${v}: u8 = 0;`);
+      out.push(`sg_len${v}: u8 = 0;`);
+      out.push(`sg_vol${v}: u8 = 0;`);
+    }
+    out.push(`sg_on: u8 = 0;`);
+  }
+  if (needsOverlay) {
+    out.push(`buffer ovst[8]: u8;`);
+    out.push(`buffer ovsp[1]: u8;`);
+  }
   const vars = [...(p.vars ?? [])].sort((a, b) => (a.id < b.id ? -1 : 1));
   for (const v of vars) out.push(`buffer var_${v.id}[1]: u16;`);
   out.push(`ocount: u8 = 0;`);
@@ -2057,6 +2300,69 @@ export function emitProject(p: Project): Record<string, string> {
   out.push(`    }`);
   out.push(`}`);
   out.push(``);
+  if (needsSong) {
+    // Shared 4-voice sequencer over the live track buffers (see the
+    // play_song lowering): one start fn per referenced song copies
+    // its 16-step data into the live buffers; the tick advances all
+    // voices and fires attacks through the Audio ports.
+    for (const s of songList) {
+      out.push(`song_${s.id}_start :: fn() {`);
+      s.tracks.forEach((tr, v) => {
+        if (tr.notes.length === 0) {
+          out.push(`    sg_len${v} = 0;`);
+          return;
+        }
+        out.push(`    for i in 0..${tr.notes.length} { sglp${v}[i] = sg_${s.id}_v${v}p[i]; sgll${v}[i] = sg_${s.id}_v${v}l[i]; }`);
+        out.push(`    sg_len${v} = ${tr.notes.length};`);
+        out.push(`    sg_vol${v} = ${tr.vol};`);
+        out.push(`    sg_pos${v} = 0;`);
+        out.push(`    sg_wait${v} = 0;`);
+      });
+      out.push(`}`);
+      out.push(``);
+    }
+    out.push(`song_tick :: fn() {`);
+    out.push(`    if sg_on == 0 { return; }`);
+    for (const v of songVoices(p)) {
+      out.push(`    if sg_len${v} != 0 {`);
+      out.push(`        if sg_wait${v} != 0 { sg_wait${v} = sg_wait${v} - 1; }`);
+      out.push(`        else {`);
+      out.push(`            p${v}: u8 = sglp${v}[sg_pos${v}];`);
+      out.push(`            if p${v} != 127 {`);
+      out.push(`                Audio${v}.addr = &sq32;`);
+      out.push(`                Audio${v}.length = 32;`);
+      out.push(`                Audio${v}.volume = sg_vol${v};`);
+      out.push(`                Audio${v}.adsr = 4369;`);
+      out.push(`                Audio${v}.pitch = 128 + p${v};`);
+      out.push(`            }`);
+      out.push(`            l${v}: u8 = sgll${v}[sg_pos${v}];`);
+      out.push(`            if l${v} == 0 { l${v} = 1; }`);
+      out.push(`            sg_wait${v} = l${v} - 1;`);
+      out.push(`            sg_pos${v} = sg_pos${v} + 1;`);
+      out.push(`            if sg_pos${v} >= sg_len${v} { sg_pos${v} = 0; }`);
+      out.push(`        }`);
+      out.push(`    }`);
+    }
+    out.push(`}`);
+    out.push(``);
+  }
+  if (needsOverlay) {
+    // Fresh-instance scene stack (menu navigation, NOT freeze-pause:
+    // entering a scene always runs its setup). Pushing past 8 or
+    // backing out of empty is a silent no-op, never corruption.
+    out.push(`overlay_back :: fn() {`);
+    out.push(`    if ovsp[0] != 0 {`);
+    out.push(`        ovsp[0] = ovsp[0] - 1;`);
+    out.push(`        bid: u8 = ovst[ovsp[0]];`);
+    out.push(`        match bid {`);
+    for (const s of scenes) out.push(`            ${indexOf.get(s.id)} => { setup_${s.id}(); }`);
+    out.push(`            _ => { }`);
+    out.push(`        }`);
+    out.push(`        scene_go(bid);`);
+    out.push(`    }`);
+    out.push(`}`);
+    out.push(``);
+  }
   for (const s of scenes) {
     for (const o of flat.get(s.id) as FlatLeaf[]) {
       if (o.anim && animMap.has(o.anim)) {
@@ -2076,13 +2382,16 @@ export function emitProject(p: Project): Record<string, string> {
   for (const s of scenes) {
     // Store order, not sorted: hierarchy drag-reorder defines draw order.
     const leaves = flat.get(s.id) as FlatLeaf[];
-    out.push(...emitLeafEvents(s.id, leaves, p.width, p.height, defs, soundMap(p), snippetMap(p), tileDims));
+    out.push(...emitLeafEvents(s.id, leaves, p.width, p.height, defs, soundMap(p), snippetMap(p), tileDims, songMap(p)));
     out.push(emitSetup(s.id, leaves, pxDims, needsDims, needsAlarm));
     if (leaves.length > 0) out.push(emitDrawScene(s, leaves, tileDims));
     out.push(emitFrame(s, leaves, p.width, p.height, animMap, hasFrameHook, p, pxDims));
   }
   const arms = scenes.map((s) => `        ${indexOf.get(s.id)} => { ${s.id}_frame(); }`).join("\n");
   out.push(`on_frame :: event() {`);
+  // One sequencer tick per frame, shared by every scene: a song
+  // started in one scene keeps playing across scene switches.
+  if (needsSong) out.push(`    song_tick();`);
   out.push(`    match scene {`);
   out.push(arms);
   out.push(`    }`);

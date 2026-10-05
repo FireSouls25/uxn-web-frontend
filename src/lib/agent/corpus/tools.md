@@ -60,7 +60,15 @@ Every tool validates like the UI; the backend compiler is final arbiter.
   leaf — the draw loop unrolls the declared size),
   `show`/`hide` (alive bit on/off without running destroy events),
   `play {sound}` (named one-shot SFX — see below),
-  `goto {scene}`, `destroy {target?}` (self default, else
+  `song {song}` (start a named 4-voice loop in the shared
+  sequencer; one loop plays at a time and keeps playing across
+  scene switches), `song_stop` (silence it),
+  `goto {scene}`,
+  `overlay {scene}` (push the current scene, enter the target as a
+  **fresh instance** — its setup runs again, so it is menu
+  navigation, NOT freeze-pause), `back` (pop to the scene below;
+  8 deep, overflow and popping an empty stack are silent no-ops),
+  `destroy {target?}` (self default, else
   `any|solid|player|movable|def:<id>` unrolled statically like
   collide pairs, victim destroy fns run first under the alive
   guard, max 12 victims),
@@ -93,12 +101,18 @@ Every tool validates like the UI; the backend compiler is final arbiter.
   either VM, so there is no held-key operand — key events stay
   press-edge); then/else hold nested block lists (max depth 3,
   addressed `1.then` in add/delete_block `path`).
+* Dialogue labels: `set_label {object, text?}` — 1–24 printable
+  ASCII chars drawn at the object's position in 8px 1bpp cells.
+  Glyphs are prerendered into a per-leaf ROM blob at emit, so a
+  labeled project never imports `lib/font.ux`. Per-instance state:
+  a template never carries one, and the blits follow the alive bit
+  (a destroyed object takes its label with it).
 * `preview_event {def|object, event}` — the exact lines the emitter
   writes (same function; preview and build cannot disagree).
   `delete_event` / `delete_block {index}` for iteration.
-* Frame order: input latch → drive → anims → scene transitions →
-  object key → object click → step (+ legacy tick text, blocks
-  first) → collide → alarm → custom/frameCode → draw. Collide is
+* Frame order: song tick → input latch → drive → anims → scene
+  transitions → object key → object click → step (+ legacy tick
+  text, blocks first) → collide → alarm → custom/frameCode → draw. Collide is
   level-triggered while overlapping; destroyed leaves go quiet
   (draw, drive, collide and handlers all check the alive bit).
   Collide pairs unroll per scene (max 48 — narrow targets or split
@@ -128,6 +142,18 @@ Every tool validates like the UI; the backend compiler is final arbiter.
   voice editor for the library (same ranges as the boot mix).
 * `rename_sound {from, to}` — play blocks follow. `delete_sound`
   is refused while a play block names the sound.
+* Songs (music): `create_song {name}` — named 4-voice loop, **max 16
+  steps per voice** (the live track buffers are 16 bytes per voice:
+  128 bytes of RAM). `set_song_note {song, voice 0-3, step 0-15,
+  pitch 0-107, len 1-255}` (omit pitch for a rest; pitch 127 is the
+  rest marker from `lib/song.ux`),
+  `set_song_vol {song, voice, vol 0-255}` (vol 0 = silent, and a
+  voice with no audible notes never gets an Audio device),
+  `rename_song {from, to}` (song blocks follow), `delete_song`
+  (refused while a song block names it). One loop plays at a time
+  through `song_tick()`, called once per frame from `on_frame` —
+  a single shared square wave per voice, so tempo is the tick rate,
+  not sample-accurate.
 * `add_anim_frame {anim, sprite}` — append a frame (same tile size;
   max 16). `set_anim {anim, rate?, loop?, pingpong?}` — tune ticks
   per frame, wrap, bounce at the ends (needs loop + 2+ frames).

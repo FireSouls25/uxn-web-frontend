@@ -579,6 +579,51 @@ VM-impossible.
   pairing/ranges), multi-alarm emit + real-etal assembly,
   agent flows. Suites: 111.
 
+### Phase 12 — Music, labels, scene stack ✅ DONE
+
+*Why:* the last three things a game wants and we had no visual
+form for — a loop that plays while you play, text on screen, and
+a pause/menu that returns you where you were.
+* Model (additive, old emits byte-identical):
+  `songs: {id, tracks[4]}[]` with `SongNote {pitch 0-107 | 127,
+  len 1-255}`, ≤16 steps per voice (the live track buffers are 16
+  bytes per voice — 128 bytes of RAM, a real cap, not a UI whim);
+  blocks `song {song}`, `song_stop`, `overlay {scene}`, `back`;
+  `SceneNode.label` — 1–24 printable ASCII, per-instance state.
+* Emitter: shared 4-voice sequencer over live buffers
+  (`sglp0..3`/`sgll0..3` pitch+len, `sg_pos/wait/len/vol` per
+  voice, `sg_on`), one `song_<id>_start()` per referenced song
+  that copies its 16 steps in, and `song_tick()` called once per
+  frame from `on_frame` (before the scene match, so a loop keeps
+  playing across scene switches). Fires through the same `&sq32`
+  square wave as one-shots; voice index = Audio device, and a voice
+  with no audible notes gets neither a device nor a tick arm.
+  Labels prerender their glyphs into `data lbl_<tag>` at emit (from
+  the 8×8 table copied out of `lib/font.ux` into `src/lib/font.ts`)
+  and blit 1bpp, mode 1, inside the leaf's alive guard — so a
+  labeled project pays only the glyphs it uses and never imports
+  the font library. Overlay is a **fresh instance** stack
+  (`ovst[8]`/`ovsp[1]` + `overlay_back()` match arm), NOT
+  freeze-pause: `setup_X` re-runs, so it is menu navigation, and
+  that is documented rather than papered over.
+* UI: `music`/`stop music`/`overlay`/`back` in the Sound and Flow
+  palette groups with per-block pickers (song select + open, scene
+  select); `SongEditor` 4×16 step grid (click a cell to add a note
+  off the C-major ladder, click it again to clear, right-click to
+  clear, hold-length buttons), songs list next to sounds in
+  VoiceList, usage+attach panels shared with one-shots; label field
+  in the inspector with a live `LabelPreview` and on-canvas glyph
+  render, so what you see is the ROM's blit.
+* Agent: `create_song`, `set_song_note`, `set_song_vol`,
+  `rename_song`, `delete_song`, `set_label`; `add_block` gains the
+  four ops; both rag mirrors updated.
+* Tests/docs: song validation (track count, no-notes, pitch/len/
+  step/vol ranges), sequencer emit (data blobs, start fn, tick
+  arms, voice parity with Audio devices), label prerender + blit
+  offsets, overlay stack and its no-op edges, projects without the
+  blocks stay byte-identical, real-etal assembly of all three
+  together. Suites: 118.
+
 ## 4. How the graphical version compiles to our DSL
 
 Same pipeline as today, one new lowering in the middle:

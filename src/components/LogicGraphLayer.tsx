@@ -24,6 +24,7 @@ import {
   addBlockAt,
   addEvent,
   addSnippet,
+  addSong,
   addSound,
   addVariable,
   codeFileStore,
@@ -45,13 +46,14 @@ import {
   selectionStore,
   setObjectNodePos,
   snippetSelStore,
+  songSelStore,
   soundSelStore,
   viewStore,
   viewportStore,
   type EventOwner,
 } from "../lib/store";
 
-const OPS = ["move", "set_pos", "sprite", "show", "hide", "play", "goto", "destroy", "wait", "run", "button", "set", "if"] as const;
+const OPS = ["move", "set_pos", "sprite", "show", "hide", "play", "song", "song_stop", "goto", "overlay", "back", "destroy", "wait", "run", "button", "set", "if"] as const;
 /** Add-palette grouped by what the block does. `code` (legacy
     inline ETAL) is deliberately absent — convert it to a snippet +
     run block instead. Menus are button labels + click/key events +
@@ -59,8 +61,8 @@ const OPS = ["move", "set_pos", "sprite", "show", "hide", "play", "goto", "destr
 export const PALETTE: Array<{ group: string; ops: Array<(typeof OPS)[number]> }> = [
   { group: "ev.cat_move", ops: ["move", "set_pos"] },
   { group: "ev.cat_art", ops: ["sprite", "show", "hide"] },
-  { group: "ev.cat_sound", ops: ["play"] },
-  { group: "ev.cat_flow", ops: ["goto", "wait", "destroy"] },
+  { group: "ev.cat_sound", ops: ["play", "song", "song_stop"] },
+  { group: "ev.cat_flow", ops: ["goto", "overlay", "back", "wait", "destroy"] },
   { group: "ev.cat_data", ops: ["set", "if"] },
   { group: "ev.cat_code", ops: ["run"] },
   { group: "ev.cat_note", ops: ["button"] },
@@ -86,7 +88,11 @@ export function defaultBlockFor(
   spriteId?: string,
 ): Block {
   if (op === "goto") return { op, scene: p.scenes[0]?.id ?? "" };
+  if (op === "overlay") return { op, scene: p.scenes.find((s) => s.id !== p.start)?.id ?? p.scenes[0]?.id ?? "" };
+  if (op === "back") return { op };
+  if (op === "song_stop") return { op };
   if (op === "play") return { op, sound: p.sounds?.[0]?.id ?? addSound(soundName) };
+  if (op === "song") return { op, song: p.songs?.[0]?.id ?? addSong("song") };
   if (op === "wait") return { op, ticks: 30 };
   if (op === "run") return { op, snippet: p.snippets?.[0]?.id ?? addSnippet(snippetName) };
   if (op === "move") return { op, dx: 8, dy: 0 };
@@ -263,7 +269,7 @@ function BlockRow({
           </>
         )}
       </span>
-    ) : block.op === "goto" ? (
+    ) : block.op === "goto" || block.op === "overlay" ? (
       <select
         value={block.scene}
         disabled={locked}
@@ -272,10 +278,54 @@ function BlockRow({
       >
         {project.scenes.map((s) => (
           <option key={s.id} value={s.id}>
-            → {s.id}
+            {block.op === "overlay" ? "⧉ " : "→ "}
+            {s.id}
           </option>
         ))}
       </select>
+    ) : block.op === "song" ? (
+      <span className="flex min-w-0 flex-1 items-center gap-1.5">
+        <select
+          value={(project.songs ?? []).some((s) => s.id === block.song) ? block.song : ""}
+          disabled={locked}
+          onChange={(e) => set({ song: e.target.value })}
+          className="select min-w-0 flex-1"
+        >
+          {(project.songs ?? []).length === 0 && <option value="">{t(lang, "ev.no_songs")}</option>}
+          {(project.songs ?? []).map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.id}
+            </option>
+          ))}
+        </select>
+        {!locked && (
+          <>
+            <button
+              onClick={() => set({ song: addSong("song") })}
+              title={t(lang, "ev.new_song")}
+              aria-label={t(lang, "ev.new_song")}
+              className="grid size-6 shrink-0 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
+            >
+              <Plus size={12} />
+            </button>
+            <button
+              onClick={() => {
+                songSelStore.set(block.song);
+                viewStore.set("sound");
+              }}
+              title={t(lang, "studio.open_sound")}
+              aria-label={t(lang, "studio.open_sound")}
+              className="grid size-6 shrink-0 place-items-center rounded-md font-mono text-[10px] text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
+            >
+              ♪
+            </button>
+          </>
+        )}
+      </span>
+    ) : block.op === "song_stop" || block.op === "back" ? (
+      <span className="font-mono text-[11px] text-subtext0">
+        {t(lang, block.op === "song_stop" ? "ev.stop_song" : "ev.back_stack")}
+      </span>
     ) : block.op === "sprite" ? (
       <select
         value={(project.sprites ?? []).some((s) => s.id === block.sprite) ? block.sprite : ""}

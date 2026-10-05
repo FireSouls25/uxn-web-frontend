@@ -1151,3 +1151,188 @@ describe("execute + button blocks", () => {
     expect(emitProject(migrated)["main.ux"]).toBe(before);
   });
 });
+
+describe("phase C: music, labels, scene stack", () => {
+  const song = (p: Project): void => {
+    p.songs = [
+      {
+        id: "theme",
+        tracks: [
+          { notes: [{ pitch: 48, len: 2 }, { pitch: 52, len: 1 }], vol: 200 },
+          { notes: [{ pitch: 60, len: 4 }], vol: 128 },
+          { notes: [], vol: 0 },
+          { notes: [], vol: 0 },
+        ],
+      },
+    ];
+  };
+
+  it("validates songs", () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    expect(validateProject(p)).toEqual([]);
+    song(p);
+    expect(validateProject(p)).toEqual([]);
+    const bad = structuredClone(p) as Project & { songs: unknown[] };
+    bad.songs = [
+      { id: "theme", tracks: [{ notes: [], vol: 0 }, { notes: [], vol: 0 }, { notes: [], vol: 0 }] },
+    ];
+    expect(validateProject(bad).join()).toContain("exactly 4 tracks");
+    bad.songs = [{ id: "theme", tracks: Array.from({ length: 4 }, () => ({ notes: [], vol: 0 })) }];
+    expect(validateProject(bad).join()).toContain("has no notes");
+    bad.songs = [
+      {
+        id: "theme",
+        tracks: [{ notes: [{ pitch: 200, len: 1 }], vol: 1 }, ...Array.from({ length: 3 }, () => ({ notes: [], vol: 0 }))],
+      },
+    ];
+    expect(validateProject(bad).join()).toContain("pitch must be 0–107");
+    bad.songs = [
+      {
+        id: "theme",
+        tracks: [{ notes: [{ pitch: 60, len: 1 }], vol: 999 }, ...Array.from({ length: 3 }, () => ({ notes: [], vol: 0 }))],
+      },
+    ];
+    expect(validateProject(bad).join()).toContain("vol must be 0–255");
+    bad.songs = [
+      {
+        id: "theme",
+        tracks: [{ notes: Array.from({ length: 17 }, () => ({ pitch: 60, len: 1 })), vol: 1 }, ...Array.from({ length: 3 }, () => ({ notes: [], vol: 0 }))],
+      },
+    ];
+    expect(validateProject(bad).join()).toContain("at most 16 steps");
+  });
+
+  it("lowers play_song/stop to the shared sequencer and ticks it once a frame", async () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    song(p);
+    p.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      {
+        id: "ev_1",
+        trigger: "create",
+        blocks: [
+          { op: "song", song: "theme" },
+          { op: "song_stop" },
+          { op: "song", song: "theme" },
+        ],
+      },
+    ];
+    expect(validateProject(p)).toEqual([]);
+    const main = emitProject(p)["main.ux"];
+    expect(main).toContain("data sg_theme_v0p = [48, 52");
+    expect(main).toContain("data sg_theme_v0l = [2, 1");
+    expect(main).toContain("song_theme_start :: fn() {");
+    expect(main).toContain("sg_len2 = 0;");
+    expect(main).toContain("sg_len0: u8 = 0;");
+    expect(main).toContain("sg_vol1 = 128;");
+    expect(main).toContain("song_tick();");
+    expect(main).toContain("if sg_on == 0 { return; }");
+    // Only voices with audible notes get Audio devices and tick arms.
+    expect(main).toContain("Audio0");
+    expect(main).not.toContain("Audio2");
+    // A song nobody plays costs nothing.
+    const bare = structuredClone(SAMPLE_PROJECT);
+    song(bare);
+    expect(emitProject(bare)["main.ux"]).not.toContain("song_tick");
+    // Empty tracks declare their length 0 in the start fn.
+    const { previewBlocks, soundMap, snippetMap, songMap } = await import("./project");
+    expect(
+      previewBlocks([{ op: "song", song: "nope" }], {
+        slot: "slot",
+        w: 128,
+        h: 128,
+        sounds: soundMap(p),
+        snippets: snippetMap(p),
+        songs: songMap(p),
+      }),
+    ).toEqual(["( unknown song 'nope' )"]);
+    expect(
+      previewBlocks([{ op: "song", song: "theme" }], {
+        slot: "slot",
+        w: 128,
+        h: 128,
+        sounds: soundMap(p),
+        snippets: snippetMap(p),
+      }),
+    ).toEqual(["( unknown song 'theme' )"]);
+  });
+
+  it("prerenders labels to glyph blobs and blits them over the art", async () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    const hero = p.scenes[0].nodes.find((o) => o.id === "hero")!;
+    hero.label = "HI";
+    expect(validateProject(p)).toEqual([]);
+    const main = emitProject(p)["main.ux"];
+    expect(main).toMatch(/data lbl_title_hero = \[0x66, 0x66, 0x66, 0x7e/);
+    expect(main).toContain("Screen.addr = &lbl_title_hero + 0;");
+    expect(main).toContain("Screen.addr = &lbl_title_hero + 8;");
+    expect(main).toContain("Screen.sprite = 1;");
+    expect(main).not.toContain("data font8x8");
+    // Validation gates the label charset and length.
+    const long = structuredClone(p);
+    long.scenes[0].nodes.find((o) => o.id === "hero")!.label = "x".repeat(25);
+    expect(validateProject(long).join()).toContain("1–24 printable ASCII");
+    const uni = structuredClone(p);
+    uni.scenes[0].nodes.find((o) => o.id === "hero")!.label = "caf\u00e9";
+    expect(validateProject(uni).join()).toContain("1–24 printable ASCII");
+  });
+
+  it("pushes and pops the overlay stack around a fresh instance", async () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    p.scenes.push({ id: "menu", nodes: [], clicks: [], keys: [] });
+    p.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_1", trigger: "create", blocks: [{ op: "overlay", scene: "menu" }] },
+      { id: "ev_2", trigger: "step", blocks: [{ op: "back" }] },
+    ];
+    expect(validateProject(p)).toEqual([]);
+    const main = emitProject(p)["main.ux"];
+    expect(main).toContain("buffer ovst[8]: u8;");
+    expect(main).toContain("buffer ovsp[1]: u8;");
+    expect(main).toContain("ovst[ovsp[0]] = scene;");
+    expect(main).toContain("setup_menu();");
+    expect(main).toContain("scene_go(SC_MENU);");
+    expect(main).toContain("overlay_back :: fn() {");
+    expect(main).toContain("setup_title();");
+    // Projects without overlay/back blocks stay byte-identical.
+    const bare = structuredClone(SAMPLE_PROJECT);
+    expect(emitProject(bare)["main.ux"]).not.toContain("ovst");
+    const { previewBlocks, soundMap, snippetMap, songMap } = await import("./project");
+    const ctx = {
+      slot: "slot",
+      w: 128,
+      h: 128,
+      sounds: soundMap(p),
+      snippets: snippetMap(p),
+      songs: songMap(p),
+    };
+    expect(previewBlocks([{ op: "back" }], ctx)).toEqual(["overlay_back();"]);
+    const bad = structuredClone(p);
+    bad.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_1", trigger: "create", blocks: [{ op: "overlay", scene: "ghost" }] },
+    ];
+    expect(validateProject(bad).join()).toContain("overlay unknown scene 'ghost'");
+  });
+
+  it("assembles music + labels + overlay with the real etal", async () => {
+    const p = structuredClone(SAMPLE_PROJECT);
+    song(p);
+    p.scenes.push({ id: "menu", nodes: [], clicks: [], keys: [] });
+    p.scenes[0].nodes.find((o) => o.id === "hero")!.label = "SCORE 0";
+    p.scenes[0].nodes.find((o) => o.id === "hero")!.events = [
+      { id: "ev_1", trigger: "create", blocks: [{ op: "song", song: "theme" }] },
+      { id: "ev_2", trigger: "step", blocks: [{ op: "overlay", scene: "menu" }, { op: "back" }, { op: "song_stop" }] },
+    ];
+    expect(validateProject(p)).toEqual([]);
+    const etal =
+      process.env.ETAL_BIN ?? "/home/grim/Documents/projects/uxn-webpage/uxn-dsl/build/linux-x86/etal";
+    if (!existsSync(etal)) {
+      console.warn("skip: no etal binary");
+      return;
+    }
+    const dir = mkdtempSync(join(tmpdir(), "uxn-phasec-"));
+    for (const [name, content] of Object.entries(emitProject(p))) {
+      writeFileSync(join(dir, name), content);
+    }
+    execFileSync(etal, ["-r", join(dir, "main.ux"), "-o", join(dir, "main.rom")], { stdio: "pipe" });
+    expect(existsSync(join(dir, "main.rom"))).toBe(true);
+  });
+});

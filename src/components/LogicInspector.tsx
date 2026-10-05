@@ -9,6 +9,7 @@ import { flattenScene, projectDefs, type EventTrigger, type FlatLeaf } from "../
 import {
   addBlock,
   addEvent,
+  addSong,
   addSound,
   codeFileStore,
   currentScene,
@@ -105,6 +106,20 @@ export default function LogicInspector() {
       if (!id) return;
     }
     addBlock(owner, id, { op: "play", sound: sid });
+    setEvId(id);
+  }
+
+  /** Same attach, for a whole song: creates the library entry when the
+      project has none, so the block is never dangling. */
+  function attachSong() {
+    if (!owner || locked) return;
+    const sid = project.songs?.[0]?.id ?? addSong("song");
+    let id: string | null = event?.id ?? null;
+    if (!id) {
+      id = addEvent(owner, "step");
+      if (!id) return;
+    }
+    addBlock(owner, id, { op: "song", song: sid });
     setEvId(id);
   }
 
@@ -259,11 +274,25 @@ export default function LogicInspector() {
             <Plus size={12} /> {t(lang, "ev.op_play")}
           </button>
           <button
+            draggable={!locked}
+            onDragStart={(e) => {
+              e.dataTransfer.effectAllowed = "copy";
+              e.dataTransfer.setData("application/x-block-new", JSON.stringify({ op: "song" }));
+            }}
+            onClick={attachSong}
+            title={t(lang, "song.hint")}
+            disabled={locked}
+            className="inline-flex flex-1 cursor-grab items-center justify-center gap-1 rounded-lg bg-surface1 px-3 py-1.5 font-mono text-[11px] text-text active:cursor-grabbing disabled:opacity-50"
+          >
+            <Plus size={12} /> {t(lang, "ev.op_song")}
+          </button>
+          <button
             onClick={() => {
               viewStore.set("sound");
             }}
             title={t(lang, "studio.open_sound")}
-            className="rounded-lg bg-surface0 px-3 py-1.5 font-mono text-[11px] text-subtext0 transition-colors hover:bg-surface1 hover:text-text"
+            aria-label={t(lang, "studio.open_sound")}
+            className="grid place-items-center rounded-lg bg-surface0 px-2.5 py-1.5 font-mono text-[11px] text-subtext0 transition-colors hover:bg-surface1 hover:text-text"
           >
             ♪
           </button>

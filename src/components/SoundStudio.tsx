@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useStore } from "@nanostores/react";
 import { Link2, Play } from "lucide-react";
+import SongEditor from "./SongEditor";
 import SoundEditor from "./SoundEditor";
 import SoundMixer, { testTone } from "./SoundMixer";
 import VoiceEditor from "./VoiceEditor";
@@ -15,6 +16,7 @@ import {
   projectStore,
   sceneIdStore,
   selectionStore,
+  songSelStore,
   soundSelStore,
   viewStore,
   voiceSelStore,
@@ -22,10 +24,11 @@ import {
 } from "../lib/store";
 
 /* Full-page sound studio. Uxn limits stay: 4 voices (index = Audio
-   device), MIDI notes 0-107, one shared square wave; named sounds are
-   one-shot and fire from play blocks. Music = chained one-shots
-   (sequence with wait blocks). Columns: library + boot mix / editor /
-   usage + attach (join a sound to an object event or scene enter). */
+   device), MIDI notes 0-107, one shared square wave. Two libraries
+   share those voices: named sounds are one-shots that fire from play
+   blocks, named songs are 4-voice loops the shared sequencer ticks
+   every frame (Phase C). Columns: libraries + boot mix / editor /
+   usage + attach (join either to an object event or scene enter). */
 interface Usage {
   sceneId: string;
   path: string;
@@ -34,7 +37,11 @@ interface Usage {
   block: number;
 }
 
-function usagesOf(project: ReturnType<typeof projectStore.get>, soundId: string): Usage[] {
+function usagesOf(
+  project: ReturnType<typeof projectStore.get>,
+  id: string,
+  op: "play" | "song",
+): Usage[] {
   const out: Usage[] = [];
   for (const s of project.scenes) {
     let leaves;
@@ -47,8 +54,9 @@ function usagesOf(project: ReturnType<typeof projectStore.get>, soundId: string)
       if (l.path.includes("/")) continue;
       for (const e of l.events ?? []) {
         e.blocks.forEach((b, i) => {
-          if (b.op === "play" && b.sound === soundId)
-            out.push({ sceneId: s.id, path: l.path, label: l.id, eventId: e.id, block: i });
+          const named = op === "play" ? (b as { op: string }).op === "play" && (b as { sound?: string }).sound === id
+            : (b as { op: string }).op === "song" && (b as { song?: string }).song === id;
+          if (named) out.push({ sceneId: s.id, path: l.path, label: l.id, eventId: e.id, block: i });
         });
       }
     }
@@ -56,7 +64,7 @@ function usagesOf(project: ReturnType<typeof projectStore.get>, soundId: string)
   return out;
 }
 
-function AttachPanel({ soundId }: { soundId: string }) {
+function AttachPanel({ id, op }: { id: string; op: "play" | "song" }) {
   const lang = useLang();
   const project = useStore(projectStore);
   const [scene, setScene] = useState(project.scenes[0]?.id ?? "");
@@ -124,7 +132,7 @@ function AttachPanel({ soundId }: { soundId: string }) {
                     : undefined,
               );
             if (ev) {
-              addBlock(owner, ev, { op: "play", sound: soundId });
+              addBlock(owner, ev, op === "song" ? { op: "song", song: id } : { op: "play", sound: id });
               sceneIdStore.set(sc.id);
               canvasModeStore.set("logic");
               viewStore.set("events");
@@ -132,9 +140,11 @@ function AttachPanel({ soundId }: { soundId: string }) {
           }}
           className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-[12px] font-semibold text-black disabled:opacity-50"
         >
-          <Link2 size={13} /> {t(lang, "studio.attach")} · {soundId}
+          <Link2 size={13} /> {t(lang, "studio.attach")} · {id}
         </button>
-        <p className="font-mono text-[10px] leading-relaxed text-overlay0">{t(lang, "sound.library_hint")}</p>
+        <p className="font-mono text-[10px] leading-relaxed text-overlay0">
+          {t(lang, op === "song" ? "song.hint" : "sound.library_hint")}
+        </p>
       </div>
     </div>
   );
@@ -145,10 +155,15 @@ export default function SoundStudio() {
   const project = useStore(projectStore);
   const soundSel = useStore(soundSelStore);
   const voice = useStore(voiceSelStore);
+  const songSel = useStore(songSelStore);
   const sound = (project.sounds ?? []).find((s) => s.id === soundSel) ?? null;
+  const song = (project.songs ?? []).find((s) => s.id === songSel) ?? null;
   const locked = !!project.locked;
 
-  const usages = useMemo(() => (sound ? usagesOf(project, sound.id) : []), [project, sound]);
+  const usages = useMemo(
+    () => (sound ? usagesOf(project, sound.id, "play") : song ? usagesOf(project, song.id, "song") : []),
+    [project, sound, song],
+  );
 
   function audition() {
     if (!sound) return;
@@ -173,7 +188,9 @@ export default function SoundStudio() {
         <section className="dock min-w-0 rounded-2xl p-4">
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
-              {sound ? (
+              {song ? (
+                <>{t(lang, "song.library")} · <span className="text-text">{song.id}</span></>
+              ) : sound ? (
                 <>{t(lang, "sound.library")} · <span className="text-text">{sound.id}</span></>
               ) : (
                 <>{t(lang, "sound.voices")} · <span className="text-text">{t(lang, "sound.once")}</span></>
@@ -188,7 +205,7 @@ export default function SoundStudio() {
               </button>
             )}
           </div>
-          {sound ? <SoundEditor id={sound.id} /> : (
+          {song ? <SongEditor id={song.id} /> : sound ? <SoundEditor id={sound.id} /> : (
             <div className="space-y-4">
               <SoundMixer />
               <div>
@@ -203,9 +220,9 @@ export default function SoundStudio() {
         <section className="dock h-fit space-y-3 rounded-2xl p-3 lg:sticky lg:top-3">
           <div>
             <p className="mb-2 font-mono text-[11px] uppercase tracking-widest text-subtext0">
-              {t(lang, "studio.usage")} {sound ? `· ${usages.length}` : ""}
+              {t(lang, "studio.usage")} {sound || song ? `· ${usages.length}` : ""}
             </p>
-            {!sound ? (
+            {!sound && !song ? (
               <p className="rounded-xl border border-dashed border-surface1 px-3 py-3 text-center text-[13px] text-subtext0">
                 {t(lang, "studio.no_sound")}
               </p>
@@ -230,7 +247,7 @@ export default function SoundStudio() {
               </ul>
             )}
           </div>
-          {sound && <AttachPanel soundId={sound.id} />}
+          {(sound || song) && <AttachPanel id={(sound ?? song)!.id} op={song ? "song" : "play"} />}
         </section>
       </div>
     </div>

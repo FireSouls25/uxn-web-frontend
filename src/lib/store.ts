@@ -4,6 +4,7 @@
    SessionBanner), so nothing implies saving that isn't happening. */
 import { atom, computed } from "nanostores";
 import {
+  MAX_SONG_STEPS,
   MAX_SPRITE_TILES,
   SAMPLE_PROJECT,
   eachBlock,
@@ -130,6 +131,8 @@ export const codeFileStore = atom<string>("main.ux");
 /** Selected named snippet (Code page edits it). Independent from
     codeFileStore: files and snippets share the editor shell. */
 export const snippetSelStore = atom<string | null>(null);
+/** Selected named song (Sound page edits it). */
+export const songSelStore = atom<string | null>(null);
 export const viewStore = atom<"scene" | "sprites" | "events" | "sound" | "code">("scene");
 
 /* Canvas-first studio chrome. viewStore above now only opens the
@@ -452,6 +455,20 @@ export function patchObject(objectId: string, patch: Partial<SceneNode>): void {
   }));
 }
 
+/** Set (or clear) a leaf's dialogue label. Printable ASCII only, 24
+    chars max — the same gate validation applies, refused here so the
+    editor and the agent cannot write an unassemblable label. */
+export function setLeafLabel(leafId: string, label: string | undefined): string | null {
+  const p = projectStore.get();
+  const scene = currentScene(p, sceneIdStore.get());
+  const node = scene.nodes.find((o) => o.id === leafId && !o.scene);
+  if (!node) return `unknown leaf '${leafId}'`;
+  if (label !== undefined && (label.length === 0 || label.length > 24 || /[^\x20-\x7e]/.test(label)))
+    return "label must be 1–24 printable ASCII chars";
+  patchObject(leafId, { label });
+  return null;
+}
+
 /* Object events: GameMaker-style trigger lists on defs and inline
    leaves. Owners address a def or a top-level leaf of the current
    scene; nested leaves inherit home-leaf events (edit them there). */
@@ -540,7 +557,10 @@ export function deleteEvent(owner: EventOwner, eventId: string): boolean {
   return writeOwnerEvents(owner, (events) => events.filter((e) => e.id !== eventId));
 }
 
-const BLOCK_OPS = ["move", "set_pos", "play", "goto", "destroy", "wait", "code", "run", "button", "sprite", "show", "hide", "set", "if"];
+const BLOCK_OPS = [
+  "move", "set_pos", "play", "song", "song_stop", "goto", "overlay", "back",
+  "destroy", "wait", "code", "run", "button", "sprite", "show", "hide", "set", "if",
+];
 
 /** Immutable read of a (possibly nested) list. */
 function readBlocksAt(blocks: Block[], parent: (number | "then" | "else")[]): Block[] | null {
@@ -1540,6 +1560,130 @@ export function deleteVariable(variableId: string): string | null {
   if (!(p.vars ?? []).some((v) => v.id === variableId)) return `unknown variable '${variableId}'`;
   if (varUsed(p, variableId)) return `variable '${variableId}' is used by a set/if block`;
   updateCurrent((prev) => ({ ...prev, vars: (prev.vars ?? []).filter((v) => v.id !== variableId) }));
+  return null;
+}
+
+/* Named song loops: the Phase C library behind song blocks. Same
+   contract as sounds/snippets (unique ids, refcounted delete), with
+   a 4x16 step grid. Songs play through the shared sequencer, so one
+   loops across scene switches. */
+
+/** Add a song with a short audible arpeggio on voice 0, so the new
+    entry validates immediately. Selects it. */
+export function addSong(name: string): string {
+  const p = projectStore.get();
+  let base = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24) || "song";
+  if (!/^[A-Za-z]/.test(base)) base = `song_${base}`;
+  let id = base;
+  let n = 2;
+  const songs = p.songs ?? [];
+  while (songs.some((s) => s.id === id)) id = `${base}_${n++}`;
+  updateCurrent((prev) => ({
+    ...prev,
+    songs: [
+      ...(prev.songs ?? []),
+      {
+        id,
+        tracks: [
+          { notes: [{ pitch: 60, len: 2 }, { pitch: 64, len: 2 }, { pitch: 67, len: 2 }, { pitch: 72, len: 2 }], vol: 180 },
+          { notes: [], vol: 0 },
+          { notes: [], vol: 0 },
+          { notes: [], vol: 0 },
+        ],
+      },
+    ],
+  }));
+  songSelStore.set(id);
+  return id;
+}
+
+/** Rename a song id everywhere song blocks reference it. */
+export function renameSong(oldId: string, newId: string): string | null {
+  const clean = newId.trim().slice(0, 24);
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(clean)) return "bad id";
+  const p = projectStore.get();
+  if (oldId !== clean && (p.songs ?? []).some((s) => s.id === clean)) return "duplicate id";
+  const retarget = (blocks: Block[]): Block[] =>
+    blocks.map((b) => (b.op === "song" && b.song === oldId ? { ...b, song: clean } : b));
+  updateCurrent((prev) => ({
+    ...prev,
+    songs: (prev.songs ?? []).map((s) => (s.id === oldId ? { ...s, id: clean } : s)),
+    objectDefs: projectDefs(prev).map((d) => ({
+      ...d,
+      events: (d.events ?? []).map((e) => ({ ...e, blocks: retarget(e.blocks) })),
+    })),
+    scenes: prev.scenes.map((s) => ({
+      ...s,
+      nodes: s.nodes.map((o) =>
+        !o.scene && !o.def && o.events ? { ...o, events: o.events.map((e) => ({ ...e, blocks: retarget(e.blocks) })) } : o,
+      ),
+    })),
+  }));
+  if (songSelStore.get() === oldId) songSelStore.set(clean);
+  return null;
+}
+
+/** Set one step of a song voice. `null` pitch clears the step; out of
+    range values are refused rather than clamped (validation is the
+    contract, the editor never writes an invalid project). */
+export function setSongNote(songId: string, voice: number, step: number, pitch: number | null, len = 2): string | null {
+  const p = projectStore.get();
+  if (!(p.songs ?? []).some((s) => s.id === songId)) return `unknown song '${songId}'`;
+  if (!Number.isInteger(voice) || voice < 0 || voice > 3) return "voice must be 0–3";
+  if (!Number.isInteger(step) || step < 0 || step >= MAX_SONG_STEPS) return `step must be 0–${MAX_SONG_STEPS - 1}`;
+  if (pitch !== null && !(Number.isInteger(pitch) && ((pitch >= 0 && pitch <= 107) || pitch === 127)))
+    return "pitch must be 0–107 or 127 (rest)";
+  const l = Math.min(255, Math.max(1, Math.round(len)));
+  updateCurrent((prev) => ({
+    ...prev,
+    songs: (prev.songs ?? []).map((s) =>
+      s.id !== songId
+        ? s
+        : {
+            ...s,
+            tracks: s.tracks.map((tr, vi) => {
+              if (vi !== voice) return tr;
+              const notes = tr.notes.slice();
+              while (notes.length < step) notes.push({ pitch: 127, len: 1 });
+              if (pitch === null) notes.length = Math.min(notes.length, step);
+              else notes[step] = { pitch, len: l };
+              return { ...tr, notes };
+            }),
+          },
+    ),
+  }));
+  return null;
+}
+
+/** Set a song voice's volume. */
+export function setSongVol(songId: string, voice: number, vol: number): string | null {
+  const p = projectStore.get();
+  if (!(p.songs ?? []).some((s) => s.id === songId)) return `unknown song '${songId}'`;
+  if (!Number.isInteger(voice) || voice < 0 || voice > 3) return "voice must be 0–3";
+  if (!Number.isInteger(vol) || vol < 0 || vol > 255) return "vol must be 0–255";
+  updateCurrent((prev) => ({
+    ...prev,
+    songs: (prev.songs ?? []).map((s) =>
+      s.id === songId ? { ...s, tracks: s.tracks.map((tr, i) => (i === voice ? { ...tr, vol } : tr)) } : s,
+    ),
+  }));
+  return null;
+}
+
+/** Delete a named song. Refused while a song block names it. */
+export function deleteSong(songId: string): string | null {
+  const p = projectStore.get();
+  if (!(p.songs ?? []).some((s) => s.id === songId)) return `unknown song '${songId}'`;
+  const used =
+    projectDefs(p).some((d) => (d.events ?? []).some((e) => e.blocks.some((b) => b.op === "song" && b.song === songId))) ||
+    p.scenes.some((s) =>
+      s.nodes.some(
+        (o) => !o.scene && (o.events ?? []).some((e) => e.blocks.some((b) => b.op === "song" && b.song === songId)),
+      ),
+    );
+  if (used) return `song '${songId}' is used by a song block`;
+  updateCurrent((prev) => ({ ...prev, songs: (prev.songs ?? []).filter((s) => s.id !== songId) }));
+  if (songSelStore.get() === songId) songSelStore.set(null);
   return null;
 }
 

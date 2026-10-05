@@ -19,6 +19,7 @@ import {
   addObject,
   addScene,
   addSnippet,
+  addSong,
   addSound,
   addSprite,
   addVariable,
@@ -27,6 +28,7 @@ import {
   deleteBlockAt,
   deleteEvent,
   deleteNode,
+  deleteSong,
   deleteSound,
   deleteVariable,
   extractObject,
@@ -38,15 +40,19 @@ import {
   projectStore,
   readList,
   renameObject,
+  renameSong,
   renameSound,
   renameVariable,
   reorderNodes,
   sceneIdStore,
   selectionStore,
+  setLeafLabel,
   setMask,
   setObjectPos,
   setSceneFrameCode,
   setSnippetCode,
+  setSongNote,
+  setSongVol,
   setSoundVoice,
   setSpritePixels,
   setTheme,
@@ -231,18 +237,19 @@ export const TOOLS: ToolDef[] = [
   {
     name: "add_block",
     description:
-      "Append a visual action to an event (see add_event). Ops: move {dx,dy} (pixels, clamped), set_pos {x,y}, sprite {sprite} (swap art, same tile size), show/hide (alive bit, no destroy event), play {sound} (named one-shot SFX — see create_sound), goto {scene}, destroy {target?} (self default, else any|solid|player|movable|def:<id> unrolled like collide), wait {ticks 1-255, slot?} (arms the alarm event with the same slot), run {snippet} (named ETAL snippet — see add_snippet), code {code} (legacy inline ETAL, prefer run), button {label, action} (labeled annotation, lowers to a comment), set {variable, set_mode, set_value} (named u16 variable — see add_variable), if {if_left, if_op, if_right} (branch with then/else block lists; operands kind:ref). Every op lowers to fixed ETAL — use preview_event to see it.",
+      "Append a visual action to an event (see add_event). Ops: move {dx,dy} (pixels, clamped), set_pos {x,y}, sprite {sprite} (swap art, same tile size), show/hide (alive bit, no destroy event), play {sound} (named one-shot SFX — see create_sound), song {song} (start a named 4-voice loop — see create_song), song_stop (silence the loop), goto {scene}, overlay {scene} (push the current scene and enter the target fresh — pause menus), back (pop to the scene below), destroy {target?} (self default, else any|solid|player|movable|def:<id> unrolled like collide), wait {ticks 1-255, slot?} (arms the alarm event with the same slot), run {snippet} (named ETAL snippet — see add_snippet), code {code} (legacy inline ETAL, prefer run), button {label, action} (labeled annotation, lowers to a comment), set {variable, set_mode, set_value} (named u16 variable — see add_variable), if {if_left, if_op, if_right} (branch with then/else block lists; operands kind:ref). Every op lowers to fixed ETAL — use preview_event to see it.",
     params: {
       def: { type: "string", description: "Object template id (exactly one of def/object)" },
       object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
       event: { type: "string", required: true, description: "Event id from add_event" },
-      op: { type: "string", required: true, description: "move|set_pos|sprite|show|hide|play|goto|destroy|wait|run|code|button|set|if" },
+      op: { type: "string", required: true, description: "move|set_pos|sprite|show|hide|play|song|song_stop|goto|overlay|back|destroy|wait|run|code|button|set|if" },
       dx: { type: "number", description: "move: pixels" },
       dy: { type: "number", description: "move: pixels" },
       x: { type: "number", description: "set_pos: pixels" },
       y: { type: "number", description: "set_pos: pixels" },
       sound: { type: "string", description: "play: named sound id (see create_sound)" },
-      scene: { type: "string", description: "goto: target scene" },
+      song: { type: "string", description: "song: named song id (see create_song)" },
+      scene: { type: "string", description: "goto/overlay: target scene" },
       target: { type: "string", description: "destroy: self default, else any|solid|player|movable|def:<id>" },
       sprite: { type: "string", description: "sprite: sprite id, same tile size as the leaf" },
       ticks: { type: "number", description: "wait: 1-255" },
@@ -552,6 +559,99 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "create_song",
+    description:
+      "Add a named song loop to the Sound library: four sequencer voices, at most 16 steps each (MIDI pitch 0-107, len = ticks held). One loop plays at a time through the shared sequencer; start it with a song block and silence it with song_stop. Zero-vol voices and empty steps are rests, so a voice with no notes never gets an Audio device.",
+    params: {
+      name: { type: "string", required: true, description: "Display name, becomes the id when valid" },
+    },
+    run: (args) => {
+      const id = addSong(str(args["name"], "song"));
+      return { ok: true, message: `song ${id}`, data: { id } };
+    },
+  },
+  {
+    name: "set_song_note",
+    description:
+      "Set one step of a song voice: MIDI pitch 0-107, len 1-255 ticks. Pitch 127 (or omitted) makes the step a rest and a zero-length rest is left as-is; the loop always covers steps 0..(highest set step).",
+    params: {
+      song: { type: "string", required: true, description: "Song id from create_song" },
+      voice: { type: "number", required: true, description: "0-3" },
+      step: { type: "number", required: true, description: "0-15" },
+      pitch: { type: "number", description: "MIDI 0-107, omit for a rest" },
+      len: { type: "number", description: "Ticks held, 1-255 (default 2)" },
+    },
+    run: (args) => {
+      const err = setSongNote(
+        str(args["song"]),
+        num(args["voice"]),
+        num(args["step"]),
+        args["pitch"] === undefined ? null : num(args["pitch"]),
+        num(args["len"], 2),
+      );
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: `song ${args["song"]} voice ${args["voice"]} step ${args["step"]} set` };
+    },
+  },
+  {
+    name: "set_song_vol",
+    description: "Set a song voice's volume: 0 (silent, no Audio device) to 255.",
+    params: {
+      song: { type: "string", required: true, description: "Song id from create_song" },
+      voice: { type: "number", required: true, description: "0-3" },
+      vol: { type: "number", required: true, description: "0-255" },
+    },
+    run: (args) => {
+      const err = setSongVol(str(args["song"]), num(args["voice"]), num(args["vol"]));
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: `song ${args["song"]} voice ${args["voice"]} volume set` };
+    },
+  },
+  {
+    name: "rename_song",
+    description: "Rename a song id everywhere song blocks reference it.",
+    params: {
+      from: { type: "string", required: true, description: "Current song id" },
+      to: { type: "string", required: true, description: "New id (letter first, letters/digits/_)" },
+    },
+    run: (args) => {
+      const err = renameSong(str(args["from"]), str(args["to"]));
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: `song ${args["to"]}` };
+    },
+  },
+  {
+    name: "delete_song",
+    description: "Delete a song. Refused while a song block names it.",
+    params: {
+      song: { type: "string", required: true, description: "Song id" },
+    },
+    run: (args) => {
+      const err = deleteSong(str(args["song"]));
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: "song deleted" };
+    },
+  },
+  {
+    name: "set_label",
+    description:
+      "Set a dialogue label on a top-level leaf ({object} in the current scene): 1-24 printable ASCII chars, drawn at the object's position in 8px 1bpp cells (the baked 8x8 font, no import). Omit the text to clear it. Labels are per-instance state, so a template never carries one.",
+    params: {
+      object: { type: "string", required: true, description: "Top-level leaf id in the current scene" },
+      text: { type: "string", description: "1-24 printable ASCII chars, omit to clear" },
+    },
+    run: (args) => {
+      const raw = args["text"] === undefined ? "" : str(args["text"]);
+      const text = raw.replace(/[^\x20-\x7e]/g, "").slice(0, 24);
+      // Labels are per-instance state: a template never carries one,
+      // so there is no def form here.
+      if (!str(args["object"])) return { ok: false, message: "name the leaf with {object}" };
+      const err = setLeafLabel(str(args["object"]), text || undefined);
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: text ? `label '${text}' set` : "label cleared" };
+    },
+  },
+  {
     name: "set_mask",
     description:
       "Set the hitbox on a template ({def}) or a top-level leaf ({object}): pixel offsets inside the sprite, the body for collision and clicks (drive keeps full bounds). Omit x/y/w/h to clear back to the whole sprite.",
@@ -822,6 +922,16 @@ function blockOf(args: Record<string, unknown>): Block | null {
     if (!str(args["scene"])) return null;
     return { op, scene: str(args["scene"]) };
   }
+  if (op === "song") {
+    if (!str(args["song"])) return null;
+    return { op, song: str(args["song"]) };
+  }
+  if (op === "song_stop") return { op };
+  if (op === "overlay") {
+    if (!str(args["scene"])) return null;
+    return { op, scene: str(args["scene"]) };
+  }
+  if (op === "back") return { op };
   if (op === "destroy") {
     const target = str(args["target"]);
     if (target && target !== "self") return { op, target };

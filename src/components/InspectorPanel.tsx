@@ -20,6 +20,7 @@ import {
   setObjectPos,
 } from "../lib/store";
 import KeyPicker from "./KeyPicker";
+import LabelPreview from "./LabelPreview";
 import MaskEditor from "./MaskEditor";
 import SpritePicker, { SpriteThumb } from "./SpritePicker";
 
@@ -314,6 +315,25 @@ export default function InspectorPanel({ hideCode = false }: { hideCode?: boolea
               />
             </div>
           ))}
+          <label className="block">
+            <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
+              {t(lang, "insp.label")}
+            </span>
+            <input
+              value={obj.label ?? ""}
+              maxLength={24}
+              aria-label={t(lang, "insp.label")}
+              placeholder={t(lang, "insp.label_ph")}
+              onChange={(e) => {
+                const clean = e.target.value.replace(/[^\x20-\x7e]/g, "").slice(0, 24);
+                patchObject(obj.id, { label: clean || undefined });
+              }}
+              className="w-full rounded-lg border border-surface1 bg-base px-2 py-1.5 font-mono text-[12px] outline-none placeholder:text-overlay0 focus:border-mauve"
+            />
+            {obj.label && (
+              <LabelPreview text={obj.label} w={spritePxOf(project, eff?.sprite ?? "")[0]} />
+            )}
+          </label>
           {toggleRow("solid", t(lang, "insp.solid"))}
           {eff?.kind === "player" && toggleRow("controls", t(lang, "insp.controls"))}
           <div className="rounded-lg border border-surface0 px-3 py-2">

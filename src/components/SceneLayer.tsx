@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
 import { Stamp } from "lucide-react";
 import { themeColors } from "../lib/palette";
+import { glyphRows } from "../lib/font";
 import { t, useLang } from "../lib/i18n";
 import {
   addInstance,
@@ -101,6 +102,19 @@ export default function SceneLayer() {
           const idx = (tx + ty * tw) * 64 + (y % 8) * 8 + (x % 8);
           ctx.fillStyle = pal[(pixels[idx] ?? 0) & 3];
           ctx.fillRect(o.x + x, o.y + y, 1, 1);
+        }
+      }
+      if (o.label) {
+        // Same 1bpp glyphs the emitter bakes into lbl_<tag>, one 8x8
+        // cell per char, drawn at the leaf's top-left like the ROM.
+        ctx.fillStyle = pal[1];
+        for (const [i, ch] of [...o.label].entries()) {
+          const rows = glyphRows(ch.charCodeAt(0));
+          for (let r = 0; r < 8; r++) {
+            for (let b = 0; b < 8; b++) {
+              if (rows[r] & (1 << (7 - b))) ctx.fillRect(o.x + i * 8 + b, o.y + r, 1, 1);
+            }
+          }
         }
       }
       if (o.path === selection) {

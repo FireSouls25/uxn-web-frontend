@@ -161,6 +161,48 @@ describe("agent tools", () => {
     expect(runTool("rename_variable", { from: "score", to: "points" }).ok).toBe(true);
     expect(runTool("validate", {})).toMatchObject({ ok: true });
   });
+  it("authors songs, labels and overlay blocks through tools", () => {
+    expect(runTool("create_song", { name: "theme" }).ok).toBe(true);
+    expect(runTool("create_song", { name: "theme" }).ok).toBe(true); // theme_2
+    expect(runTool("set_song_note", { song: "theme", voice: 0, step: 0, pitch: 60, len: 2 }).ok).toBe(true);
+    expect(runTool("set_song_note", { song: "theme", voice: 0, step: 1, pitch: 200 }).ok).toBe(false);
+    expect(runTool("set_song_note", { song: "theme", voice: 4, step: 1, pitch: 60 }).ok).toBe(false);
+    expect(runTool("set_song_note", { song: "theme", voice: 0, step: 16, pitch: 60 }).ok).toBe(false);
+    expect(runTool("set_song_note", { song: "ghost", voice: 0, step: 0, pitch: 60 }).ok).toBe(false);
+    expect(runTool("set_song_vol", { song: "theme", voice: 0, vol: 200 }).ok).toBe(true);
+    expect(runTool("set_song_vol", { song: "theme", voice: 0, vol: 900 }).ok).toBe(false);
+    const menu = runTool("create_scene", {}).data as { id: string };
+    expect(runTool("create_object_def", { name: "juke", sprite: "wall" }).ok).toBe(true);
+    expect(runTool("add_event", { def: "juke", trigger: "create" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "juke", event: "ev_1", op: "song", song: "theme" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "juke", event: "ev_1", op: "song_stop" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "juke", event: "ev_1", op: "overlay", scene: menu.id }).ok).toBe(true);
+    expect(runTool("add_block", { def: "juke", event: "ev_1", op: "back" }).ok).toBe(true);
+    expect(runTool("add_block", { def: "juke", event: "ev_1", op: "song" }).ok).toBe(false);
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+    const preview = runTool("preview_event", { def: "juke", event: "ev_1" });
+    expect(preview.message as string).toContain("song_theme_start();");
+    expect(preview.message as string).toContain(`scene_go(SC_${menu.id.toUpperCase()});`);
+    expect(preview.message as string).toContain("overlay_back();");
+    // Refused while referenced, retargeted on rename, gone after.
+    expect(runTool("delete_song", { song: "theme" }).ok).toBe(false);
+    expect(runTool("rename_song", { from: "theme", to: "loop" }).ok).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+    expect(runTool("delete_block", { def: "juke", event: "ev_1", index: 0 }).ok).toBe(true);
+    expect(runTool("delete_song", { song: "loop" }).ok).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+  });
+
+  it("authors labels on leaves through tools", () => {
+    expect(runTool("set_label", { object: "hero", text: "HI" }).ok).toBe(true);
+    expect(runTool("set_label", { object: "ghost", text: "HI" }).ok).toBe(false);
+    expect(runTool("set_label", { text: "HI" }).ok).toBe(false);
+    expect(runTool("set_label", { object: "hero", text: "x".repeat(40) }).ok).toBe(true); // truncated to 24
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+    expect(runTool("set_label", { object: "hero" }).ok).toBe(true); // cleared
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+  });
+
   it("authors sprite, visibility and targeted destroy through tools", () => {
     expect(runTool("create_object_def", { name: "mimic", sprite: "wall" }).ok).toBe(true);
     expect(runTool("add_event", { def: "mimic", trigger: "step" }).ok).toBe(true);
