@@ -22,6 +22,18 @@ export default function EngineCanvas() {
   const vp = useStore(viewportStore);
   const boxRef = useRef<HTMLDivElement>(null);
 
+  // Esc climbs back out: drilled objects → scene map (unless
+  // typing in a field, where Esc stays local).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if ((e.target as HTMLElement | null)?.closest("input,select,textarea")) return;
+      if (canvasModeStore.get() !== "logic" || mapLevelStore.get() !== "objects") return;
+      mapLevelStore.set("map");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   // Native wheel listener (React's is passive): zoom anchored at cursor.
   useEffect(() => {
     const el = boxRef.current;

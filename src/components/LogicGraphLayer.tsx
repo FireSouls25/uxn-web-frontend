@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
-import { ArrowDown, ArrowUp, Code2, Plus, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronRight, Code2, Map as MapIcon, Plus, Trash2 } from "lucide-react";
 import { KIND_ICON } from "./HierarchyPanel";
 import { SpriteThumb } from "./SpritePicker";
 import { testTone } from "./SoundMixer";
@@ -24,6 +24,7 @@ import {
   currentScene,
   deleteBlock,
   deleteObject,
+  mapLevelStore,
   moveBlock,
   objectNodePos,
   patchBlock,
@@ -847,7 +848,18 @@ export default function LogicGraphLayer() {
   return (
     <div>
       <p className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] uppercase tracking-widest text-subtext0">
-        <span>{t(lang, "logic.objects")} · <span className="text-mauve">{sceneId}</span></span>
+        <button
+          data-nopan
+          onClick={() => mapLevelStore.set("map")}
+          title={t(lang, "logic.back_map")}
+          className="inline-flex items-center gap-1.5 rounded-md text-subtext0 transition-colors hover:text-text"
+        >
+          <span className="inline-flex items-center gap-1 rounded-md bg-surface0 px-1.5 py-0.5 normal-case tracking-normal">
+            <MapIcon size={11} /> {t(lang, "logic.map")}
+          </span>
+          <ChevronRight size={11} />
+          <span className="text-mauve">{sceneId}</span>
+        </button>
         <span className="ml-auto flex items-center gap-2 normal-case tracking-normal">
           <span className="inline-flex items-center gap-1 text-[10px] text-overlay0"><span className="inline-block h-0.5 w-4 bg-teal" /> chain</span>
           <span className="inline-flex items-center gap-1 text-[10px] text-overlay0"><span className="inline-block h-0.5 w-4 bg-sky" /> collide</span>
