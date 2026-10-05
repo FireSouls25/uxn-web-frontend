@@ -17,6 +17,7 @@
     "@mariozechner/pi-agent-core": "^0.73.1",
     "@mariozechner/pi-ai": "^0.73.1",
     "@nanostores/react": "^2.0.1",
+    "@opentelemetry/api": "1.9.1",
     "astro": "^5.0.0",
     "lucide-react": "^0.460.0",
     "motion": "^12.0.0",
