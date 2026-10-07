@@ -1,21 +1,20 @@
 ---
 import Base from "../layouts/Base.astro";
-import SessionBanner from "../components/SessionBanner";
+import RequireAuth from "../components/RequireAuth";
 import StudioHeader from "../components/StudioHeader";
 import StudioCenter from "../components/StudioCenter";
 ---
 
 <Base titleKey="page.studio" title="Studio">
-  <div class="flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden bg-base">
-    <div class="shrink-0">
-      <StudioHeader client:load />
-    </div>
-    <div class="shrink-0 px-3 pt-2">
-      <SessionBanner client:load />
-    </div>
+  <RequireAuth client:load>
+    <div class="flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden bg-base">
+      <div class="shrink-0">
+        <StudioHeader client:load />
+      </div>
 
-    <div class="relative min-h-0 flex-1">
-      <StudioCenter client:visible />
+      <div class="relative min-h-0 flex-1">
+        <StudioCenter client:visible />
+      </div>
     </div>
-  </div>
+  </RequireAuth>
 </Base>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
+import MenuSelect from "./MenuSelect";
 import { t, useLang } from "../lib/i18n";
 
 export type ThemeChoice = "auto" | "mocha" | "latte";
@@ -29,9 +30,9 @@ export function readChoice(): ThemeChoice {
   return "auto";
 }
 
-const ICONS = { auto: Monitor, mocha: Moon, latte: Sun } as const;
-
-/* System (auto-detect) default, explicit Mocha/Latte override. */
+/* Auto (OS-detect) default, explicit Dark/Light override. The page
+   boots into the browser's preferred scheme when no choice is
+   stored (see the pre-paint script in Base.astro). */
 export default function ThemeSelect() {
   const lang = useLang();
   const [choice, setChoice] = useState<ThemeChoice>("auto");
@@ -46,28 +47,20 @@ export default function ThemeSelect() {
     return () => mq.removeEventListener("change", onChange);
   }, []);
 
-  const Icon = ICONS[choice];
-
   return (
-    <label
-      className="inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
-      title={t(lang, "theme.label")}
-    >
-      <Icon size={15} />
-      <select
-        aria-label={t(lang, "theme.label")}
-        value={choice}
-        onChange={(e) => {
-          const next = e.target.value as ThemeChoice;
-          applyTheme(next);
-          setChoice(next);
-        }}
-        className="select select-sm"
-      >
-        <option value="auto">{t(lang, "theme.system")}</option>
-        <option value="mocha">{t(lang, "theme.mocha")}</option>
-        <option value="latte">{t(lang, "theme.latte")}</option>
-      </select>
-    </label>
+    <MenuSelect
+      value={choice}
+      label={t(lang, "theme.label")}
+      onChange={(v) => {
+        const next = v as ThemeChoice;
+        applyTheme(next);
+        setChoice(next);
+      }}
+      options={[
+        { value: "auto", label: t(lang, "theme.auto"), icon: <Monitor size={14} /> },
+        { value: "mocha", label: t(lang, "theme.mocha"), icon: <Moon size={14} /> },
+        { value: "latte", label: t(lang, "theme.latte"), icon: <Sun size={14} /> },
+      ]}
+    />
   );
 }

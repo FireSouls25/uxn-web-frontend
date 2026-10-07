@@ -11,17 +11,16 @@ re-themes everything.
 | Route | Content |
 |---|---|
 | `/` | Hero, workstation features, live export targets (`GET /targets` with static fallback) |
-| `/login`, `/register` | Animated forms backed by `POST /auth/*` (JWT session → `/studio`), with account-required-for-saving notice |
-| `/projects` | Project management: create/open/delete, per-project scene/object stats |
+| `/login`, `/register` | Centered animated forms backed by `POST /auth/*` (JWT session → `/studio`) |
+| `/projects` | Project management (account required via `RequireAuth`): create/open/delete, per-project scene/object stats |
 | `/studio` | Workstation: Godot-like scene tree (nested subscenes with offsets, cycle-guarded), canvas (select + drag + size presets + scene switcher), fullscreen sprite editor (gallery, animations, 4 real Uxn colors, editable System theme), scene graph + transition editor, sound mixer (boot mix + named-sound library), generated-code preview, kind-based inspector (rename, physics, bindings, tick scripts), export pane — side panels specialize per view |
 
 ## Studio store + export
 
 `src/lib/store.ts` (nanostores) is the single source of truth canvas,
-inspector and exporter read. Persistence is login-gated by storage,
-not by memory: guests persist per-tab (`sessionStorage`, survives
-full page loads in this tab, never leaves it), logins persist to
-`localStorage` (adopting tab work once after a login). The studio top
+inspector and exporter read. Persistence is account-only: `/projects`
+and `/studio` sit behind `RequireAuth` (unauthenticated visits bounce
+to `/login`), and project work persists to `localStorage`. The studio top
 bar always names the open project, its kind, and its stats.
 `src/lib/export.ts` validates → emits → `POST /compile` → downloads
 the artifact (`forge-demo.html`, …) into Downloads. Landing target

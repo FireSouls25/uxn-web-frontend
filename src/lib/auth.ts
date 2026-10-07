@@ -65,7 +65,7 @@ export async function authFetch(path: string, init?: RequestInit): Promise<Respo
     const raw = localStorage.getItem("uxn.session");
     access = raw ? (JSON.parse(raw) as { access?: string }).access : undefined;
   } catch {
-    access = undefined; // guests still reach the backend, just unauthenticated
+    access = undefined; // no session (RequireAuth should prevent this) — plain call
   }
   return fetch(`${API_URL}${path}`, {
     ...init,

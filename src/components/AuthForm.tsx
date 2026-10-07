@@ -62,9 +62,9 @@ export default function AuthForm({ mode }: Props) {
       initial={{ opacity: 0, y: 22 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-      className="pane w-full max-w-sm rounded-2xl p-7"
+      className="pane mx-auto w-full max-w-md rounded-2xl p-8 sm:p-10"
     >
-      <h1 className="text-xl font-bold tracking-tight">
+      <h1 className="text-2xl font-bold tracking-tight">
         {t(lang, mode === "login" ? "auth.login_t" : "auth.reg_t")}
       </h1>
       <p className="mt-1.5 text-[13px] text-subtext0">

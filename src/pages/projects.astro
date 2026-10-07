@@ -1,8 +1,11 @@
 ---
 import Base from "../layouts/Base.astro";
 import ProjectsHub from "../components/ProjectsHub";
+import RequireAuth from "../components/RequireAuth";
 ---
 
 <Base titleKey="page.projects" title="Projects">
-  <ProjectsHub client:load />
+  <RequireAuth client:load>
+    <ProjectsHub client:load />
+  </RequireAuth>
 </Base>

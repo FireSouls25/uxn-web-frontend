@@ -6,8 +6,8 @@ import { t, useLang } from "../lib/i18n";
 import { createProject, currentIdStore, deleteProject, openProject, projectsStore } from "../lib/store";
 import { CHESS_DESCRIPTION, chessProject } from "../lib/examples";
 
-/* Project management: list, create, open, delete. Guests manage
-   memory-only projects (banner says so); logins persist. */
+/* Project management: list, create, open, delete. Account-only —
+   RequireAuth guarantees a session before this renders. */
 export default function ProjectsHub() {
   const lang = useLang();
   const projects = useStore(projectsStore);

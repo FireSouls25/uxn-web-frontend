@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SAMPLE_PROJECT } from "./project";
 
-/* The reported bug: as a guest, opening chess (or creating anything)
-   vanished on navigation, because full page loads wipe JS memory and
-   guests persisted nowhere. Guests now persist per-tab. */
+/* Projects and the studio sit behind RequireAuth, so there is no
+   guest path: work always persists to localStorage and survives
+   full page loads. */
 function memoryBox() {
   const m = new Map<string, string>();
   return {
@@ -13,50 +13,30 @@ function memoryBox() {
   };
 }
 
-describe("guest persistence", () => {
+describe("account persistence", () => {
   beforeEach(() => {
     vi.resetModules();
     (globalThis as unknown as Record<string, unknown>).localStorage = memoryBox();
     (globalThis as unknown as Record<string, unknown>).sessionStorage = memoryBox();
   });
 
-  it("guest work survives a full reload in the same tab", async () => {
+  it("work survives a full reload", async () => {
     const first = await import("./store");
     first.projectsStore.set({ demo: structuredClone(SAMPLE_PROJECT) });
     first.currentIdStore.set("demo");
-    first.createProject("Guest Game");
+    first.createProject("My Game");
 
     vi.resetModules();
     const second = await import("./store");
     const ids = Object.keys(second.projectsStore.get()).sort();
-    expect(ids).toEqual(["demo", "guest-game"]);
-    expect(second.currentIdStore.get()).toBe("guest-game");
+    expect(ids).toEqual(["demo", "my-game"]);
+    expect(second.currentIdStore.get()).toBe("my-game");
   });
 
-  it("guest data never touches localStorage", async () => {
+  it("work is written to localStorage", async () => {
     const first = await import("./store");
-    first.createProject("Private Sketch");
+    first.createProject("Saved Sketch");
     const ls = (globalThis as unknown as Record<string, { getItem: (k: string) => string | null }>).localStorage;
-    expect(ls.getItem("uxn.projects.v1")).toBeNull();
-    const ss = (globalThis as unknown as Record<string, { getItem: (k: string) => string | null }>).sessionStorage;
-    expect(ss.getItem("uxn.projects.v1")).not.toBeNull();
-  });
-
-  it("logins read localStorage and adopt tab work once", async () => {
-    const first = await import("./store");
-    first.createProject("Before Login");
-    // Log in: session appears, then a fresh tab load adopts the work.
-    (globalThis as unknown as Record<string, { setItem: (k: string, v: string) => void }>).localStorage.setItem(
-      "uxn.session",
-      JSON.stringify({ name: "u", email: "u@x.yy", access: "a", refresh: "r" }),
-    );
-    vi.resetModules();
-    const second = await import("./store");
-    expect(Object.keys(second.projectsStore.get())).toContain("before-login");
-    expect(
-      (globalThis as unknown as Record<string, { getItem: (k: string) => string | null }>).localStorage.getItem(
-        "uxn.projects.v1",
-      ),
-    ).not.toBeNull();
+    expect(ls.getItem("uxn.projects.v1")).not.toBeNull();
   });
 });

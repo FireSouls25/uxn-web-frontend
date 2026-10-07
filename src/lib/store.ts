@@ -1,7 +1,7 @@
 /* Project store: the single source of truth the canvas, inspector,
    sprite editor, graph, sound mixer and exporter all read.
-   Persistence is gated on login — guests work purely in memory (see
-   SessionBanner), so nothing implies saving that isn't happening. */
+   Persistence is account-only (localStorage) — the projects and
+   studio pages sit behind RequireAuth, so there is no guest path. */
 import { atom, computed } from "nanostores";
 import {
   MAX_SONG_STEPS,
@@ -26,7 +26,6 @@ import {
   type SceneNode,
   type ValueOperand,
 } from "./project";
-import { getSession } from "./session";
 
 const STORE_KEY = "uxn.projects.v1";
 const LEGACY_KEY = "uxn.project";
@@ -48,15 +47,7 @@ function freshSample(): Project {
 function loadAll(): { projects: Record<string, Project>; current: string } {
   const fallback = () => ({ projects: { demo: freshSample() }, current: "demo" });
   if (typeof localStorage === "undefined") return fallback();
-  const loggedIn = !!getSession();
-  // Guests read per-tab storage (survives full page loads in this tab);
-  // logins read local storage, adopting tab work once when it is absent.
-  let raw = loggedIn ? localStorage.getItem(STORE_KEY) : sessionStorage.getItem(STORE_KEY);
-  let adopted = false;
-  if (loggedIn && !raw) {
-    raw = sessionStorage.getItem(STORE_KEY);
-    adopted = !!raw;
-  }
+  const raw = localStorage.getItem(STORE_KEY);
   try {
     if (raw) {
       const anyRaw = JSON.parse(raw) as Record<string, unknown>;
@@ -72,15 +63,6 @@ function loadAll(): { projects: Record<string, Project>; current: string } {
               ? (anyRaw["current"] as string)
               : ids[0];
           const out = { projects, current };
-          // Adopted guest work after a login: write it through so the
-          // next fresh tab finds it under the account.
-          if (adopted) {
-            try {
-              localStorage.setItem(STORE_KEY, JSON.stringify(out));
-            } catch {
-              /* quota */
-            }
-          }
           return out;
         }
       } else {
@@ -210,10 +192,8 @@ export function setObjectNodePos(sceneId: string, path: string, x: number, y: nu
 
 if (typeof localStorage !== "undefined") {
   const persist = (all: Record<string, Project>, id: string) => {
-    // Guests write per-tab storage only; logins write local storage.
-    const box = getSession() ? localStorage : sessionStorage;
     try {
-      box.setItem(STORE_KEY, JSON.stringify({ projects: all, current: id }));
+      localStorage.setItem(STORE_KEY, JSON.stringify({ projects: all, current: id }));
     } catch {
       /* quota/private mode — memory copy keeps working */
     }
