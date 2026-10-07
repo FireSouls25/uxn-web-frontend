@@ -23,7 +23,7 @@ export default function PlaytestOverlay() {
   if (!url) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-black/90 p-3 sm:p-6">
+    <div className="bg-scrim-strong fixed inset-0 z-50 flex flex-col p-3 sm:p-6">
       <div className="mx-auto flex w-full max-w-5xl items-center gap-3 pb-3">
         <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
           {t(lang, "play.title")}
@@ -41,7 +41,7 @@ export default function PlaytestOverlay() {
         <iframe
           src={url}
           title={t(lang, "play.title")}
-          className="min-h-0 w-full flex-1 rounded-lg border border-surface0 bg-black"
+          className="min-h-0 w-full flex-1 rounded-lg border border-surface0 bg-code"
         />
         <p className="mt-2 text-center font-mono text-[10px] text-overlay0">{t(lang, "exp.play_hint")}</p>
       </div>

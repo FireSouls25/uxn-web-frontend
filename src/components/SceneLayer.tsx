@@ -86,7 +86,7 @@ export default function SceneLayer() {
     if (!ctx) return;
     ctx.clearRect(0, 0, project.width, project.height);
     const accent = cssVar("--ctp-mauve", "#cba6f7");
-    const grid = cssVar("--ctp-surface1", "#45475a");
+    const grid = cssVar("--ctp-surface1", "#26272d");
     const pal = themeColors(project.theme);
     const sprites = new Map(project.sprites.map((s) => [s.id, s]));
     for (const o of leaves) {

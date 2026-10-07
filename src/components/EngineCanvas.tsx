@@ -78,13 +78,13 @@ export default function EngineCanvas() {
       ref={boxRef}
       onPointerDown={onPointerDown}
       onContextMenu={(e) => e.preventDefault()}
-      className="absolute inset-0 cursor-grab overflow-hidden bg-black active:cursor-grabbing"
+      className="absolute inset-0 cursor-grab overflow-hidden bg-canvas active:cursor-grabbing"
     >
       {vp.grid && (
         <div
           className="pointer-events-none absolute inset-0"
           style={{
-            backgroundImage: "radial-gradient(#26272d 1px, transparent 1px)",
+            backgroundImage: "radial-gradient(var(--canvas-dot) 1px, transparent 1px)",
             backgroundSize: "24px 24px",
             backgroundPosition: "0 0",
           }}

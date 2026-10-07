@@ -90,7 +90,7 @@ export default function CommandPalette() {
   const icons = { scene: MapIcon, def: Box, sprite: Image, sound: Music, input: KeySquare } as const;
   return (
     <div
-      className="fixed inset-0 z-[70] grid place-items-start justify-center bg-black/60 p-4 pt-[12vh]"
+      className="bg-scrim fixed inset-0 z-[70] grid place-items-start justify-center p-4 pt-[12vh]"
       onClick={() => setOpen(false)}
       role="dialog"
       aria-label={t(lang, "cmd.title")}

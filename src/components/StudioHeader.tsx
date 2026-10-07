@@ -105,15 +105,15 @@ export default function StudioHeader() {
 
   const seg = (active: boolean) =>
     `rounded-md px-2.5 py-1 font-mono text-[11px] transition-colors ${
-      active ? "bg-white text-black" : "text-subtext0 hover:bg-surface0 hover:text-text"
+      active ? "seg-active" : "text-subtext0 hover:bg-surface0 hover:text-text"
     }`;
   const iconBtn = (active: boolean) =>
     `grid size-7 place-items-center rounded-md transition-colors ${
-      active ? "bg-white text-black" : "text-subtext0 hover:bg-surface0 hover:text-text"
+      active ? "seg-active" : "text-subtext0 hover:bg-surface0 hover:text-text"
     }`;
   const catBtn = (active: boolean) =>
     `inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-semibold transition-colors ${
-      active ? "bg-white text-black" : "text-subtext0 hover:bg-surface0 hover:text-text"
+      active ? "seg-active" : "text-subtext0 hover:bg-surface0 hover:text-text"
     }`;
 
   const categories = (
@@ -127,10 +127,10 @@ export default function StudioHeader() {
   );
 
   return (
-    <div className="border-b border-surface0 bg-black/95 backdrop-blur">
+    <div className="border-b border-surface0 bg-mantle/95 backdrop-blur">
       <div className="flex flex-wrap items-center gap-2 px-3 py-2">
         <a href="/" className="flex items-center gap-2" title="uxn·forge">
-          <span className="grid size-7 place-items-center rounded-md bg-white text-black">
+          <span className="grid size-7 place-items-center rounded-md seg-active">
             <Box size={17} strokeWidth={2.4} />
           </span>
           <span className="font-mono text-sm font-semibold tracking-tight">
@@ -141,7 +141,7 @@ export default function StudioHeader() {
         <span className="max-w-44 truncate text-[14px] font-bold tracking-tight">{project.name}</span>
         <span
           className={`rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest ${
-            isCode ? "bg-teal/15 text-teal" : "bg-white/10 text-subtext1"
+            isCode ? "bg-teal/15 text-teal" : "tint-text-10 text-subtext1"
           }`}
         >
           {isCode ? t(lang, "proj.code_kind") : t(lang, "proj.visual_kind")}
@@ -204,7 +204,7 @@ export default function StudioHeader() {
         <button
           onClick={playtest}
           disabled={playBusy}
-          className="inline-flex items-center gap-1.5 rounded-full bg-white px-4 py-1.5 text-[13px] font-semibold text-black disabled:opacity-70"
+          className="seg-active inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-[13px] font-semibold disabled:opacity-70"
         >
           {playBusy ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
           {playBusy ? t(lang, "exp.working") : t(lang, "exp.playtest")}
@@ -241,7 +241,7 @@ export default function StudioHeader() {
               <button
                 onClick={download}
                 disabled={expBusy}
-                className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-white px-3 py-2 text-[13px] font-semibold text-black disabled:opacity-70"
+                className="seg-active mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-[13px] font-semibold disabled:opacity-70"
               >
                 {expBusy ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
                 {expBusy ? t(lang, "exp.working") : t(lang, "exp.go")}
@@ -276,7 +276,7 @@ export default function StudioHeader() {
               }}
               className={`group inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 font-mono text-[11px] transition-all hover:bg-surface0 ${
                 dragTab === si ? "opacity-40" : ""
-              } ${s.id === sceneId ? "bg-white text-black" : "text-subtext0"}`}
+              } ${s.id === sceneId ? "seg-active" : "text-subtext0"}`}
             >
               <button onClick={() => pickScene(s.id)} className="max-w-28 truncate">
                 {s.id}

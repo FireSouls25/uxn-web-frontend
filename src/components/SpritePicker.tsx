@@ -45,7 +45,7 @@ export default function SpritePicker({
   const list = project.sprites.filter((s) => s.id.toLowerCase().includes(q.trim().toLowerCase()));
   return (
     <div
-      className="fixed inset-0 z-[60] grid place-items-center bg-black/60 p-4"
+      className="bg-scrim fixed inset-0 z-[60] grid place-items-center p-4"
       onClick={onClose}
       role="dialog"
       aria-label={t(lang, "sprite.pick_title")}

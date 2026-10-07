@@ -141,7 +141,7 @@ export default function InspectorPanel({ hideCode = false }: { hideCode?: boolea
         className={`relative h-5 w-9 rounded-full transition-colors ${eff?.[field] ? "bg-green" : "bg-surface1"}`}
       >
         <span
-          className={`absolute top-0.5 size-4 rounded-full bg-white transition-all ${eff?.[field] ? "left-[18px]" : "left-0.5"}`}
+          className={`absolute top-0.5 size-4 rounded-full bg-[var(--toggle-knob)] transition-all ${eff?.[field] ? "left-[18px]" : "left-0.5"}`}
         />
       </span>
     </button>

@@ -61,7 +61,7 @@ export default function ObjectEditor({ id, hideCode = false }: { id: string; hid
         className={`relative h-5 w-9 rounded-full transition-colors ${def[field] ? "bg-green" : "bg-surface1"}`}
       >
         <span
-          className={`absolute top-0.5 size-4 rounded-full bg-white transition-all ${def[field] ? "left-[18px]" : "left-0.5"}`}
+          className={`absolute top-0.5 size-4 rounded-full bg-[var(--toggle-knob)] transition-all ${def[field] ? "left-[18px]" : "left-0.5"}`}
         />
       </span>
     </button>

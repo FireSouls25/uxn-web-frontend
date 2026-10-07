@@ -269,7 +269,7 @@ export default function LogicInspector() {
             }}
             onClick={attachPlay}
             disabled={locked}
-            className="inline-flex flex-1 cursor-grab items-center justify-center gap-1 rounded-lg bg-white px-3 py-1.5 text-[12px] font-semibold text-black active:cursor-grabbing disabled:opacity-50"
+            className="seg-active inline-flex flex-1 cursor-grab items-center justify-center gap-1 rounded-lg px-3 py-1.5 text-[12px] font-semibold active:cursor-grabbing disabled:opacity-50"
           >
             <Plus size={12} /> {t(lang, "ev.op_play")}
           </button>

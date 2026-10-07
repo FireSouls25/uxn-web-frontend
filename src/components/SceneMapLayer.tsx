@@ -153,12 +153,12 @@ export default function SceneMapLayer() {
         <svg width={size.w} height={size.h} className="absolute inset-0 block">
           <defs>
             <marker id="scenemap-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-              <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="#e4e4e7" strokeWidth="1.5" />
+              <path d="M 0 1 L 9 5 L 0 9" fill="none" stroke="var(--wire)" strokeWidth="1.5" />
             </marker>
           </defs>
           {drawn.map((e) => (
             <g key={e.key}>
-              <path d={e.d} fill="none" stroke="#e4e4e7" strokeWidth="1.5" markerEnd="url(#scenemap-arrow)">
+              <path d={e.d} fill="none" stroke="var(--wire)" strokeWidth="1.5" markerEnd="url(#scenemap-arrow)">
                 <title>{e.label}</title>
               </path>
               {e.show && (
@@ -169,7 +169,7 @@ export default function SceneMapLayer() {
                   fontSize="9"
                   fontFamily="monospace"
                   fill="var(--ctp-subtext0)"
-                  stroke="#000"
+                  stroke="var(--canvas-bg)"
                   strokeWidth={3}
                   paintOrder="stroke"
                 >
@@ -203,7 +203,7 @@ export default function SceneMapLayer() {
                 top: p.y,
                 width: NODE_W,
                 minHeight: NODE_H,
-                borderColor: n.broken ? "var(--ctp-red)" : active ? "#ffffff" : undefined,
+                borderColor: n.broken ? "var(--ctp-red)" : active ? "var(--ctp-text)" : undefined,
                 borderWidth: n.id === startId ? 2.5 : undefined,
                 opacity: active ? 1 : 0.92,
                 touchAction: "none",

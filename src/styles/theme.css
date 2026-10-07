@@ -35,10 +35,19 @@
   --ctp-crust: #000000;
   --ctp-accent: var(--ctp-mauve);
   --ctp-accent-dim: #6e5a94;
+  /* Workstation surfaces — every studio background, dock, canvas
+     and overlay reads these, so light/dark both live here. */
   --canvas-bg: #000000;
+  --canvas-dot: #26272d;
   --node-bg: #131316;
   --node-border: #2a2b31;
   --wire: #e4e4e7;
+  --scrim: rgb(0 0 0 / 0.6);
+  --scrim-strong: rgb(0 0 0 / 0.9);
+  --dock-shadow: 0 12px 40px rgb(0 0 0 / 0.55);
+  --node-shadow: 0 8px 28px rgb(0 0 0 / 0.5);
+  --code-bg: #000000;
+  --toggle-knob: #ffffff;
 }
 
 [data-theme="latte"] {
@@ -71,6 +80,18 @@
   --ctp-crust: #dce0e8;
   --ctp-accent: var(--ctp-mauve);
   --ctp-accent-dim: #c3a5f5;
+  /* Light workstation: white canvas + white docks on a pale page. */
+  --canvas-bg: #ffffff;
+  --canvas-dot: #d9dce6;
+  --node-bg: #ffffff;
+  --node-border: #e0e3ec;
+  --wire: #6c6f85;
+  --scrim: rgb(76 79 105 / 0.35);
+  --scrim-strong: rgb(76 79 105 / 0.55);
+  --dock-shadow: 0 12px 32px rgb(76 79 105 / 0.14);
+  --node-shadow: 0 8px 24px rgb(76 79 105 / 0.12);
+  --code-bg: #ffffff;
+  --toggle-knob: #ffffff;
 }
 
 @theme inline {
@@ -124,28 +145,65 @@ pre {
 }
 
 /* Hairline panel seams, per the reference workstation language.
-   Floating docks sit on top of the infinite canvas: near-black fill,
-   subtle border, blur + deep shadow like the UQURA reference. */
+   Floating docks sit on top of the infinite canvas and re-theme
+   through --node-bg / --node-border / --dock-shadow (white in
+   latte, near-black in mocha) — no hardcoded fills here. */
 .pane {
   background: var(--ctp-mantle);
   border: 1px solid var(--ctp-surface0);
 }
 
 .dock {
-  background: color-mix(in srgb, var(--node-bg, #131316) 92%, transparent);
-  border: 1px solid var(--node-border, #2a2b31);
-  box-shadow: 0 12px 40px rgb(0 0 0 / 0.55);
+  background: color-mix(in srgb, var(--node-bg) 92%, transparent);
+  border: 1px solid var(--node-border);
+  box-shadow: var(--dock-shadow);
   backdrop-filter: blur(12px);
 }
 
 .node-card {
-  background: var(--node-bg, #131316);
-  border: 1px solid var(--node-border, #2a2b31);
-  box-shadow: 0 8px 28px rgb(0 0 0 / 0.5);
+  background: var(--node-bg);
+  border: 1px solid var(--node-border);
+  box-shadow: var(--node-shadow);
 }
 
 .wire {
-  stroke: var(--wire, #e4e4e7);
+  stroke: var(--wire);
+}
+
+/* Theme-aware surfaces: infinite canvas, code pages, modal scrims.
+   Components reach these via var() — never raw hex. */
+.bg-canvas {
+  background-color: var(--canvas-bg);
+}
+
+.bg-code {
+  background-color: var(--code-bg);
+}
+
+.bg-scrim {
+  background-color: var(--scrim);
+}
+
+.bg-scrim-strong {
+  background-color: var(--scrim-strong);
+}
+
+/* Active-pill primitives: solid inverted chip (dark text on the
+   light chip in mocha, pale text on the dark chip in latte) plus
+   its muted companion and a 10% tint for quiet badges. "text-base"
+   would collide with Tailwind's font-size utility, so these live
+   here instead of in class strings. */
+.seg-active {
+  background-color: var(--ctp-text);
+  color: var(--ctp-base);
+}
+
+.seg-active-muted {
+  color: color-mix(in srgb, var(--ctp-base) 60%, transparent);
+}
+
+.tint-text-10 {
+  background-color: color-mix(in srgb, var(--ctp-text) 10%, transparent);
 }
 
 ::selection {
@@ -165,7 +223,7 @@ pre {
   appearance: none;
   -webkit-appearance: none;
   background-color: var(--ctp-mantle);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2388c0d0' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238c8fa1' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 0.55rem center;
   border: 1px solid var(--ctp-surface1);

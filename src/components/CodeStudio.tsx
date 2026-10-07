@@ -38,13 +38,13 @@ const TYPES = new Set(["u8", "u16", "i8", "i16", "bool", "void", "mod"]);
 
 const KIND_COLOR: Record<Tok["kind"], string> = {
   plain: "var(--ctp-text)",
-  comment: "#6b7280",
-  string: "#a6e3a1",
-  directive: "#f9e2af",
-  port: "#89dceb",
-  keyword: "#cba6f7",
-  type: "#94e2d5",
-  number: "#fab387",
+  comment: "var(--ctp-overlay0)",
+  string: "var(--ctp-green)",
+  directive: "var(--ctp-yellow)",
+  port: "var(--ctp-sky)",
+  keyword: "var(--ctp-mauve)",
+  type: "var(--ctp-teal)",
+  number: "var(--ctp-peach)",
 };
 
 function tokenize(src: string): Tok[][] {
@@ -258,7 +258,7 @@ function CodeEditor({
         spellCheck={false}
         wrap="off"
         className="absolute inset-0 h-full w-full resize-none overflow-auto whitespace-pre bg-transparent p-3 font-mono text-[12px] leading-[18px] text-transparent outline-none"
-        style={{ padding: pad, caretColor: "#fff" }}
+        style={{ padding: pad, caretColor: "var(--ctp-text)" }}
       />
     </div>
   );
@@ -335,7 +335,7 @@ export default function CodeStudio() {
   }
 
   return (
-    <div className="absolute inset-0 overflow-hidden bg-black">
+    <div className="absolute inset-0 overflow-hidden bg-base">
       <div className="grid h-full gap-3 p-3 lg:grid-cols-[248px_minmax(0,1fr)_264px]">
         <section className="dock min-h-0 overflow-y-auto rounded-2xl p-3">
           <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">{t(lang, "code.files")}</p>
@@ -351,11 +351,11 @@ export default function CodeStudio() {
                       snippetSelStore.set(null);
                     }}
                     className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 font-mono text-[12px] transition-colors ${
-                      active === f ? "bg-white text-black" : "text-subtext0 hover:bg-surface0 hover:text-text"
+                      active === f ? "seg-active" : "text-subtext0 hover:bg-surface0 hover:text-text"
                     }`}
                   >
                     <span className="truncate">{f}</span>
-                    <span className={`ml-auto shrink-0 text-[10px] ${active === f ? "text-black/60" : "text-overlay0"}`}>{n} ln</span>
+                    <span className={`ml-auto shrink-0 text-[10px] ${active === f ? "seg-active-muted" : "text-overlay0"}`}>{n} ln</span>
                   </button>
                 </li>
               );
@@ -387,11 +387,11 @@ export default function CodeStudio() {
                       <button
                         onClick={() => snippetSelStore.set(snippetSel === s.id ? null : s.id)}
                         className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 font-mono text-[12px] transition-colors ${
-                          snippetSel === s.id ? "bg-white text-black" : "text-subtext0 hover:bg-surface0 hover:text-text"
+                          snippetSel === s.id ? "seg-active" : "text-subtext0 hover:bg-surface0 hover:text-text"
                         }`}
                       >
                         <span className="truncate">{s.id}</span>
-                        <span className={`ml-auto shrink-0 text-[10px] ${snippetSel === s.id ? "text-black/60" : "text-overlay0"}`}>
+                        <span className={`ml-auto shrink-0 text-[10px] ${snippetSel === s.id ? "seg-active-muted" : "text-overlay0"}`}>
                           {s.code === "" ? 1 : s.code.split("\n").length} ln
                         </span>
                       </button>
@@ -486,7 +486,7 @@ export default function CodeStudio() {
         </section>
         <section className="dock flex min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl">
           <div className="flex flex-wrap items-center gap-1.5 border-b border-surface0 p-2.5">
-            <span className={`rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest ${editable ? "bg-teal/15 text-teal" : "bg-white/10 text-subtext1"}`}>
+            <span className={`rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest ${editable ? "bg-teal/15 text-teal" : "tint-text-10 text-subtext1"}`}>
               {editable ? t(lang, "studio.editable") : t(lang, "studio.readonly")}
             </span>
             <span className="font-mono text-[11px] text-subtext0">
@@ -557,12 +557,12 @@ export default function CodeStudio() {
           </p>
           <div className="mt-3 space-y-1 font-mono text-[11px]">
             {[
-              ["( … )", "#6b7280"],
-              ["\"str\"", "#a6e3a1"],
-              ["fn event", "#cba6f7"],
-              ["u8 u16", "#94e2d5"],
-              ["@ | ; &", "#f9e2af"],
-              [".dev/port", "#89dceb"],
+              ["( … )", "var(--ctp-overlay0)"],
+              ["\"str\"", "var(--ctp-green)"],
+              ["fn event", "var(--ctp-mauve)"],
+              ["u8 u16", "var(--ctp-teal)"],
+              ["@ | ; &", "var(--ctp-yellow)"],
+              [".dev/port", "var(--ctp-sky)"],
             ].map(([s, c]) => (
               <div key={s} className="flex items-center gap-2">
                 <span className="rounded bg-surface0 px-1.5 py-0.5" style={{ color: c }}>{s}</span>

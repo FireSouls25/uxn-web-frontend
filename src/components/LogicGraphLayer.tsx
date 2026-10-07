@@ -991,7 +991,7 @@ function ObjectNode({ leaf, pos }: { leaf: FlatLeaf; pos: { x: number; y: number
       onPointerUp={onNodeUp}
     >
     <div
-      className={`node-card relative cursor-grab rounded-2xl p-2.5 active:cursor-grabbing ${selected ? "border-white/70" : ""}`}
+      className={`node-card relative cursor-grab rounded-2xl p-2.5 active:cursor-grabbing ${selected ? "border-text/70" : ""}`}
     >
       <button
         onClick={() => {
@@ -1301,7 +1301,7 @@ export default function LogicGraphLayer() {
                 key={i}
                 d={w.d}
                 fill="none"
-                stroke={w.kind === "collide" ? "#89dceb" : "var(--ctp-teal)"}
+                stroke={w.kind === "collide" ? "var(--ctp-sky)" : "var(--ctp-teal)"}
                 strokeOpacity={w.kind === "chain" ? 0.45 : 0.8}
                 strokeWidth="1.5"
                 strokeDasharray={w.kind === "collide" ? "5 3" : undefined}

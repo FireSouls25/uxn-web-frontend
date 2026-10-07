@@ -73,7 +73,7 @@ export default function SpriteStudio() {
   }, [locked]);
 
   return (
-    <div className="absolute inset-0 overflow-auto bg-black">
+    <div className="absolute inset-0 overflow-auto bg-base">
       <div className="grid min-h-full gap-3 p-3 lg:grid-cols-[264px_minmax(0,1fr)_292px]">
         <section className="dock rounded-2xl p-3">
           <SpriteLibrary />
