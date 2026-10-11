@@ -260,4 +260,31 @@ describe("agent tools", () => {
     const snap = runTool("describe", {}).data as { defs: string[] };
     expect(snap.defs.sort()).toEqual(["coin", "crate"]);
   });
+
+  it("maps space: rects, solidity, free spots", () => {
+    const map = runTool("scene_map", {});
+    expect(map.ok).toBe(true);
+    const data = map.data as { width: number; height: number; objects: Array<{ path: string; x: number; y: number; w: number; h: number; kind: string; solid: boolean; sprite: string }> };
+    expect(data.width).toBe(128);
+    expect(data.objects.length).toBeGreaterThan(0);
+    for (const o of data.objects) {
+      expect(o.w).toBeGreaterThan(0);
+      expect(typeof o.solid).toBe("boolean");
+    }
+    // A solid crate blocks its own rect but not the empty corner.
+    runTool("create_object_def", { name: "crate", sprite: "wall", kind: "movable" });
+    runTool("place_instance", { def: "crate", name: "box", x: 0, y: 0 });
+    const blocked = runTool("check_space", { x: 0, y: 0, w: 8, h: 8 });
+    expect(blocked.data).toMatchObject({ inside: true, fits: false });
+    expect((blocked.data as { solid: string[] }).solid).toContain("box");
+    const free = runTool("find_space", { w: 8, h: 8 });
+    expect(free.ok).toBe(true);
+    const spot = (free.data as { x: number; y: number });
+    const recheck = runTool("check_space", { x: spot.x, y: spot.y, w: 8, h: 8 });
+    expect(recheck.data).toMatchObject({ inside: true, fits: true });
+    // Outside the canvas never fits; unknown scenes fail cleanly.
+    expect(runTool("check_space", { x: 200, y: 200 }).data).toMatchObject({ inside: false, fits: false });
+    expect(runTool("scene_map", { scene: "nowhere" }).ok).toBe(false);
+    expect(runTool("find_space", { w: 999, h: 999 }).ok).toBe(false);
+  });
 });

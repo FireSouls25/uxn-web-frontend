@@ -59,7 +59,7 @@ import {
   setVariableInit,
   setVoice,
 } from "../store";
-import { emitProject, previewOwnerEvent, projectDefs, validateProject } from "../project";
+import { emitProject, flattenScene, previewOwnerEvent, projectDefs, spritePxOf, validateProject } from "../project";
 import type { Block, BlockPath, EventTrigger, ObjectKind, ValueOperand } from "../project";
 import type { EventOwner } from "../store";
 
@@ -92,6 +92,49 @@ function snapshot(): Record<string, unknown> {
   };
 }
 
+/* Shared spatial model (UI rulers + agents): game pixels, origin
+   top-left, +x right, +y down. Every visible leaf resolves to a
+   rect with effective kind/solid/sprite (def fallbacks applied,
+   subscene offsets accumulated). Solid = flag set or movable kind. */
+interface LeafRect {
+  path: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  kind: string;
+  solid: boolean;
+  sprite: string;
+}
+
+function leafRects(sceneId: string): LeafRect[] {
+  const p = projectStore.get();
+  return flattenScene(p, sceneId).map((l) => {
+    const [w, h] = spritePxOf(p, l.sprite);
+    return {
+      path: l.path,
+      x: l.x,
+      y: l.y,
+      w,
+      h,
+      kind: l.kind,
+      solid: (l.solid ?? false) || l.kind === "movable",
+      sprite: l.sprite,
+    };
+  });
+}
+
+function rectsOverlap(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+function resolveScene(arg: unknown): { p: ReturnType<typeof projectStore.get>; id: string } | { err: string } {
+  const p = projectStore.get();
+  const id = str(arg) || sceneIdStore.get();
+  if (!p.scenes.some((s) => s.id === id)) return { err: `unknown scene ${id}` };
+  return { p, id };
+}
+
 export const TOOLS: ToolDef[] = [
   {
     name: "create_sprite",
@@ -114,7 +157,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "put_on_scene",
     description:
-      "Place a sprite as an object on a scene (default: current scene). Kinds: player (at most one per scene, 0 allowed), static (prop), movable (solid + pushable). Coordinates are pixels; clamped to canvas.",
+      "Place a sprite as an object on a scene (default: current scene). Kinds: player (at most one per scene, 0 allowed), static (prop), movable (solid + pushable). Coordinates are game pixels (origin top-left, +x right, +y down), clamped to canvas — use scene_map to see occupancy and find_space for a free spot.",
     params: {
       sprite: { type: "string", required: true, description: "Sprite id from the library" },
       scene: { type: "string", description: "Scene id, default current" },
@@ -177,7 +220,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "place_instance",
     description:
-      "Stamp an instance of an object template on a scene (default: current scene). Local fields override the def per instance; position is always instance state.",
+      "Stamp an instance of an object template on a scene (default: current scene). Local fields override the def per instance; position is always instance state. Coordinates are game pixels (origin top-left) — use scene_map/find_space to place coherently.",
     params: {
       def: { type: "string", required: true, description: "Object template id" },
       scene: { type: "string", description: "Scene id, default current" },
@@ -780,7 +823,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "move_object",
-    description: "Move a top-level object to absolute pixels (clamped to canvas).",
+    description: "Move a top-level object to absolute game pixels (origin top-left, clamped to canvas). Validate with check_space first.",
     params: {
       object: { type: "string", required: true },
       x: { type: "number", required: true },
@@ -864,8 +907,109 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "scene_map",
+    description:
+      "Spatial snapshot of a scene (default: current): canvas width/height in game pixels (origin top-left, +x right, +y down) and every visible object as {path, x, y, w, h, kind, solid, sprite}. Use before placing or moving anything; pair with find_space for a free spot.",
+    params: {
+      scene: { type: "string", description: "Scene id, default current" },
+    },
+    run: (args) => {
+      const r = resolveScene(args["scene"]);
+      if ("err" in r) return { ok: false, message: r.err };
+      let rects: LeafRect[];
+      try {
+        rects = leafRects(r.id);
+      } catch (e) {
+        return { ok: false, message: (e as Error).message };
+      }
+      return {
+        ok: true,
+        message: `${r.id} ${r.p.width}×${r.p.height}, ${rects.length} objects`,
+        data: { scene: r.id, width: r.p.width, height: r.p.height, objects: rects },
+      };
+    },
+  },
+  {
+    name: "find_space",
+    description:
+      "Find a free 8px-snapped spot for a w×h pixel object (defaults 8×8) on a scene: inside the canvas and not overlapping solid objects (avoid 'all' dodges every object instead). Returns {x, y}; ok:false when nothing fits. Pass nearX/nearY to prefer a spot near a point.",
+    params: {
+      w: { type: "number", description: "Pixels wide, default 8" },
+      h: { type: "number", description: "Pixels tall, default 8" },
+      scene: { type: "string", description: "Scene id, default current" },
+      nearX: { type: "number", description: "Prefer spots near this x" },
+      nearY: { type: "number", description: "Prefer spots near this y" },
+      avoid: { type: "string", description: "solid|all, default solid" },
+    },
+    run: (args) => {
+      const r = resolveScene(args["scene"]);
+      if ("err" in r) return { ok: false, message: r.err };
+      const w = Math.max(1, Math.round(num(args["w"], 8)));
+      const h = Math.max(1, Math.round(num(args["h"], 8)));
+      if (w > r.p.width || h > r.p.height)
+        return { ok: false, message: `${w}×${h} exceeds canvas ${r.p.width}×${r.p.height}` };
+      let rects: LeafRect[];
+      try {
+        rects = leafRects(r.id);
+      } catch (e) {
+        return { ok: false, message: (e as Error).message };
+      }
+      const pool = str(args["avoid"]) === "all" ? rects : rects.filter((o) => o.solid);
+      const nx = num(args["nearX"], r.p.width / 2);
+      const ny = num(args["nearY"], r.p.height / 2);
+      let best: { x: number; y: number; d: number } | null = null;
+      let checked = 0;
+      for (let y = 0; y + h <= r.p.height; y += 8) {
+        for (let x = 0; x + w <= r.p.width; x += 8) {
+          checked++;
+          const cand = { x, y, w, h };
+          if (pool.some((o) => rectsOverlap(cand, o))) continue;
+          const d = (x + w / 2 - nx) ** 2 + (y + h / 2 - ny) ** 2;
+          if (!best || d < best.d) best = { x, y, d };
+        }
+      }
+      if (!best) return { ok: false, message: `no free ${w}×${h} spot on ${r.id} (${checked} tried)` };
+      return { ok: true, message: `free ${w}×${h} at ${best.x},${best.y}`, data: { x: best.x, y: best.y, scene: r.id } };
+    },
+  },
+  {
+    name: "check_space",
+    description:
+      "Test a w×h rect at x,y on a scene (default: current): reports inside-canvas plus overlapping object paths (all) and the solid subset. Use to validate a placement before put_on_scene/place_instance/move_object.",
+    params: {
+      x: { type: "number", required: true },
+      y: { type: "number", required: true },
+      w: { type: "number", description: "Pixels wide, default 8" },
+      h: { type: "number", description: "Pixels tall, default 8" },
+      scene: { type: "string", description: "Scene id, default current" },
+    },
+    run: (args) => {
+      const r = resolveScene(args["scene"]);
+      if ("err" in r) return { ok: false, message: r.err };
+      const w = Math.max(1, Math.round(num(args["w"], 8)));
+      const h = Math.max(1, Math.round(num(args["h"], 8)));
+      const x = Math.round(num(args["x"]));
+      const y = Math.round(num(args["y"]));
+      let rects: LeafRect[];
+      try {
+        rects = leafRects(r.id);
+      } catch (e) {
+        return { ok: false, message: (e as Error).message };
+      }
+      const cand = { x, y, w, h };
+      const overlaps = rects.filter((o) => rectsOverlap(cand, o)).map((o) => o.path);
+      const solid = rects.filter((o) => o.solid && rectsOverlap(cand, o)).map((o) => o.path);
+      const inside = x >= 0 && y >= 0 && x + w <= r.p.width && y + h <= r.p.height;
+      return {
+        ok: true,
+        message: inside ? (solid.length === 0 ? "fits" : `blocked by ${solid.join(",")}`) : "outside canvas",
+        data: { inside, fits: inside && solid.length === 0, overlaps, solid },
+      };
+    },
+  },
+  {
     name: "describe",
-    description: "Summarize the current project: scenes, sprites, anims, selection. Start here.",
+    description: "Summarize the current project: scenes, sprites, anims, selection. Start here, then scene_map for positions.",
     params: {},
     run: () => ({ ok: true, message: "snapshot", data: snapshot() }),
   },

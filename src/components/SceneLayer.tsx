@@ -79,6 +79,7 @@ export default function SceneLayer() {
   const spriteSel = useStore(spriteSelStore);
   const pal = themeColors(project.theme);
   const bg = project.bg ?? 0;
+  const [cursor, setCursor] = useState<[number, number] | null>(null);
   const [placing, setPlacing] = useState(false);
   const leaves: FlatLeaf[] = (() => {
     try {
@@ -87,6 +88,7 @@ export default function SceneLayer() {
       return [];
     }
   })();
+  const selLeaf = selection ? leaves.find((l) => l.path === selection) : undefined;
 
   /** Snap a game pixel to the 8px tile grid (top-left origin). */
   function snapV(v: number): number {
@@ -206,6 +208,19 @@ export default function SceneLayer() {
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         <span className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
           {scene.id} · {leaves.length}
+          {cursor && (
+            <span className="text-text">
+              {" "}· {cursor[0]},{cursor[1]}
+            </span>
+          )}
+          {selLeaf && (() => {
+            const [sw, sh] = spritePxOf(project, selLeaf.sprite);
+            return (
+              <span className="text-text">
+                {" "}· {selLeaf.id} [{selLeaf.x},{selLeaf.y}] {sw}×{sh}
+              </span>
+            );
+          })()}
         </span>
         <span className="inline-flex items-center gap-1" role="radiogroup" aria-label={t(lang, "canvas.bg")}>
           <span className="mr-0.5 font-mono text-[11px] uppercase tracking-widest text-subtext0">
@@ -267,12 +282,50 @@ export default function SceneLayer() {
           {t(lang, "canvas.placing")}
         </p>
       )}
+      {vp.grid && (
+        <div className="mb-1 flex gap-1" aria-hidden="true">
+          <span className="size-3 shrink-0 rounded-[3px] bg-mauve/70" title="origin 0,0" />
+          <div className="relative h-3 min-w-0 flex-1">
+            {Array.from({ length: Math.floor(project.width / 8) + 1 }, (_, i) => {
+              const gx = i * 8;
+              const major = gx % 32 === 0;
+              return (
+                <span
+                  key={gx}
+                  className={`absolute top-0 w-px ${major ? "h-3 bg-overlay1" : "h-1.5 bg-surface1"}`}
+                  style={{ left: `${(gx / project.width) * 100}%` }}
+                />
+              );
+            })}
+          </div>
+        </div>
+      )}
+      <div className="flex gap-1">
+        {vp.grid && (
+          <div className="relative w-3 shrink-0" aria-hidden="true">
+            {Array.from({ length: Math.floor(project.height / 8) + 1 }, (_, i) => {
+              const gy = i * 8;
+              const major = gy % 32 === 0;
+              return (
+                <span
+                  key={gy}
+                  className={`absolute left-0 h-px ${major ? "w-3 bg-overlay1" : "w-1.5 bg-surface1"}`}
+                  style={{ top: `${(gy / project.height) * 100}%` }}
+                />
+              );
+            })}
+          </div>
+        )}
       <canvas
         ref={canvasRef}
         width={project.width}
         height={project.height}
         onPointerDown={onDown}
-        onPointerMove={onMove}
+        onPointerMove={(e) => {
+          setCursor(toGame(e));
+          onMove(e);
+        }}
+        onPointerLeave={() => setCursor(null)}
         onPointerUp={onUp}
         onDragOver={(e) => {
           if (!locked && e.dataTransfer.types.includes("application/x-def")) e.preventDefault();
@@ -296,12 +349,13 @@ export default function SceneLayer() {
           if (e.key === "Escape") setPlacing(false);
         }}
         tabIndex={0}
-        className="aspect-auto w-full cursor-crosshair rounded-lg border border-surface0"
+        className="aspect-auto min-w-0 flex-1 cursor-crosshair rounded-lg border border-surface0"
         style={{
           imageRendering: "pixelated",
           touchAction: "none",
         }}
       />
+      </div>
     </div>
   );
 }
