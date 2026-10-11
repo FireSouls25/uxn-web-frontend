@@ -13,7 +13,7 @@ re-themes everything.
 | `/` | Hero, workstation features, live export targets (`GET /targets` with static fallback) |
 | `/login`, `/register` | Centered animated forms backed by `POST /auth/*` (JWT session → `/studio`) |
 | `/projects` | Project management (account required via `RequireAuth`): create/open/delete, per-project scene/object stats |
-| `/studio` | Workstation: Godot-like scene tree (nested subscenes with offsets, cycle-guarded), canvas (select + drag + size presets + scene switcher), fullscreen sprite editor (gallery, animations, 4 real Uxn colors, editable System theme), scene graph + transition editor, sound mixer (boot mix + named-sound library), generated-code preview, kind-based inspector (rename, physics, bindings, tick scripts), export pane — side panels specialize per view |
+| `/studio` | Workstation: Godot-like scene tree (nested subscenes with offsets, cycle-guarded), canvas (select + drag + size presets + background picker + scene switcher), fullscreen sprite editor (gallery, animations, 4 real Uxn colors, editable System theme), scene graph + transition editor, sound mixer (boot mix + named-sound library), generated-code preview, kind-based inspector (rename, physics, bindings, tick scripts), export pane — side panels specialize per view |
 
 ## Studio store + export
 

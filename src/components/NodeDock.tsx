@@ -1,5 +1,5 @@
 import { useStore } from "@nanostores/react";
-import { ChevronsLeft, ChevronsRight, Map as MapIcon, Plus } from "lucide-react";
+import { ChevronsLeft, ChevronsRight, Copy, Map as MapIcon, Plus } from "lucide-react";
 import AssetBrowser from "./AssetBrowser";
 import HierarchyPanel from "./HierarchyPanel";
 import SceneNav from "./SceneNav";
@@ -7,6 +7,7 @@ import { t, useLang } from "../lib/i18n";
 import {
   addObject,
   addScene,
+  duplicateProject,
   overlayStore,
   projectStore,
   spriteSelStore,
@@ -53,7 +54,18 @@ export default function NodeDock() {
         </button>
       </div>
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-0.5">
-        {!locked && (
+        {locked ? (
+          <div className="rounded-xl border border-mauve/30 bg-mauve/5 p-2.5">
+            <p className="text-[12px] leading-relaxed text-subtext0">{t(lang, "locked.note")}</p>
+            <button
+              onClick={() => duplicateProject(t(lang, "proj.copy_suffix"))}
+              title={t(lang, "proj.fork")}
+              className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-mauve px-2 py-1.5 font-mono text-[11px] font-semibold text-crust transition-transform hover:scale-[1.02] active:scale-[0.98]"
+            >
+              <Copy size={12} /> {t(lang, "proj.fork")}
+            </button>
+          </div>
+        ) : (
           <div className="flex gap-1.5">
             <button
               onClick={() => addScene()}

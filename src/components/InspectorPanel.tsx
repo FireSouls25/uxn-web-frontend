@@ -266,8 +266,8 @@ export default function InspectorPanel({ hideCode = false }: { hideCode?: boolea
             title={t(lang, "insp.change_sprite")}
             className="flex w-full items-center gap-2.5 rounded-lg border border-surface0 px-3 py-2 text-left transition-colors hover:border-mauve/40"
           >
-            <span className="w-12 shrink-0">
-              <SpriteThumb id={eff?.sprite ?? ""} dim={48} />
+            <span className="w-16 shrink-0">
+              <SpriteThumb id={eff?.sprite ?? ""} dim={64} />
             </span>
             <span className="min-w-0 flex-1">
               <span className="block font-mono text-[11px] uppercase tracking-widest text-subtext0">
@@ -370,6 +370,7 @@ export default function InspectorPanel({ hideCode = false }: { hideCode?: boolea
               <span className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
                 {t(lang, "insp.logic")}: {(def ? (def.events ?? []) : (obj.events ?? [])).length}{" "}
                 {t(lang, "view.events").toLowerCase()}
+                {eff?.tick && <span className="text-teal"> · {t(lang, "insp.tick")}</span>}
               </span>
               <span className="rounded-md bg-mauve/15 px-1.5 py-0.5 font-mono text-[11px] text-mauve">
                 {t(lang, "insp.events_open")}

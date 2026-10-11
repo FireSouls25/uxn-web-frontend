@@ -6,14 +6,17 @@ import StudioCenter from "../components/StudioCenter";
 ---
 
 <Base titleKey="page.studio" title="Studio">
-  <RequireAuth client:load>
+  <!-- client:only: these islands read localStorage-backed stores, so
+    server HTML (default sample project) would mismatch the client
+    on hydration. Skipping SSR avoids the React mismatch recovery. -->
+  <RequireAuth client:only="react">
     <div class="flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden bg-base">
       <div class="shrink-0">
-        <StudioHeader client:load />
+        <StudioHeader client:only="react" />
       </div>
 
       <div class="relative min-h-0 flex-1">
-        <StudioCenter client:visible />
+        <StudioCenter client:only="react" />
       </div>
     </div>
   </RequireAuth>

@@ -293,16 +293,15 @@ export default function StudioHeader() {
               )}
             </span>
           ))}
-          {!locked && (
-            <button
-              onClick={() => addScene()}
-              title={t(lang, "hdr.new_scene")}
-              aria-label={t(lang, "hdr.new_scene")}
-              className="grid size-6 shrink-0 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
-            >
-              <FilePlus2 size={13} />
-            </button>
-          )}
+          <button
+            onClick={() => addScene()}
+            disabled={locked}
+            title={locked ? t(lang, "locked.note") : t(lang, "hdr.new_scene")}
+            aria-label={t(lang, "hdr.new_scene")}
+            className="grid size-6 shrink-0 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-text disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-subtext0"
+          >
+            <FilePlus2 size={13} />
+          </button>
         </div>
       )}
       {message && <p className="border-t border-surface0/60 px-3 py-1 text-[13px] text-subtext0">{message}</p>}

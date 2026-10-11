@@ -29,3 +29,18 @@ export function setSession(s: Session): void {
 export function clearSession(): void {
   localStorage.removeItem(KEY);
 }
+
+/* True when the access JWT is already past its `exp` claim, so
+   callers can drop a dead session quietly instead of provoking a
+   401 from /auth/me (which the browser still logs as an error).
+   Non-JWT tokens report false — the server stays the arbiter. */
+export function isAccessExpired(access: string): boolean {
+  try {
+    const payload = JSON.parse(atob(access.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))) as {
+      exp?: unknown;
+    };
+    return typeof payload.exp === "number" && payload.exp * 1000 <= Date.now();
+  } catch {
+    return false;
+  }
+}

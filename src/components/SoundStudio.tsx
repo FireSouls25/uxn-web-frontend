@@ -196,14 +196,14 @@ export default function SoundStudio() {
                 <>{t(lang, "sound.voices")} · <span className="text-text">{t(lang, "sound.once")}</span></>
               )}
             </p>
-            {sound && !locked && (
-              <button
-                onClick={audition}
-                className="seg-active ml-auto inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-semibold"
-              >
-                <Play size={13} /> {t(lang, "studio.sequence")}
-              </button>
-            )}
+            <button
+              onClick={audition}
+              disabled={!sound || locked}
+              title={!sound ? t(lang, "sound.need_pick") : locked ? t(lang, "locked.note") : t(lang, "studio.sequence")}
+              className="seg-active ml-auto inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Play size={13} /> {t(lang, "studio.sequence")}
+            </button>
           </div>
           {song ? <SongEditor id={song.id} /> : sound ? <SoundEditor id={sound.id} /> : (
             <div className="space-y-4">

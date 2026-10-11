@@ -5,7 +5,7 @@ import ThemeSelect from "./ThemeSelect";
 import LangSelect from "./LangSelect";
 import { t, useLang } from "../lib/i18n";
 import { apiLogout, apiMe } from "../lib/auth";
-import { clearSession, getSession, type Session } from "../lib/session";
+import { clearSession, getSession, isAccessExpired, type Session } from "../lib/session";
 
 export default function SiteHeader() {
   const lang = useLang();
@@ -15,6 +15,12 @@ export default function SiteHeader() {
   useEffect(() => {
     const s = getSession();
     if (!s) return;
+    // Expired already: drop it without a round-trip (a doomed /auth/me
+    // would 401, which browsers log as a console error).
+    if (isAccessExpired(s.access)) {
+      clearSession();
+      return;
+    }
     // Best-effort validation: a dead token clears quietly.
     apiMe(s.access)
       .then(() => setSessionState(s))

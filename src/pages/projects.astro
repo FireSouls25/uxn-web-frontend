@@ -5,7 +5,8 @@ import RequireAuth from "../components/RequireAuth";
 ---
 
 <Base titleKey="page.projects" title="Projects">
-  <RequireAuth client:load>
-    <ProjectsHub client:load />
+  <!-- client:only: same store-backed SSR mismatch as the studio. -->
+  <RequireAuth client:only="react">
+    <ProjectsHub client:only="react" />
   </RequireAuth>
 </Base>

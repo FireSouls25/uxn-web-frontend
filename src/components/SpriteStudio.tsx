@@ -63,6 +63,7 @@ export default function SpriteStudio() {
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT")) return;
       if (e.key === "b" || e.key === "B") paintToolStore.set("brush");
       else if (e.key === "e" || e.key === "E") paintToolStore.set("erase");
+      else if (e.key === "i" || e.key === "I") paintToolStore.set("pick");
       else if (e.key >= "1" && e.key <= "4") {
         paintColorStore.set(Number(e.key) - 1);
         paintToolStore.set("brush");
@@ -90,7 +91,7 @@ export default function SpriteStudio() {
               )}
             </p>
             <span className="ml-auto hidden font-mono text-[10px] text-overlay0 xl:block">
-              B {t(lang, "sprite.paint")} · E {t(lang, "sprite.erase")} · 1-4 {t(lang, "sprite.color")}
+              B {t(lang, "sprite.paint")} · E {t(lang, "sprite.erase")} · I {t(lang, "sprite.pick")} · 1-4 {t(lang, "sprite.color")}
             </span>
           </div>
           <SpriteEditor />

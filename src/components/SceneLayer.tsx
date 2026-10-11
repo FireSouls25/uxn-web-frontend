@@ -14,6 +14,7 @@ import {
   resizeProject,
   sceneIdStore,
   selectionStore,
+  setProjectBg,
   spriteSelStore,
   viewportStore,
 } from "../lib/store";
@@ -34,6 +35,17 @@ const SIZE_PRESETS: Array<[string, number, number]> = [
 function cssVar(name: string, fallback: string): string {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return v || fallback;
+}
+
+/* Grid line color with contrast against the scene background: dark
+   lines on light backgrounds, light lines on dark ones. Derived at
+   paint time, so it tracks any bg + theme combination. */
+function gridOn(hex: string): string {
+  const m = hex.match(/^#([0-9a-fA-F]{6})$/);
+  if (!m) return "rgba(128,128,128,0.25)";
+  const v = parseInt(m[1], 16);
+  const lum = (0.299 * ((v >> 16) & 0xff) + 0.587 * ((v >> 8) & 0xff) + 0.114 * (v & 0xff)) / 255;
+  return lum > 0.5 ? "rgba(0,0,0,0.16)" : "rgba(255,255,255,0.18)";
 }
 
 function hitTest(
@@ -65,6 +77,8 @@ export default function SceneLayer() {
 
   const scene = currentScene(project, sceneId);
   const spriteSel = useStore(spriteSelStore);
+  const pal = themeColors(project.theme);
+  const bg = project.bg ?? 0;
   const [placing, setPlacing] = useState(false);
   const leaves: FlatLeaf[] = (() => {
     try {
@@ -84,10 +98,12 @@ export default function SceneLayer() {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    ctx.clearRect(0, 0, project.width, project.height);
     const accent = cssVar("--ctp-mauve", "#cba6f7");
-    const grid = cssVar("--ctp-surface1", "#26272d");
     const pal = themeColors(project.theme);
+    // Opaque background = exactly what the ROM paints (draw_bg fills
+    // the same palette index), so the editor is WYSIWYG — no checker.
+    ctx.fillStyle = pal[project.bg ?? 0];
+    ctx.fillRect(0, 0, project.width, project.height);
     const sprites = new Map(project.sprites.map((s) => [s.id, s]));
     for (const o of leaves) {
       const spr = sprites.get(o.sprite);
@@ -125,20 +141,10 @@ export default function SceneLayer() {
       }
     }
     if (vp.grid) {
-      ctx.strokeStyle = grid;
-      ctx.globalAlpha = 0.35;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      for (let x = TILE; x < project.width; x += TILE) {
-        ctx.moveTo(x + 0.5, 0);
-        ctx.lineTo(x + 0.5, project.height);
-      }
-      for (let y = TILE; y < project.height; y += TILE) {
-        ctx.moveTo(0, y + 0.5);
-        ctx.lineTo(project.width, y + 0.5);
-      }
-      ctx.stroke();
-      ctx.globalAlpha = 1;
+      // 1px game-resolution lines: always aligned, no upscale shimmer.
+      ctx.fillStyle = gridOn(pal[project.bg ?? 0]);
+      for (let x = TILE; x < project.width; x += TILE) ctx.fillRect(x, 0, 1, project.height);
+      for (let y = TILE; y < project.height; y += TILE) ctx.fillRect(0, y, project.width, 1);
     }
   }, [project, scene, selection, vp.grid]);
 
@@ -200,6 +206,24 @@ export default function SceneLayer() {
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         <span className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
           {scene.id} · {leaves.length}
+        </span>
+        <span className="inline-flex items-center gap-1" role="radiogroup" aria-label={t(lang, "canvas.bg")}>
+          <span className="mr-0.5 font-mono text-[11px] uppercase tracking-widest text-subtext0">
+            {t(lang, "canvas.bg")}
+          </span>
+          {[0, 1, 2, 3].map((i) => (
+            <button
+              key={i}
+              role="radio"
+              aria-checked={bg === i}
+              title={`${t(lang, "canvas.bg")} ${i + 1}`}
+              onClick={() => setProjectBg(i)}
+              className={`size-5 rounded-md border transition-all ${
+                bg === i ? "scale-110 border-mauve ring-2 ring-mauve/40" : "border-surface1 hover:scale-105"
+              }`}
+              style={{ background: pal[i] }}
+            />
+          ))}
         </span>
         <span className="ml-auto inline-flex items-center gap-1">
           <button
@@ -275,9 +299,6 @@ export default function SceneLayer() {
         className="aspect-auto w-full cursor-crosshair rounded-lg border border-surface0"
         style={{
           imageRendering: "pixelated",
-          backgroundImage:
-            "conic-gradient(var(--ctp-surface0) 25%, transparent 0 50%, var(--ctp-surface0) 0 75%, transparent 0)",
-          backgroundSize: "16px 16px",
           touchAction: "none",
         }}
       />

@@ -489,6 +489,9 @@ export interface Project {
   height: number;
   /** System palette theme (12-bit channels). Defaults to the demo theme. */
   theme?: { r: number; g: number; b: number };
+  /** Scene background: palette index 0–3 blitted over the whole
+      screen every frame (draw_bg). Defaults to 0. */
+  bg?: number;
   start: string;
   scenes: Scene[];
   /** Named keyboard inputs (Phase 0: press-a-key picker + migration). */
@@ -532,7 +535,7 @@ export interface Project {
     compiler remains the final arbiter (duplicates fail loudly). */
 const RESERVED_EXACT = new Set([
   "ox", "oy", "ot", "oflags", "ocount", "scene", "kb", "mb", "mouse_last",
-  "dpad", "draw_all", "pt_in_rect", "overlap88", "scene_go", "start", "main", "sq32",
+  "dpad", "draw_all", "draw_bg", "bg_tile", "pt_in_rect", "overlap88", "scene_go", "start", "main", "sq32",
   "custom_setup", "custom_frame",
   // Phase C runtime: sequencer state, scene stack, prerendered labels.
   "sg_on", "ovst", "ovsp", "song_tick", "overlay_back",
@@ -1107,6 +1110,9 @@ export function validateProject(p: Project): string[] {
   for (const [ch, v] of [["r", theme.r], ["g", theme.g], ["b", theme.b]] as const) {
     if (!Number.isInteger(v) || v < 0 || v > 65535) errs.push(`theme.${ch} must be 0–65535`);
   }
+  if (p.bg !== undefined && (!Number.isInteger(p.bg) || p.bg < 0 || p.bg > 3)) {
+    errs.push("bg must be a palette index 0–3");
+  }
   if (p.kind === "code") {
     const files = p.codeFiles ?? {};
     const entry = p.entry ?? "main.ux";
@@ -1529,7 +1535,7 @@ function emitSetup(
     (validated), so ot swaps stay aligned.
     dims maps sprite id → [tiles wide, tiles tall] (NOT pixels). */
 function emitDrawScene(s: Scene, leaves: FlatLeaf[], dims: Map<string, [number, number]>): string {
-  const lines = [`draw_${s.id} :: fn() {`];
+  const lines = [`draw_${s.id} :: fn() {`, `    draw_bg();`];
   leaves.forEach((o, i) => {
     const [tw, th] = dims.get(o.sprite) ?? [1, 1];
     const px = (v: number): string => (v === 0 ? "" : ` + ${v}`);
@@ -2154,6 +2160,12 @@ export function emitProject(p: Project): Record<string, string> {
     if (!usedSprites.has(o.id)) continue;
     out.push(`data spr_${o.id} = [${spriteToPlanar(o).join(", ")}];`);
   }
+  // Solid background tile: one 8×8 of the bg palette index. A
+  // separate label keeps every spr_ blob offset exactly where the
+  // per-scene draw fns assume it is.
+  const bgv = (p.bg ?? 0) & 3;
+  const bgRows = (bit: number) => Array(8).fill(bit ? 255 : 0);
+  out.push(`data bg_tile = [${[...bgRows(bgv & 1), ...bgRows(bgv & 2)].join(", ")}];`);
   if (usedVoices(p).length > 0) {
     out.push(`data sq32 = [${SQ32.join(", ")}];`);
   }
@@ -2285,7 +2297,24 @@ export function emitProject(p: Project): Record<string, string> {
     out.push(`}`);
     out.push(``);
   }
+  // Per-frame background: opaque bg-index tiles cover the emulator's
+  // boot color and erase the previous frame (no smear trails). Edge
+  // tiles overhang short canvases (320×180); the VM clips them.
+  const cols = Math.ceil(p.width / 8);
+  const rows = Math.ceil(p.height / 8);
+  out.push(`draw_bg :: fn() {`);
+  out.push(`    for ty in 0..${rows} {`);
+  out.push(`        for tx in 0..${cols} {`);
+  out.push(`            Screen.x = tx * 8;`);
+  out.push(`            Screen.y = ty * 8;`);
+  out.push(`            Screen.addr = &bg_tile;`);
+  out.push(`            Screen.sprite = 129;`);
+  out.push(`        }`);
+  out.push(`    }`);
+  out.push(`}`);
+  out.push(``);
   out.push(`draw_all :: fn() {`);
+  out.push(`    draw_bg();`);
   out.push(`    for i in 0..${MAX_OBJECTS} {`);
   out.push(`        if i < ocount {`);
   out.push(`            if oflags[i] & 1 != 0 {`);

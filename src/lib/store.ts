@@ -103,7 +103,7 @@ export const spriteSelStore = atom<string>("hero");
     Mutually exclusive with selectionStore: picking one clears the other. */
 export const defSelStore = atom<string | null>(null);
 export const paintColorStore = atom<number>(1);
-export const paintToolStore = atom<"brush" | "erase">("brush");
+export const paintToolStore = atom<"brush" | "erase" | "pick">("brush");
 export const voiceSelStore = atom<number>(0);
 /** Selected named sound (right panel shows its SoundEditor).
     Mutually exclusive with voiceSelStore the same way defSel is
@@ -234,6 +234,29 @@ export function createProject(name: string): string {
   projectsStore.set({ ...all, [id]: p });
   openProject(id);
   return id;
+}
+
+/** Fork any project (including locked showcases) into an editable
+    copy. The copy keeps every scene, sprite, sound and script;
+    only identity and the lock change. */
+export function duplicateProject(copyWord: string): string | null {
+  const id = currentIdStore.get();
+  const all = projectsStore.get();
+  const src = all[id];
+  if (!src) return null;
+  let nid = `${src.id}_copy`;
+  let n = 2;
+  while (all[nid]) nid = `${src.id}_copy_${n++}`;
+  const copy: Project = {
+    ...structuredClone(src),
+    id: nid,
+    name: `${src.name} (${copyWord})`.slice(0, 48),
+    locked: false,
+    updatedAt: Date.now(),
+  };
+  projectsStore.set({ ...all, [nid]: copy });
+  openProject(nid);
+  return nid;
 }
 
 export function deleteProject(id: string): void {
@@ -833,6 +856,26 @@ export function addAnimFrame(animId: string, spriteId: string): string | null {
   return null;
 }
 
+/** Reorder frames (filmstrip ←/→). Ends refuse; middle swaps. */
+export function moveAnimFrame(animId: string, index: number, dir: -1 | 1): boolean {
+  const p = projectStore.get();
+  if (p.locked) return false;
+  const anim = p.anims.find((a) => a.id === animId);
+  if (!anim) return false;
+  const j = index + dir;
+  if (index < 0 || index >= anim.frames.length || j < 0 || j >= anim.frames.length) return false;
+  updateCurrent((prev) => ({
+    ...prev,
+    anims: prev.anims.map((a) => {
+      if (a.id !== animId) return a;
+      const frames = [...a.frames];
+      [frames[index], frames[j]] = [frames[j], frames[index]];
+      return { ...a, frames };
+    }),
+  }));
+  return true;
+}
+
 /** Drop a frame; the last one stays (validation needs 1–16). */
 export function removeAnimFrame(animId: string, index: number): boolean {
   const p = projectStore.get();
@@ -1262,6 +1305,12 @@ export function setSceneFrameCode(code: string): void {
 
 export function setTheme(theme: { r: number; g: number; b: number }): void {
   updateCurrent((prev) => ({ ...prev, theme }));
+}
+
+/** Scene background palette index (0–3); out-of-range writes are ignored. */
+export function setProjectBg(bg: number): void {
+  if (!Number.isInteger(bg) || bg < 0 || bg > 3) return;
+  updateCurrent((prev) => ({ ...prev, bg }));
 }
 
 export function setVoice(index: number, note: number, vol: number): void {

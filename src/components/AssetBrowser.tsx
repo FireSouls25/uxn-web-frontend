@@ -39,7 +39,7 @@ export default function AssetBrowser() {
         <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
           {t(lang, "assets.title")} ({(project.objectDefs ?? []).length})
         </p>
-        {!locked && (
+        {!locked ? (
           <button
             onClick={() => addDef("", spriteSel)}
             title={t(lang, "assets.new_def")}
@@ -48,6 +48,14 @@ export default function AssetBrowser() {
           >
             <Plus size={13} />
           </button>
+        ) : (
+          <span
+            title={t(lang, "locked.note")}
+            aria-label={t(lang, "locked.note")}
+            className="grid size-6 cursor-not-allowed place-items-center rounded-md text-overlay0"
+          >
+            <Plus size={13} />
+          </span>
         )}
       </div>
       <input
@@ -59,7 +67,7 @@ export default function AssetBrowser() {
       />
       {defs.length === 0 ? (
         <p className="mt-2 rounded-lg border border-dashed border-surface1 px-3 py-3 text-center text-[13px] text-subtext0">
-          {t(lang, "assets.empty")}
+          {locked ? t(lang, "locked.note") : t(lang, "assets.empty")}
         </p>
       ) : (
         <ul className="mt-2 max-h-56 space-y-0.5 overflow-y-auto">

@@ -9,11 +9,12 @@ import {
   FlipHorizontal2,
   FlipVertical2,
   PaintBucket,
+  Pipette,
 } from "lucide-react";
 import { themeColors, setPaletteIndex } from "../lib/palette";
 import { flattenScene, spriteTiles } from "../lib/project";
 import { t, useLang } from "../lib/i18n";
-import { paintColorStore, paintToolStore, projectStore, setSpritePixels, setTheme, spriteSelStore } from "../lib/store";
+import { paintColorStore, paintToolStore, projectStore, setSpritePixels, setSpriteSize, setTheme, spriteSelStore } from "../lib/store";
 
 /* Right column of the sprites view: palette, brush and transforms
    for the selected sprite. Nothing about scenes or objects here. */
@@ -60,6 +61,14 @@ export default function SpriteTools() {
           {t(lang, "sprite.tools")}
           {sprite && <span className="text-mauve"> · {sprite.id}</span>}
         </p>
+        {sprite && (() => {
+          const [w, h] = spriteTiles(sprite);
+          return (
+            <p className="mt-2 font-mono text-[11px] text-subtext0">
+              {t(lang, "sprite.size")} · {w}×{h} ({w * 8}×{h * 8}px)
+            </p>
+          );
+        })()}
         <p className="mt-2 font-mono text-[11px] text-subtext0">
           {t(lang, "sprite.used_by")}: {usedByAll.length > 0 ? usedByAll.join(", ") : "—"}
         </p>
@@ -139,30 +148,70 @@ export default function SpriteTools() {
         <button onClick={() => paintToolStore.set("erase")} title={t(lang, "sprite.erase")} className={tool === "erase" ? active : iconBtn}>
           <Eraser size={15} />
         </button>
+        <button onClick={() => paintToolStore.set("pick")} title={t(lang, "sprite.pick")} className={tool === "pick" ? active : iconBtn}>
+          <Pipette size={15} />
+        </button>
         <button onClick={() => sprite && paintAll(color)} title={t(lang, "sprite.fill")} className={iconBtn}>
           <PaintBucket size={15} />
         </button>
         <button onClick={() => paintAll(0)} title={t(lang, "sprite.clear")} className={`${iconBtn} font-mono text-[11px]`}>
           ∅
         </button>
-        <button onClick={() => transform(flipH)} title="flip ↔" className={iconBtn}>
+        <button onClick={() => transform(flipH)} title={t(lang, "sprite.flip_h")} className={iconBtn}>
           <FlipHorizontal2 size={15} />
         </button>
-        <button onClick={() => transform(flipV)} title="flip ↕" className={iconBtn}>
+        <button onClick={() => transform(flipV)} title={t(lang, "sprite.flip_v")} className={iconBtn}>
           <FlipVertical2 size={15} />
         </button>
-        <button onClick={() => transform(shift(-1, 0))} title="←" className={iconBtn}>
+        <button onClick={() => transform(shift(-1, 0))} title={t(lang, "sprite.shift_left")} className={iconBtn}>
           <ArrowLeft size={15} />
         </button>
-        <button onClick={() => transform(shift(1, 0))} title="→" className={iconBtn}>
+        <button onClick={() => transform(shift(1, 0))} title={t(lang, "sprite.shift_right")} className={iconBtn}>
           <ArrowRight size={15} />
         </button>
-        <button onClick={() => transform(shift(0, -1))} title="↑" className={iconBtn}>
+        <button onClick={() => transform(shift(0, -1))} title={t(lang, "sprite.shift_up")} className={iconBtn}>
           <ArrowUp size={15} />
         </button>
-        <button onClick={() => transform(shift(0, 1))} title="↓" className={iconBtn}>
+        <button onClick={() => transform(shift(0, 1))} title={t(lang, "sprite.shift_down")} className={iconBtn}>
           <ArrowDown size={15} />
         </button>
+      </div>
+      <div className="mt-3 rounded-xl border border-surface0 p-2">
+        <p className="font-mono text-[11px] text-subtext0">
+          {t(lang, "sprite.size")}
+          {sprite && (() => {
+            const [w, h] = spriteTiles(sprite);
+            return (
+              <span>
+                {" "}· {sprite.id} · {w}×{h} ({w * 8}×{h * 8}px)
+              </span>
+            );
+          })()}
+        </p>
+        {sprite && (() => {
+          const [w, h] = spriteTiles(sprite);
+          return (
+            <div className="mt-1.5 grid w-fit grid-cols-4 gap-1" role="radiogroup" aria-label={t(lang, "sprite.size")}>
+              {Array.from({ length: 16 }, (_, i) => {
+                const x = (i % 4) + 1;
+                const y = Math.floor(i / 4) + 1;
+                const on = x <= w && y <= h;
+                return (
+                  <button
+                    key={i}
+                    role="radio"
+                    aria-checked={x === w && y === h}
+                    title={`${x}×${y}`}
+                    onClick={() => setSpriteSize(sprite.id, x, y)}
+                    className={`size-6 rounded border transition-colors ${
+                      on ? "border-mauve/60 bg-mauve/20" : "border-surface1 hover:border-surface2"
+                    }`}
+                  />
+                );
+              })}
+            </div>
+          );
+        })()}
       </div>
       <p className="mt-2 font-mono text-[11px] text-subtext0">
         {t(lang, "sprite.used_by")}: {usedByAll.length > 0 ? usedByAll.join(", ") : "—"}
