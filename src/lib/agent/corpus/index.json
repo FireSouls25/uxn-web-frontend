@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "count": 22,
+  "chunks": [
+    {
+      "id": "etal.md#top",
+      "source": "etal.md",
+      "title": "etal",
+      "text": "# ETAL cheat sheet (emitter subset)\n\nTyped DSL compiling to Uxntal. Every expression leaves exactly\n`sizeof(type)` bytes; `u8 → u16` widens, narrowing is explicit."
+    },
+    {
+      "id": "etal.md#devices-declared-pages-typed-ports-",
+      "source": "etal.md",
+      "title": "Devices (declared pages, typed ports)",
+      "text": "## Devices (declared pages, typed ports)\n```ux\ndevice Screen 32 { vector: 2  width: 2  height: 2  auto: 1  pad: 1  x: 2  y: 2  addr: 2  pixel: 1  sprite: 1 }\ndevice Controller 128 { vector: 2  button: 1  key: 1 }\ndevice Mouse 144 { vector: 2  x: 2  y: 2  state: 1 }\ndevice Audio0 48 { vector: 2  addr: 2  length: 2  volume: 1  adsr: 2  pitch: 1 }\n```\n\nReads: `x: u16 = Screen.width;` Writes: `Screen.sprite = 129;`\n(2-byte ports trigger device effects — order is semantic)."
+    },
+    {
+      "id": "etal.md#functions-events-vectors",
+      "source": "etal.md",
+      "title": "Functions, events, vectors",
+      "text": "## Functions, events, vectors\n```ux\nwrap :: fn(x: u16) -> u16 { return x; }\non_frame :: event() { draw_all(); }   (ends BRK, never JSR-called)\nmain :: event() { start(); }          (stays in the event loop)\nScreen.vector = &on_frame;            (arm the 60Hz handler)\n```\n\nNo recursion (static locals), no reentrancy. `match` over integer\nliterals plus trailing `_`. `for i in 0..N` (u16), `while`,\n`if/elif/else`. `print(\"...\")` inlines a console loop."
+    },
+    {
+      "id": "etal.md#memory",
+      "source": "etal.md",
+      "title": "Memory",
+      "text": "## Memory\nGlobals live in 256B zero-page. `buffer buf[N]: u8|u16;` is main RAM.\n`data tile = [bytes];` is a ROM blob; `&tile` is its address.\nOne 8×8 2bpp tile = 16 planar bytes (channel one, then two);\nmulti-tile sprites concatenate tiles row-major (tile (tx,ty) at blob\noffset (ty·w+tx)·16), drawn with repeated addr+sprite writes.\n\nAssembler budget (measured, etal `-r`): a single `fn`/`event` holds\n~1200 label references before `References exceeded` fails the build\n(1200 OK, 1400 fails). Generated code keeps every function far below\nthat: shared loops over slots, per-scene setup/draw stay linear in\nleaf count with few refs per leaf — never unroll per-leaf code\nwithout counting."
+    },
+    {
+      "id": "etal.md#input-doctrine-hardware-facts-",
+      "source": "etal.md",
+      "title": "Input doctrine (hardware facts)",
+      "text": "## Input doctrine (hardware facts)\n`Controller.key` self-clears after firing — latch it in the controller\nvector, consume in the frame. Sub-frame taps are invisible to polling,\nso OR-accumulate buttons in the vector. Edge = `cur & (last ^ 255)`.\nD-pad mask bits: 16 up, 32 down, 64 left, 128 right. Key codes:\n32 space, 27 escape. Mouse state bit 1 = left."
+    },
+    {
+      "id": "examples.md#top",
+      "source": "examples.md",
+      "title": "examples",
+      "text": "# Example: chess (the pattern to imitate)\n\nFull game in `frontend/src/lib/examples/chess/` (sources synced from\n`uxn-webpage/chess/`). Two layers, and custom code must follow them:\n\n1. **Pure rules** (`rules.ux`): everything over `buffer board[64]`\n   (squares 0–63, pieces 0 empty / 1–6 white / 7–12 black) — move\n   generation per piece, `attacked`, `in_check`, `gen_legal`,\n   `game_status`, `do_move`/`undo_move`, `setup_board`, plus a\n   material AI (`ai_choose`). No devices, no vectors, no imports\n   except data. This file splices verbatim into `customCode`.\n2. **Thin device UI** (`game.ux`): five scenes (menu/color/play/pause/\n   over), mouse drag-to-move, highlights, a cursor tile (the VM draws\n   no cursor), SFX. Scenes map 1:1 onto the visual scene model;\n   `tile_addr(kind, side)` computes ROM addresses arithmetically."
+    },
+    {
+      "id": "examples.md#example-emitted-demo-what-visual-projects-lower-",
+      "source": "examples.md",
+      "title": "Example: emitted demo (what visual projects lower to)",
+      "text": "## Example: emitted demo (what visual projects lower to)\n`devices.ux` (System/Screen/Controller/Mouse/Audio pages) + `main.ux`:\n`meta`, `SC_*` constants, `data spr_*` 16-byte planar blobs, fixed\nslot buffers, `scene_go`, `pt_in_rect`/`overlap88`, `draw_all`,\n`setup_<scene>` + `<scene>_frame`, vector wiring, `main :: event`.\nFrame order: input latch → drive → anim → clicks/keys → ticks →\ncustom_frame → scene script → draw."
+    },
+    {
+      "id": "examples.md#conventions-for-generated-custom-coexistence",
+      "source": "examples.md",
+      "title": "Conventions for generated + custom coexistence",
+      "text": "## Conventions for generated + custom coexistence\n* Generated identifiers (`ox`, `scene_go`, `SC_*`, `spr_*`, `atick_*`,\n  `setup_*`, `*_frame`) are reserved; the checker rejects\n  redeclarations, the compiler catches the rest.\n* Hooks: `custom_setup()` runs once at boot, `custom_frame()` runs\n  every frame before drawing. Per-object `tick_<scene>_<id>(slot)`\n  gets the slot index for `ox[slot]`-style access.\n* One player per scene max (0 allowed); movable implies solid;\n  clicks accept nested paths (`rack/jar`); latch input in vectors,\n  consume in frames."
+    },
+    {
+      "id": "tools.md#top",
+      "source": "tools.md",
+      "title": "tools",
+      "text": "# Agent tools reference\n\nSource of truth: `frontend/src/lib/agent/tools.ts` (`TOOLS` + `runTool`).\nEvery tool validates like the UI; the backend compiler is final arbiter."
+    },
+    {
+      "id": "tools.md#project-scenes",
+      "source": "tools.md",
+      "title": "Project & scenes",
+      "text": "## Project & scenes\n* `describe()` — snapshot `{project, scene, scenes, sprites, defs, sounds, anims}`. Start here.\n* `create_project {name}` / `open_project {id}` — fresh project / switch.\n* `create_scene {}` — empty scene, switches to it.\n* `nest_scene {scene, into?, x?, y?, name?}` — instance a subscene at an\n  offset (Godot-style). Cycles rejected. Children render at parent\n  offset + own position; editing them edits the home scene."
+    },
+    {
+      "id": "tools.md#sprites-objects",
+      "source": "tools.md",
+      "title": "Sprites & objects",
+      "text": "## Sprites & objects\n* `create_sprite {name, pixels?, w?, h?}` — library sprite, 1×1 to\n  4×4 tiles of 8×8 (bigger art = consecutive tiles, drawn tile by\n  tile). Pixels are 64·w·h indices 0–3 (**Uxn 2bpp hardware limit**),\n  tile-major row-major; index 0 paints palette 0 (opaque background,\n  not transparency).\n* `put_on_scene {sprite, scene?, x?, y?, kind?, name?}` — kinds:\n  `player` (≤1/scene, 0 allowed), `static`, `movable` (solid+pushable).\n  Coordinates are game pixels (origin top-left); use `scene_map` +\n  `find_space` so placements land coherently.\n* `move_object {object, x, y}` — absolute game pixels, clamped.\n  Validate with `check_space` first.\n* `rename_object {from, to}` — click bindings follow.\n* `set_mask {def|object, x?, y?, w?, h?}` — hitbox inside the sprite\n  (collision + clicks; drive keeps full bounds). Omit the numbers\n  to clear. Out-of-sprite boxes are rejected.\n* `delete_node {index, scene?}` / `reorder_nodes {from, to}` /\n  `move_node {from_scene, from_index, to_scene}` — draw order follows\n  list order; branch moves are cycle-guarded."
+    },
+    {
+      "id": "tools.md#space-coordinates",
+      "source": "tools.md",
+      "title": "Space & coordinates",
+      "text": "## Space & coordinates\n* The canvas is W×H **game pixels, origin top-left, +x right, +y\n  down**. Sizes are literal pixels (an 8×8 sprite is `w: 8, h:\n  8`); the 8px tile grid is a placement convention (snap), not a\n  boundary — any integer pixel is addressable.\n* `scene_map {scene?}` — `{width, height, objects: [{path, x, y,\n  w, h, kind, solid, sprite}]}` with effective kind/solid/sprite\n  (template fallbacks applied, subscene offsets accumulated).\n  Read this before placing or moving anything.\n* `find_space {w?, h?, scene?, nearX?, nearY?, avoid?}` — first free\n  8px-snapped `{x, y}` fitting w×h inside the canvas without\n  overlapping solid objects (`avoid: 'all'` dodges every object).\n  `ok: false` means nothing fits — shrink or move things first.\n* `check_space {x, y, w?, h?, scene?}` — `{inside, fits,\n  overlaps, solid}` for a candidate rect. `fits` means inside the\n  canvas with no solid overlap.\n* Solid = `solid` flag set or `movable` kind. Overlap is rectangle\n  intersection; touching edges do not overlap."
+    },
+    {
+      "id": "tools.md#object-templates-object-sprite-instance-",
+      "source": "tools.md",
+      "title": "Object templates (Object ≠ Sprite ≠ Instance)",
+      "text": "## Object templates (Object ≠ Sprite ≠ Instance)\n* `create_object_def {name, sprite?, kind?, anim?, tick?}` — behavior\n  template: default art, kind (`player` ≤1/scene, `static`,\n  `movable` = solid+pushable), animation, tick script. Editing the\n  def updates every instance at once.\n* `place_instance {def, scene?, x?, y?, name?}` — stamp an instance;\n  position is always instance state, other fields override per\n  instance (explicit values win, even `false`).\n* `extract_object {object}` — top-level inline leaf becomes a\n  template + instance pair (id and position stay, the rest moves\n  into the new def). Prefer this over rebuilding shared art by hand.\n* Leaves resolve at flatten time (local over def), so the emitter,\n  canvas and validation all see effective values. Physics rules,\n  player caps and anim-size matches check resolved leaves."
+    },
+    {
+      "id": "tools.md#events-blocks-visual-rules-that-compile-to-etal-",
+      "source": "tools.md",
+      "title": "Events & blocks (visual rules that compile to ETAL)",
+      "text": "## Events & blocks (visual rules that compile to ETAL)\n* `add_event {def|object, trigger, key?, target?}` — loop moments:\n  `create` (scene enter), `step` (every frame), `destroy`,\n  `key` (named input), `collide` (overlap vs\n  `any|solid|player|movable|def:<id>`), `click` (press on it),\n  `alarm` (slot countdown hits 0). One event per trigger+key/target.\n  Defs own their events; instances run them (no local event lists).\n* `add_block {def|object, event, op, ...}` — one action = fixed ETAL:\n  `move {dx,dy}` (pixels, clamped), `set_pos {x,y}`,\n  `sprite {sprite}` (swap art at runtime, same tile size as the\n  leaf — the draw loop unrolls the declared size),\n  `show`/`hide` (alive bit on/off without running destroy events),\n  `play {sound}` (named one-shot SFX — see below),\n  `song {song}` (start a named 4-voice loop in the shared\n  sequencer; one loop plays at a time and keeps playing across\n  scene switches), `song_stop` (silence it),\n  `goto {scene}`,\n  `overlay {scene}` (push the current scene, enter the target as a\n  **fresh instance** — its setup runs again, so it is menu\n  navigation, NOT freeze-pause), `back` (pop to the scene below;\n  8 deep, overflow and popping an empty sta"
+    },
+    {
+      "id": "tools.md#rules-as-code",
+      "source": "tools.md",
+      "title": "Rules as code",
+      "text": "## Rules as code\n* `script_object {object, code}` — ETAL statements wrapped as\n  `tick_<scene>_<id>(slot)`, called every frame. Full generated-state\n  access (`ox[slot]`, scene fns). Only redeclarations are rejected.\n* `creation_code {object, code}` — per-instance statements spliced\n  after the leaf's create-event blocks (GameMaker Creation Code).\n  Empty clears.\n* `script_scene {scene?, code}` — statements at the end of the frame.\n* Project `customCode` adds top-level declarations plus optional\n  `custom_setup()` (boot) / `custom_frame()` (every frame) hooks."
+    },
+    {
+      "id": "tools.md#sound-theme-build",
+      "source": "tools.md",
+      "title": "Sound, theme, build",
+      "text": "## Sound, theme, build\n* `set_sound {voice 0-3, note 0-107, vol 0-255}` — mix plays once on\n  boot via Audio0–3, shared square wave.\n* `create_sound {name}` — named one-shot SFX (up to 4 voices each;\n  index = Audio device, vol 0 = silent). Trigger it after boot with\n  `play {sound}`; an all-silent sound is rejected.\n* `set_sound_voice {sound, voice 0-3, note 0-107, vol 0-255}` —\n  voice editor for the library (same ranges as the boot mix).\n* `rename_sound {from, to}` — play blocks follow. `delete_sound`\n  is refused while a play block names the sound.\n* Songs (music): `create_song {name}` — named 4-voice loop, **max 16\n  steps per voice** (the live track buffers are 16 bytes per voice:\n  128 bytes of RAM). `set_song_note {song, voice 0-3, step 0-15,\n  pitch 0-107, len 1-255}` (omit pitch for a rest; pitch 127 is the\n  rest marker from `lib/song.ux`),\n  `set_song_vol {song, voice, vol 0-255}` (vol 0 = silent, and a\n  voice with no audible notes never gets an Audio device),\n  `rename_song {from, to}` (song blocks follow), `delete_song`\n  (refused while a song block names it). One loop plays at a time\n  through `song_tick()`, called once per frame from `on_frame` —\n  a single shared "
+    },
+    {
+      "id": "varvara.md#top",
+      "source": "varvara.md",
+      "title": "varvara",
+      "text": "# Varvara context (verified against uxn2/src/uxn2.c)"
+    },
+    {
+      "id": "varvara.md#screen",
+      "source": "varvara.md",
+      "title": "Screen",
+      "text": "## Screen\n* One sprite-port write draws exactly one 8×8 tile (2bpp = 16\n  bytes: 8 channel-one rows, then 8 channel-two rows). Bigger art =\n  consecutive tiles: the Screen/auto port draws N extra tiles in one\n  write (length nibble, row/col direction, auto-addr advances 8 or 16\n  bytes per tile) — or just repeat addr+sprite writes per tile, which\n  is what our emitter does (no auto-port dependency, portable to\n  every emulator). Sprite byte: bit7 = 2bpp, bit6 = layer, bits5-4 =\n  flips, low nibble = blend.\n* Blend LUT row 1 is identity `{0,1,2,3}` and opaque — so mode **129**\n  (0x81) draws true 4-color 2bpp sprites. Index 0 is NOT transparent\n  there; it paints palette 0. (Blend 0 skips index 0 but collapses\n  index 1 into palette 0 — wrong for full-color art.)\n* No cursor is drawn by the VM — games blit their own (`SDL_ShowCursor`\n  off). Coordinates are window pixels: at zoom ≠ 1, hit-tests\n  miscalibrate by the zoom factor (upstream behavior)."
+    },
+    {
+      "id": "varvara.md#palette",
+      "source": "varvara.md",
+      "title": "Palette",
+      "text": "## Palette\nSystem r/g/b ports hold four 4-bit nibbles each. Color *i* takes\nnibble (i==0||i==2 ? 4:0) of byte (i<2 ? low : high); channels expand\nby duplication (`0xB → 0xBB`). Demo theme `45163, 32876, 16508`\ndecodes to grey-blue `#666677`, pale `#bbcccc`, brown `#bb8844`,\nblack `#000000`. Any theme is legal — that is the whole color story."
+    },
+    {
+      "id": "varvara.md#controller-mouse",
+      "source": "varvara.md",
+      "title": "Controller / Mouse",
+      "text": "## Controller / Mouse\n* Button byte bitmask (d-pad above); `key` = last keycode, self-clearing.\n* Mouse `x/y` track always, `state` bitmask, scroll ports are one-shot\n  deltas with inverted Y (zeroed after the vector fires)."
+    },
+    {
+      "id": "varvara.md#audio-4-voices-audio0-3-",
+      "source": "varvara.md",
+      "title": "Audio (4 voices, Audio0–3)",
+      "text": "## Audio (4 voices, Audio0–3)\n* `pitch` = MIDI note (69 ≈ 441Hz, 0–107 audible, 108+ silent);\n  high bit set = one-shot, clear = loop.\n* Samples: unsigned 8-bit mono 44100Hz, 128-center. `length` in bytes,\n  `volume` byte, `adsr` envelope. Long samples play ~1:1 at middle C.\n* Web emulator (uxn5) has no audio device — builds play silently there."
+    },
+    {
+      "id": "varvara.md#system-datetime-file",
+      "source": "varvara.md",
+      "title": "System / DateTime / File",
+      "text": "## System / DateTime / File\n* `System.r/g/b` theme the palette; `System.vector` boots.\n  `metadata` blob carries title/author.\n* DateTime ports seed RNG. File pages do host I/O relative to the\n  emulator CWD (native: inline in DEO; web: completes via vector)."
+    }
+  ]
+}

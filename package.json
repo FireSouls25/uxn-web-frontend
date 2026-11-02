@@ -10,7 +10,11 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "sync:rag": "sh scripts/sync-rag.sh",
+    "sync:chess": "sh scripts/sync-chess.sh",
+    "rag:build": "node scripts/build-rag-index.mjs"
   },
   "dependencies": {
     "@astrojs/react": "^4.0.0",
