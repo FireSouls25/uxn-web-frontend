@@ -5,7 +5,7 @@ import { API_URL } from "./api";
 import { t, type Lang } from "./i18n";
 import { emitProject, validateProject, type Project } from "./project";
 
-export type ExportTarget = "linux" | "web";
+export type ExportTarget = "linux" | "web" | "macos" | "macos-intel" | "windows";
 export type ExportMode = "bundle" | "rom" | "tal";
 
 export interface Diagnostic {
@@ -30,6 +30,8 @@ export function artifactFilename(project: string, target: ExportTarget, mode: Ex
   if (mode === "tal") return `${slug}.tal`;
   if (mode === "rom") return `${slug}.rom`;
   if (target === "web") return `${slug}.html`;
+  if (target === "windows") return `${slug}-windows.zip`;
+  if (target === "macos" || target === "macos-intel") return `${slug}.${target}`;
   return `${slug}.linux`;
 }
 
@@ -92,12 +94,23 @@ export async function compileProject(
   const key = mode === "tal" ? "tal" : mode === "rom" ? "rom_b64" : target === "web" ? "html_b64" : "bundle_b64";
   const payload = body.artifacts[key];
   if (typeof payload !== "string") return { ok: false, message: t(lang, "exp.failed") };
-  const bytes =
+  let bytes: Uint8Array =
     key === "tal"
       ? new TextEncoder().encode(payload)
       : Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
-  const mime = key === "tal" ? "text/plain" : key === "html_b64" ? "text/html" : "application/octet-stream";
+  if (key === "html_b64" && project.gameCursor) bytes = hideHostCursor(bytes);
+  const mime = key === "tal" ? "text/plain" : key === "html_b64" ? "text/html" : target === "windows" ? "application/zip" : "application/octet-stream";
   return { ok: true, message: t(lang, "exp.done"), bytes, mime, filename: artifactFilename(project.name, target, mode) };
+}
+
+/** Web page: the game draws its own pointer, so hide the browser's
+    over the game canvas (native uxn emulators always do). */
+export function hideHostCursor(html: Uint8Array): Uint8Array {
+  const text = new TextDecoder().decode(html);
+  const style = "<style>#display{cursor:none}</style>";
+  const at = text.indexOf("</head>");
+  const out = at >= 0 ? text.slice(0, at) + style + text.slice(at) : style + text;
+  return new TextEncoder().encode(out);
 }
 
 export async function exportProject(

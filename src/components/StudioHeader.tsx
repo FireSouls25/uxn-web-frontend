@@ -1,8 +1,13 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
 import {
+  Apple,
   Box,
   Braces,
+  Cpu,
+  FileCode2,
+  Globe,
+  Monitor,
   Download,
   FilePlus2,
   Image,
@@ -17,12 +22,18 @@ import {
   X,
 } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
-import { compileProject, exportProject, type ExportMode, type ExportTarget } from "../lib/export";
+import { artifactFilename, compileProject, exportProject, type ExportMode, type ExportTarget } from "../lib/export";
+import Popover from "./blocks/Popover";
+import { fetchTargets } from "../lib/api";
 import {
   addScene,
   canvasModeStore,
+  codeFileStore,
   deleteScene,
+  diagnosticsStore,
   openPlaytest,
+  PLAY_ON_OPEN_KEY,
+  playRequestStore,
   patchViewport,
   projectStore,
   reorderScenes,
@@ -32,6 +43,25 @@ import {
   viewportStore,
   viewStore,
 } from "../lib/store";
+
+type ExportChoice = "web" | "linux" | "rom" | "tal" | "macos" | "macos-intel" | "windows";
+
+/* What the export panel offers, in order. OS apps (`os`) are offered
+   when the backend's compiler vendors that system's VM (GET
+   /targets); until then they show as "soon". ROM runs everywhere. */
+const EXPORT_CHOICES: Array<{ id: ExportChoice; icon: typeof Globe; ext: string; os?: boolean }> = [
+  { id: "web", icon: Globe, ext: ".html" },
+  { id: "linux", icon: TerminalSquare, ext: "x86_64" },
+  { id: "windows", icon: Monitor, ext: ".zip", os: true },
+  { id: "macos", icon: Apple, ext: "Apple silicon", os: true },
+  { id: "macos-intel", icon: Apple, ext: "Intel", os: true },
+  { id: "rom", icon: Cpu, ext: ".rom" },
+  { id: "tal", icon: FileCode2, ext: ".tal" },
+];
+
+const choiceTarget = (c: ExportChoice): ExportTarget =>
+  c === "linux" || c === "windows" || c === "macos" || c === "macos-intel" ? c : "web";
+const choiceMode = (c: ExportChoice): ExportMode => (c === "rom" ? "rom" : c === "tal" ? "tal" : "bundle");
 
 /* Studio header: project identity + scene tabs (click, +/x,
    drag-across to reorder) + the Scene|Logic canvas toggle +
@@ -46,11 +76,21 @@ export default function StudioHeader() {
   const vp = useStore(viewportStore);
   const [dragTab, setDragTab] = useState<number | null>(null);
   const [expOpen, setExpOpen] = useState(false);
-  const [target, setTarget] = useState<ExportTarget>("web");
-  const [expMode, setExpMode] = useState<ExportMode>("bundle");
+  const [choice, setChoice] = useState<ExportChoice>("web");
+  // Target ids the backend can build right now (GET /targets).
+  const [served, setServed] = useState<Set<string>>(new Set(["web", "linux"]));
+  useEffect(() => {
+    if (!expOpen) return;
+    const ctl = new AbortController();
+    fetchTargets(ctl.signal)
+      .then((r) => setServed(new Set(r.supported.map((x) => x.id))))
+      .catch(() => undefined);
+    return () => ctl.abort();
+  }, [expOpen]);
   const [playBusy, setPlayBusy] = useState(false);
   const [expBusy, setExpBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const diagCount = useStore(diagnosticsStore).length;
 
   const locked = !!project.locked;
   const isCode = project.kind === "code";
@@ -82,21 +122,42 @@ export default function StudioHeader() {
     setMessage(null);
     try {
       const result = await compileProject(projectStore.get(), "web", "bundle", lang);
+      diagnosticsStore.set(result.diagnostics ?? []);
       if (!result.ok || !result.bytes) {
         setMessage(result.message);
         return;
       }
       openPlaytest(URL.createObjectURL(new Blob([result.bytes as BlobPart], { type: "text/html" })));
       setMessage(t(lang, "exp.play_ready"));
+    } catch {
+      setMessage(t(lang, "exp.offline"));
     } finally {
       setPlayBusy(false);
     }
   }
 
+  // Playtest requests from elsewhere (script-loop banner) and the
+  // Projects page Play button (one-shot flag for this project).
+  const playRef = useRef(playtest);
+  playRef.current = playtest;
+  useEffect(() => {
+    const off = playRequestStore.listen(() => void playRef.current());
+    try {
+      if (sessionStorage.getItem(PLAY_ON_OPEN_KEY) === projectStore.get().id) {
+        sessionStorage.removeItem(PLAY_ON_OPEN_KEY);
+        void playRef.current();
+      }
+    } catch {
+      /* no sessionStorage: Play just opens the studio */
+    }
+    return off;
+  }, []);
+
   async function download() {
     setExpBusy(true);
     try {
-      const result = await exportProject(projectStore.get(), target, expMode, lang);
+      const result = await exportProject(projectStore.get(), choiceTarget(choice), choiceMode(choice), lang);
+      diagnosticsStore.set(result.diagnostics ?? []);
       setMessage(result.message);
     } finally {
       setExpBusy(false);
@@ -146,6 +207,11 @@ export default function StudioHeader() {
         >
           {isCode ? t(lang, "proj.code_kind") : t(lang, "proj.visual_kind")}
         </span>
+        {!isCode && project.loop === "script" && (
+          <span title={t(lang, "loop.script_hint")} className="rounded-full bg-teal/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest text-teal">
+            {t(lang, "loop.script")}
+          </span>
+        )}
         {project.locked && (
           <span className="rounded-full bg-yellow/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest text-yellow">
             {t(lang, "proj.locked")}
@@ -210,45 +276,61 @@ export default function StudioHeader() {
           {playBusy ? t(lang, "exp.working") : t(lang, "exp.playtest")}
         </button>
 
-        <span className="relative">
-          <button onClick={() => setExpOpen((v) => !v)} aria-expanded={expOpen} className={seg(expOpen)}>
-            {t(lang, "hdr.export")}
-          </button>
-          {expOpen && (
-            <div className="dock absolute right-0 top-full z-30 mt-2 w-56 rounded-2xl p-3">
-              <p className="mb-1 font-mono text-[11px] text-subtext0">{t(lang, "exp.target")}</p>
-              <div className="flex gap-1">
-                {(["web", "linux"] as const).map((id) => (
-                  <button key={id} onClick={() => setTarget(id)} className={seg(target === id)}>
-                    {id}
+        <Popover
+          width={320}
+          open={expOpen}
+          onOpenChange={setExpOpen}
+          title={t(lang, "exp.title")}
+          trigger={(open) => (
+            <span role="button" tabIndex={0} aria-expanded={open} className={`${seg(open)} inline-flex cursor-pointer items-center gap-1.5`}>
+              <Download size={13} />
+              {t(lang, "hdr.export")}
+            </span>
+          )}
+        >
+          {() => (
+            <div className="space-y-1">
+              {EXPORT_CHOICES.map((c) => {
+                const soon = !!c.os && !served.has(c.id);
+                const active = c.id === choice;
+                const Icon = c.icon;
+                return (
+                  <button
+                    key={c.id}
+                    disabled={soon}
+                    onClick={() => setChoice(c.id)}
+                    aria-pressed={active}
+                    className={`flex w-full items-start gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-colors ${
+                      active ? "border-mauve bg-mauve/10" : "border-transparent hover:bg-surface0"
+                    } disabled:cursor-not-allowed disabled:opacity-50`}
+                  >
+                    <Icon size={16} className={`mt-0.5 shrink-0 ${active ? "text-mauve" : "text-subtext0"}`} />
+                    <span className="min-w-0">
+                      <span className="flex items-center gap-1.5 text-[13px] font-semibold text-text">
+                        {t(lang, `exp.c_${c.id}`)}
+                        <span className="font-mono text-[10px] font-normal text-overlay0">{c.ext}</span>
+                        {soon && <span className="rounded bg-surface0 px-1 font-mono text-[9px] uppercase text-subtext0">{t(lang, "exp.soon")}</span>}
+                      </span>
+                      <span className="block text-[11px] leading-snug text-subtext0">{t(lang, `exp.c_${c.id}_d`)}</span>
+                    </span>
                   </button>
-                ))}
-              </div>
-              <p className="mb-1 mt-2 font-mono text-[11px] text-subtext0">{t(lang, "exp.mode")}</p>
-              <div className="flex gap-1">
-                {(
-                  [
-                    ["bundle", t(lang, "exp.bundle")],
-                    ["rom", t(lang, "exp.rom")],
-                    ["tal", t(lang, "exp.tal")],
-                  ] as Array<[ExportMode, string]>
-                ).map(([id, label]) => (
-                  <button key={id} onClick={() => setExpMode(id)} className={seg(expMode === id)}>
-                    {label}
-                  </button>
-                ))}
-              </div>
+                );
+              })}
+              <p className="truncate px-1 pt-1 font-mono text-[10px] text-overlay0">
+                {artifactFilename(project.name, choiceTarget(choice), choiceMode(choice))}
+              </p>
               <button
                 onClick={download}
                 disabled={expBusy}
-                className="seg-active mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-[13px] font-semibold disabled:opacity-70"
+                className="seg-active inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-[13px] font-semibold disabled:opacity-70"
               >
                 {expBusy ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
                 {expBusy ? t(lang, "exp.working") : t(lang, "exp.go")}
               </button>
+              {message && <p className="px-1 text-[11px] leading-snug text-subtext0">{message}</p>}
             </div>
           )}
-        </span>
+        </Popover>
       </div>
       {!isCode && (
         <div className="flex items-center gap-1 overflow-x-auto border-t border-surface0/60 px-3 py-1.5" role="tablist">
@@ -304,7 +386,22 @@ export default function StudioHeader() {
           </button>
         </div>
       )}
-      {message && <p className="border-t border-surface0/60 px-3 py-1 text-[13px] text-subtext0">{message}</p>}
+      {message && (
+        <p className="flex items-center gap-2 border-t border-surface0/60 px-3 py-1 text-[13px] text-subtext0">
+          <span className="min-w-0 flex-1 truncate">{message}</span>
+          {diagCount > 0 && view !== "code" && (
+            <button
+              onClick={() => {
+                if (!isCode && !codeFileStore.get()) codeFileStore.set("custom.ux");
+                viewStore.set("code");
+              }}
+              className="shrink-0 rounded-md bg-red/15 px-2 py-0.5 font-mono text-[11px] text-red hover:bg-red/25"
+            >
+              {t(lang, "code.show_problems")} ({diagCount})
+            </button>
+          )}
+        </p>
+      )}
     </div>
   );
 }
