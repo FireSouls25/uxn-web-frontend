@@ -1,8 +1,9 @@
-# Engine plan: from scene painter to real engine — PHASES 0–6 DONE
+# Engine plan: from scene painter to real engine — PHASES 0–14 DONE
 
-Status: **Phases 0–6 done** (friction fixes, multi-tile sprites,
+Status: **Phases 0–14 done** (friction fixes, multi-tile sprites,
 object templates, events/blocks, named sounds, scene map, polish,
-canvas-first studio rebuild + execute/button blocks).
+canvas-first studio rebuild + execute/button blocks, … music/labels/
+scene stack, and Phase 13: scripts, standard library, script loop; Phase 14: sheets, per-node looks, scene modules, palette fix).
 Phases 0–5 made it an engine; Phase 6 made it feel like one
 (GameMaker loop, Godot chrome). Each phase lists the model change,
 the emitter change, the UI change, and the docs/tests that move
@@ -624,6 +625,110 @@ a pause/menu that returns you where you were.
   blocks stay byte-identical, real-etal assembly of all three
   together. Suites: 118.
 
+### Phase 13 — Scripting surface: scripts, library, script loop ✅ DONE
+
+*Why:* code was a single custom.ux textarea with two hooks, no
+imports, no files, no library, and no way to own the frame — so a
+real hand-written game (chess) could only ride along as dead code,
+and the "chess example" was either a non-playable showcase or a
+blocks port that fought the Uxn budgets and no longer assembled.
+* Model (additive; old projects load untouched): `scripts?:
+  {path, code}[]` (whole `.ux` modules, imported by main.ux in list
+  order), `loop?: "engine" | "script"`, hooks grown from two to five
+  (`custom_setup`, `custom_frame`, `custom_draw` engine-only,
+  `custom_key`, `custom_mouse`), detected in custom.ux or any script.
+* Standard library: `src/lib/stdlib/` = uxn-dsl `lib/*.ux` minus
+  tests (`npm run sync:stdlib`). `import "screen.ux"` from any user
+  file ships that module and its imports as siblings (backend only
+  resolves siblings); nothing unimported ships. `stdlib.ts` parses
+  exports (fn/macro/const/data/global) for the reference panel and
+  the `list_library` tool.
+* Emitter, engine loop: custom.ux `import` lines hoist to the top;
+  scripts are imported **after the engine's state** and custom.ux
+  splices after them (both before every engine fn) — the compiler
+  needs globals declared before use, fns resolve anywhere, so user
+  code can read `ox`/`var_*`/`SC_*` and engine fns can call it.
+  `custom_draw()` runs after each scene's draw; key/mouse hooks run
+  inside the vectors (vectors are installed when only a hook needs
+  them). Projects without scripts/imports keep their bytes except
+  for custom.ux's position (now after engine state — strictly more
+  names visible, same program).
+* Emitter, script loop (`emitScriptProject`): no scene runtime.
+  start sets theme/screen/bg fill, inits variables, calls
+  `custom_setup`, points Screen at `on_frame → custom_frame()` and the
+  vectors at the key/mouse hooks. A generated `assets.ux` (imported
+  before every script) holds only what the code names — `data
+  spr_<id>`, `snd_<id>()` over its own `snd_wave`, `buffer
+  var_<id>[1]`, `KEY_<INPUT>` constants — because unused data and
+  globals warn and warning-free assembly is a tested property.
+  devices.ux declares every Varvara device the libs touch.
+* Validation: script names (ident `.ux`, unique, not generated or a
+  library name, ≤32 files, ≤64KB), every import resolves (script,
+  library, devices.ux, assets.ux in the script loop), engine loop:
+  reserved-name gate per script + library modules that declare
+  engine names (scene.ux → "switch to the script loop"); script loop:
+  `custom_frame` required, `custom_draw` rejected, generated names
+  (`start`, `main`, `on_*`, `spr_`/`snd_`/`var_`/`KEY_`) rejected —
+  top-level declarations only, locals never collide.
+* UI: Code page rebuilt as a scripting workspace — game-loop switch;
+  Scripts (custom.ux "hooks" + modules: add/rename with import
+  rewrite/reorder/delete-refused-while-imported); snippets (engine
+  loop) and variables; Library (read-only modules, "in use" marks);
+  Generated (main/devices/assets). Editor (`CodeEditor.tsx`): Tab /
+  Shift+Tab block indent, auto-indent, Ctrl+S = Check, red gutter +
+  line wash on problems. Problems strip: live validation + compiler
+  diagnostics from Check/Playtest/Export, main.ux lines mapped back
+  into custom.ux, click to jump. Reference panel: hooks (defined ✓
+  or one-click stub, `required` in the script loop), every engine
+  name for the current loop, the open file's library exports, and
+  one-click imports — all insert at the caret. Header: script-loop
+  badge + "Problems (n)" jump after a failed build. Canvas: a
+  script-loop banner (open code / switch back). Projects hub: new
+  project picks Engine or Script (script starts from a steer-a-sprite
+  `SCRIPT_STARTER`); script projects open on the Code page.
+* Chess example = the local game on the script loop, pixel-identical
+  to `etal -r chess/main.ux` under uxn-dsl's headless `pixels/chess.cjs`
+  scenario (menu, board, both glides, quit). `game.ux`/`rules.ux`
+  verbatim; local `game.ux` gained `game_boot`/`game_key`/
+  `game_mouse` (boot + latches as plain fns, `main.ux` calls them —
+  same behavior) and its library imports were repointed to
+  `../uxn-dsl/lib/` (the old `../../lib/` no longer existed). Pieces
+  are one 4×3-tile `pieces` sprite sheet read by a studio `pieces.ux`
+  (`&spr_pieces + (side*6+kind)*16`): twelve sprite labels plus a
+  branchy `tile_addr` overflowed drifblim's symbol dictionary — the
+  game already sits near that cap. Locked; Duplicate to edit. The
+  blocks-only chess WIP (`chess-engine.ts`, which no longer
+  assembled) is parked in `reference/` (git-ignored).
+* Chess art as engine sprites: the local `pieces.ux` now holds every
+  graphic as 2bpp `data spr_<id>` blocks — `spr_pieces` (4×3),
+  `spr_square` (2×2 cell), `spr_dot`, `spr_cursor` — and `game.ux`
+  reads those labels (squares/dot/cursor moved from 1bpp to 2bpp
+  blits with the same blend, so pixels match). The studio ships
+  `pieces.ux` without the data blocks and the four are library
+  sprites. Checked against the pre-change local ROM in 8 UI states
+  (menu, cursor, side picker, board, selection dots, move, pause):
+  byte-identical frames, local and studio builds.
+* `gameCursor` project flag (Code → Game loop checkbox): web builds
+  and Playtest inject `#display{cursor:none}` so the browser pointer
+  doesn't double the game's own arrow (native uxn always hides it;
+  off by default since engine-loop games draw none). Chess sets it.
+* Studio entry: script-loop projects land on Code after the /studio
+  reload; the script-loop banner has Playtest; the Projects chess
+  card has Play (opens the studio and starts Playtest).
+* Agent: `set_loop`, `set_custom_code`, `write_script`,
+  `delete_script`, `list_library`; `describe` reports loop/scripts/
+  hooks. Both rag mirrors + index updated (`tools.md`, `examples.md`).
+* Tests: `scripting.test.ts` (library closure/exports; script loop
+  emit, named-only assets, vectors, starter, rejections; engine-loop
+  scripts + hooks placement + real-etal assembly; validation;
+  chess = local files + sheet bytes = local tiles + warning-free
+  assembly) and an agent flow. Suites: 131 (+2 skipped), `tsc`
+  clean, production build ok.
+* Deferred, honestly: songs aren't exported to the script loop (use
+  `song.ux`); scripts can't read scene layouts in the script loop; no
+  autocomplete beyond the reference panel; CI can't re-sync stdlib
+  (the uxn-dsl checkout isn't there) so the bundle is committed.
+
 ## 4. How the graphical version compiles to our DSL
 
 Same pipeline as today, one new lowering in the middle:
@@ -653,3 +758,84 @@ the same bytes — determinism already guaranteed by sorted ids.
 * `i18n.ts` en+es for every string (the i18n test fails otherwise).
 * `ENGINE_PLAN.md` (this file): check off phases as they land,
   record deviations.
+
+## Phase 14 — expressive art and scenes (DONE)
+
+Engine features instead of per-game workarounds; chess rebuilt on them.
+
+* **Palette decode fix.** `palette.ts` read the low byte of each
+  System short first; both emulators read color 0 from the TOP nibble
+  (uxn2 `dev[0x8]`, uxn5 shifts 12/8/4/0). Every editor color was
+  rotated against the game (a chess frame clears to #bb8844 = c0; the
+  editor said #666677). Fixed decode + `setPaletteIndex`; the default
+  theme constants were re-encoded (0x6BB0/0x6C80/0x7C40) so theme-less
+  projects keep the look the editor always showed — and now the game
+  matches it. Explicit themes now display what the VM paints.
+* **Sprite sheets.** `Sprite.cell {w,h}` (tiles, must divide the
+  sprite). A node shows one cell (`SceneNode.cell`) and measures as one
+  cell everywhere (spritePx/tileDimsOf/validation); emitter points `ot`
+  at the cell's first tile and steps rows a sheet-width apart
+  (`cellTileOffset`). Sprites view: "Sheet cells" select. Animations
+  can't target sheets (they swap whole sprites).
+* **Per-node looks.** `flipX`, `flipY`, `blend` (0–15) on nodes and
+  object templates → Varvara's Screen.sprite byte (`lookMode`; default
+  129, so old projects emit the same bytes). `BLENDING`/`blendColor`/
+  `leafPaint` paint the scene canvas exactly like the VM (transparent
+  blends 0/5/10/15 included). Inspector: `LookEditor` (cell thumbnails,
+  flip toggles, 16 blend swatches showing what colors 0–3 paint).
+* **Scene modules (script loop).** A scene the code names
+  (`draw_scene_<id>`, `scn_<id>`, `SCN_<ID>_COUNT`) ships in assets.ux:
+  a `scn_<id>` layout table (`SCN_ROW` = 8 bytes: x hi/lo, y hi/lo,
+  sprite index `SPR_<ID>`, cell, mode, kind) and `draw_scene_<id>()`,
+  which walks the table and dispatches per kind (sprite+cell+mode), so
+  64 identical squares cost two tile-write blocks, not 64. No locals
+  beyond r/x/y: fn locals are permanent zero-page bytes.
+* Agent: `set_sheet`, `set_look`; rag tools/examples updated.
+* **Web audio fix (uxn-dsl `web/audio.js`).** Notes are rendered
+  whole (envelope included) into a buffer, but the buffer was set to
+  loop whenever the pitch lacked the play-once bit — so any looping
+  note (chess's capture/check/menu SFX) replayed until the next sound
+  retriggered the voice. Now only envelope-less notes (adsr 0, which
+  sustain in uxn2) loop. etal reads web/ at compile time: no rebuild.
+* **Chess.** Art: `pieces` (4×3 sheet), `squares` (two 16×16 cells),
+  `dot`, outlined `cursor` (blend 5). Scenes: `board` (64 squares) and
+  `setup` (nests board + 32 pieces). `game.ux` draws
+  `draw_scene_board()` (row reveal = a fill over rows not in yet) and
+  `load_setup()` reads `scn_setup`. Colors: c0 orange panel/white fill
+  (blend 0), c1 black text/white rim/black fill, c2 light squares, c3
+  dark blue squares + black rim (blend 5). Fixed an inverted far-side
+  test that drew the player's own army upside down. The local build
+  imports the studio-generated `assets.ux` (`npm run sync:chess-assets`,
+  checked by `chess-assets.test.ts`); local and studio ROMs draw
+  identical frames in 8 UI states, uxn-dsl's chess scenario ALL-OK.
+
+
+## Phase 15 — engine v2: events, scrolling levels, examples (DONE)
+
+* **Engine v2 model.** Templates + inline objects own events
+  (create, step, destroy, key, click, release, collide, alarm,
+  message); scenes own level events and a spawn pool. Actions are
+  sentence blocks with value expressions (variables, my/other vars,
+  properties, mouse, random, math, script calls) and conditions.
+  Runtime: data-driven scene rows, handlers emitted once per
+  template over the `self` slot, overlays that freeze the scene
+  below, text with numbers. Chess is rebuilt on it.
+* **Scrolling levels.** `Scene.tilemap` (one byte per 8×8 cell from a
+  1×1-cell sheet; listed cells solid; sets the world size, max 16384
+  cells), `Scene.camera.follow` (centered, clamped), `hud` objects
+  that ignore the camera. Only the cells under the screen are drawn.
+* **Movement presets.** `ObjectDef.movement`: `platformer` (arrows,
+  up/A/space jump, gravity, solid tiles + solid objects block) and
+  `walker` (patrols, turns at walls and ledges); `speed`, `jump`;
+  the `jump {power}` action. Vertical speed is stored +8 so all of it
+  stays unsigned; scratch lives in RAM buffers, not the zero page.
+* **Editor.** Tile painting in the Scene view (brush per sheet cell,
+  eraser, right-click toggles solid), wide levels scroll at screen
+  scale with the first screen outlined; movement/speed/jump/HUD in the
+  template editor; camera picker on scenes; `jump` in the blocks menu.
+* **Examples.** Sprout Run (platformer, no scripts), Star Catcher
+  (spawn timer, random, template variables, HUD messages) and Chess,
+  all locked and always listed. Headless tests drive each in the VM.
+* **Agent.** Live project summary per turn, `read_file`,
+  `check_build`, `set_movement`, `set_hud`, `set_camera`,
+  `set_tilemap`; corpus rewritten (engine.md, etal.md).

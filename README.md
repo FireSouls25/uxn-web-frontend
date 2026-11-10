@@ -55,22 +55,56 @@ code emitted in hierarchy order (drag-reorder = draw order); up to 4
 sound voices (MIDI 0–107) play once on boot through `Audio0–3` with a
 shared square wave, and named one-shot sounds from the library fire
 after boot via play blocks — all inside Uxn limits, palette computed
-from the emulator's own formula (`src/lib/palette.ts`). Two escape hatches
-keep it honest: visual projects accept a `customCode` block (raw
-top-level ETAL with optional `custom_setup`/`custom_frame` hooks,
-reserved generated names rejected), and `kind: "code"` projects pass
-hand-written file sets through untouched — see the chess showcase
-(`src/lib/examples/chess/` synced from `uxn-webpage/chess/` via
-`sh scripts/sync-chess.sh`): all 12 piece tiles as gallery sprites,
-five scenes, and the full rules engine (move generation, check, AI)
-spliced in as custom code with a boot hook. Read-only, browseable,
-assembling warning-free.
+from the emulator's own formula (`src/lib/palette.ts`). Code is a first-class path, not an escape hatch:
+
+* **Hooks** in `custom.ux` (any of `custom_setup`, `custom_frame`,
+  `custom_draw`, `custom_key`, `custom_mouse`, called when defined).
+* **Scripts**: whole `.ux` modules (`project.scripts`) imported by
+  main.ux, which can import each other and the **standard library**
+  (`src/lib/stdlib/`, uxn-dsl `lib/*.ux` synced by `npm run
+  sync:stdlib`) by name — `import "font.ux"` ships exactly that
+  module and its deps.
+* **Game loop**: `engine` (default — scenes/blocks run, code plugs
+  in) or `script` (`custom_frame` is the loop; the engine boots
+  theme/screen/variables, wires the vectors to the hooks and
+  generates `assets.ux` with the `spr_*`/`snd_*()`/`var_*`/`KEY_*`
+  names your code uses).
+* `kind: "code"` projects still pass hand-written file sets through
+  untouched.
+
+The Code page is the workspace for all of it: loop switch, scripts,
+library browser, generated output, a problems strip (live validation
++ compiler diagnostics with jump-to-line, Ctrl+S = Check) and a
+reference panel that inserts hooks, engine names and library calls
+at the caret. The chess showcase (`src/lib/examples.ts`, game
+sources synced from `uxn-webpage/chess/` via `npm run sync:chess`)
+is the hand-written game on the script loop — pixel-identical to the
+local `etal -r chess/main.ux` build — with its art as sprite sheets
+(`pieces`, `squares`) and its board as scenes (`board`, `setup`): the
+game draws `draw_scene_board()` and reads its starting position from
+`scn_setup`, so moving a piece in the Scene editor changes the game.
+The local build imports the same generated `assets.ux`
+(`npm run sync:chess-assets`). The Projects page has Play (opens
+straight into Playtest) and Open. A project's "Game draws its own
+mouse cursor" setting (Code → Game loop) hides the browser pointer
+over the game in web builds. Read-only; Duplicate to edit.
 
 ```sh
 npm test          # determinism, validation, dispatch markers…
                   # …plus a real `etal -r` of the sample when a binary exists
                   # (ETAL_BIN env, else the local checkout path)
 ```
+
+## Engine v2 (`src/lib/engine.ts`) and examples
+
+Visual projects compile through the engine runtime: templates and
+inline objects with events → actions (Blocks view), scenes with level
+events, a spawn pool, an optional tile layer (`tilemap`, painted in
+the Scene view) and a camera that follows a template. Templates can
+use built-in `platformer` / `walker` movement. See ENGINE_PLAN.md
+phase 15. Locked examples (always on the Projects page, Duplicate to
+edit): **Sprout Run** (`src/lib/examples/platformer.ts`), **Star
+Catcher** (`catcher.ts`) and **Chess** (`examples.ts`).
 
 ## Agent tools (`src/lib/agent/`)
 
@@ -101,6 +135,9 @@ purpose — models invent plausible ones and our handlers ignore them.
 `AgentChat.tsx` keeps one agent instance alive, so the conversation
 remembers itself; tools still run in this tab against the open
 project. RAG corpus + endpoint contract live in `backend/rag/`.
+In-page retrieval (`src/lib/agent/rag.ts` over `corpus/index.json`,
+rebuilt by `npm run rag:build` after `npm run sync:rag`) prepends the
+top-3 matching chunks to each user turn; CI fails when either is stale.
 
 ```sh
 # live check (needs a backend + a model; skipped by `npm test`)
