@@ -454,7 +454,11 @@ describe("star catcher example", () => {
     const s = run(b.rom, [["key", 32], ["frames", 5], ["snap", "start"], ["frames", 90], ["snap", "later"]]);
     // More yellow (stars are color 2) once the first drops fall.
     expect(count(s.later, "2")).toBeGreaterThan(count(s.start, "2"));
-  });
+    // Nobody steers, so stars land and lives go: the last heart hides.
+    const hearts = (snap: string[]) => count(snap.slice(6, 14).map((r) => r.slice(216, 256)), "3");
+    const t = run(b.rom, [["key", 32], ["frames", 5], ["snap", "full"], ["frames", 260], ["snap", "hurt"]]);
+    expect(hearts(t.hurt)).toBeLessThan(hearts(t.full));
+  }, 30000);
 });
 
 describe("life lab example", () => {
