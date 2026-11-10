@@ -1,308 +1,185 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@nanostores/react";
-import { Check, Copy, Download, Plus, Trash2 } from "lucide-react";
-import { t, useLang } from "../lib/i18n";
-import { emitProject } from "../lib/project";
 import {
-  addSnippet,
+  AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  Check,
+  CheckCircle2,
+  Copy,
+  Download,
+  FileCode2,
+  Library,
+  Loader2,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
+import CodeEditor, { outline, type EditorApi } from "./CodeEditor";
+import { t, useLang, type Lang } from "../lib/i18n";
+import { compileProject } from "../lib/export";
+import { liveEnabledStore, liveStatusStore, scheduleLiveCheck, setLiveEnabled } from "../lib/live";
+import {
+  HOOKS,
+  definedHooks,
+  emitProject,
+  loopOf,
+  scriptAssetNames,
+  usedStdlib,
+  validateProject,
+  type HookName,
+  type Project,
+} from "../lib/project";
+import { STDLIB, STDLIB_NAMES, importsOf, moduleExports, moduleSummary } from "../lib/stdlib";
+import {
+  addScript,
   addVariable,
   codeFileStore,
-  currentIdStore,
-  deleteSnippet,
+  deleteScript,
   deleteVariable,
+  diagnosticsStore,
+  moveScript,
   projectStore,
-  projectsStore,
-  renameSnippet,
+  renameScript,
   renameVariable,
-  setSnippetCode,
+  setCustomCode,
+  setGameCursor,
+  setLoopMode,
+  setScriptCode,
   setVariableInit,
-  snippetSelStore,
 } from "../lib/store";
 
-/* Full-page code studio.
-   Coloring lives in the WEBPAGE, not the compiler, on purpose: the
-   compiler owns the grammar (and its file:line:col diagnostics stay
-   the arbiter), while color is presentation — theme, density and
-   navigation choices that must never change emitted bytes. This
-   highlighter is a regex/stack projection of ETAL/Uxntal, good enough
-   to read; `POST /compile` failures still win over any color here. */
+/* Code page = the scripting workspace. Three columns:
+   - files: game-loop switch, your scripts (custom.ux hooks + modules),
+     snippets/variables, the standard library, generated output;
+   - editor: highlighted, Tab/indent aware, problems strip with
+     jump-to-line (local validation live, compiler diagnostics after
+     Check/Playtest/Export), Ctrl+S = Check;
+   - reference: hooks (defined or one-click stub), every engine name
+     the code may use for this loop, and the exports of every library
+     module the open file imports — click to insert at the caret.
+   File keys (codeFileStore): "custom.ux", a script path, "lib/<mod>",
+   or a generated file name. */
 
-type Tok = { text: string; kind: "plain" | "comment" | "string" | "directive" | "port" | "keyword" | "type" | "number" };
+const GENERATED = ["main.ux", "devices.ux", "assets.ux"];
 
-const KEYWORDS = new Set([
-  "fn", "event", "device", "buffer", "data", "group", "struct", "macro",
-  "import", "return", "if", "elif", "else", "while", "for", "match",
-  "brk", "print", "assert", "meta", "is",
-]);
-const TYPES = new Set(["u8", "u16", "i8", "i16", "bool", "void", "mod"]);
-
-const KIND_COLOR: Record<Tok["kind"], string> = {
-  plain: "var(--ctp-text)",
-  comment: "var(--ctp-overlay0)",
-  string: "var(--ctp-green)",
-  directive: "var(--ctp-yellow)",
-  port: "var(--ctp-sky)",
-  keyword: "var(--ctp-mauve)",
-  type: "var(--ctp-teal)",
-  number: "var(--ctp-peach)",
+const HOOK_STUBS: Record<HookName, string> = {
+  custom_setup: "custom_setup :: fn() {\n    ( once, at boot )\n}\n",
+  custom_frame: "custom_frame :: fn() {\n    ( every frame )\n}\n",
+  custom_draw: "custom_draw :: fn() {\n    ( after the scene draws: HUD, overlays )\n}\n",
+  custom_key: "custom_key :: fn() {\n    ( controller vector: latch Controller.key here, act in the frame )\n}\n",
+  custom_mouse: "custom_mouse :: fn() {\n    ( mouse vector: latch Mouse.state here, act in the frame )\n}\n",
 };
 
-function tokenize(src: string): Tok[][] {
-  const lines: Tok[][] = [[]];
-  let i = 0;
-  let commentDepth = 0;
-  const push = (text: string, kind: Tok["kind"]) => {
-    if (!text) return;
-    const parts = text.split("\n");
-    parts.forEach((p, k) => {
-      if (k > 0) lines.push([]);
-      if (p) lines[lines.length - 1].push({ text: p, kind });
-    });
-  };
-  const prevCode = (): string => {
-    for (let j = lines.length - 1; j >= 0; j--) {
-      const row = lines[j];
-      for (let k = row.length - 1; k >= 0; k--) {
-        const m = row[k].text.match(/(\S)\s*$/);
-        if (m) return m[1];
-      }
-      const raw = src.slice(0, i).match(/(\S)\s*$/);
-      if (raw) return raw[1];
-      break;
-    }
-    const raw = src.slice(0, i).match(/(\S)\s*$/);
-    return raw ? raw[1] : "";
-  };
-  while (i < src.length) {
-    const c = src[i];
-    if (commentDepth > 0) {
-      if (c === "(") commentDepth++;
-      if (c === ")") commentDepth--;
-      push(c, "comment");
-      i++;
-      continue;
-    }
-    if (c === '"') {
-      let j = i + 1;
-      while (j < src.length && src[j] !== '"' && src[j] !== "\n") {
-        if (src[j] === "\\") j++;
-        j++;
-      }
-      if (src[j] === '"') j++;
-      push(src.slice(i, j), "string");
-      i = j;
-      continue;
-    }
-    if (c === "(" && !/[A-Za-z0-9_\]\)]/.test(prevCode())) {
-      commentDepth = 1;
-      push(c, "comment");
-      i++;
-      continue;
-    }
-    if (c === "." && /[A-Za-z]/.test(src[i + 1] ?? "")) {
-      const m = src.slice(i).match(/^\.[A-Za-z_][\w/]*/);
-      push(m![0], "port");
-      i += m![0].length;
-      continue;
-    }
-    if ("@|;&#".includes(c)) {
-      const m = src.slice(i).match(/^[@|;&#][A-Za-z0-9_]+/);
-      if (m) {
-        push(m[0], "directive");
-        i += m[0].length;
-        continue;
-      }
-      push(c, "plain");
-      i++;
-      continue;
-    }
-    if (/[A-Za-z_]/.test(c)) {
-      const m = src.slice(i).match(/^[A-Za-z_]\w*/)!;
-      const w = m[0];
-      push(w, KEYWORDS.has(w) ? "keyword" : TYPES.has(w) ? "type" : "plain");
-      i += w.length;
-      continue;
-    }
-    if (/[0-9]/.test(c)) {
-      const m = src.slice(i).match(/^[0-9A-Fa-fx]*/)!;
-      push(m[0], "number");
-      i += m[0].length;
-      continue;
-    }
-    push(c, "plain");
-    i++;
-  }
-  return lines;
+interface Problem {
+  file: string | null;
+  line: number | null;
+  msg: string;
+  source: "check" | "compile";
 }
 
-interface Symbol {
-  line: number;
-  name: string;
-  kind: string;
-}
-
-function outline(src: string): Symbol[] {
-  const out: Symbol[] = [];
-  src.split("\n").forEach((ln, idx) => {
-    const m = ln.match(/^\s*([A-Za-z_]\w*)\s*::\s*(fn|event|device|buffer|data|group|struct|macro)\b/);
-    if (m) out.push({ line: idx + 1, name: m[1], kind: m[2] });
-    else {
-      const c = ln.match(/^\s*([A-Za-z_]\w*)\s*::/);
-      if (c) out.push({ line: idx + 1, name: c[1], kind: "const" });
-    }
+/** Local validation errors that name a file ("game.ux: …"). */
+function localProblems(p: Project): Problem[] {
+  return validateProject(p).map((msg) => {
+    const m = msg.match(/^([A-Za-z][A-Za-z0-9_]*\.ux): /);
+    return { file: m ? m[1] : null, line: null, msg, source: "check" as const };
   });
-  return out;
 }
 
-const LINE_H = 18;
-
-function CodeEditor({
-  value,
-  onChange,
-  readOnly,
-  gotoRef,
-}: {
-  value: string;
-  onChange?: (v: string) => void;
-  readOnly: boolean;
-  gotoRef: React.MutableRefObject<((line: number) => void) | null>;
-}) {
-  const lines = useMemo(() => tokenize(value), [value]);
-  const preRef = useRef<HTMLPreElement>(null);
-  const areaRef = useRef<HTMLTextAreaElement>(null);
-  const gutRef = useRef<HTMLDivElement>(null);
-
-  gotoRef.current = (line: number) => {
-    const y = (line - 1) * LINE_H;
-    if (readOnly) preRef.current?.scrollTo({ top: y - 60 });
-    else if (areaRef.current) {
-      areaRef.current.focus();
-      areaRef.current.scrollTop = y - 60;
-      let off = 0;
-      const raw = value.split("\n");
-      for (let k = 0; k < line - 1 && k < raw.length; k++) off += raw[k].length + 1;
-      areaRef.current.setSelectionRange(off, off + (raw[line - 1]?.length ?? 0));
+/** Compiler diagnostics → our file keys. custom.ux is spliced into
+    main.ux, so main.ux lines inside that block map back to custom.ux. */
+function mapDiagnostic(
+  d: { file: string | null; line: number | null; msg: string },
+  files: Record<string, string>,
+  custom: string,
+): Problem {
+  const base = d.file ? d.file.slice(d.file.lastIndexOf("/") + 1) : null;
+  if (base === "main.ux" && d.line && custom) {
+    const main = (files["main.ux"] ?? "").split("\n");
+    const start = main.findIndex((l) => l.startsWith("( --- custom.ux"));
+    const text = main[d.line - 1];
+    if (start >= 0 && d.line - 1 > start && text !== undefined) {
+      const rel = d.line - 1 - start - 1;
+      const src = custom.split("\n");
+      for (let i = Math.max(0, rel); i < src.length; i++) {
+        if (src[i] === text) return { file: "custom.ux", line: i + 1, msg: d.msg, source: "compile" };
+      }
+      const any = src.indexOf(text);
+      if (any >= 0) return { file: "custom.ux", line: any + 1, msg: d.msg, source: "compile" };
     }
-  };
-
-  const sync = () => {
-    const a = areaRef.current;
-    if (!a) return;
-    if (preRef.current) {
-      preRef.current.scrollTop = a.scrollTop;
-      preRef.current.scrollLeft = a.scrollLeft;
-    }
-    if (gutRef.current) gutRef.current.style.transform = `translateY(${-a.scrollTop}px)`;
-  };
-
-  const gutter = lines.map((_, i) => i + 1);
-  const pad = "12px 12px 12px 56px";
-
-  if (readOnly) {
-    return (
-      <div className="relative min-h-full">
-        <div ref={gutRef} className="absolute bottom-0 left-0 top-0 w-11 select-none overflow-hidden pt-3 text-right font-mono text-[11px] leading-[18px] text-overlay0">
-          {gutter.map((n) => (
-            <div key={n} className="pr-2">{n}</div>
-          ))}
-        </div>
-        <pre
-          ref={preRef}
-          className="overflow-auto whitespace-pre p-3 font-mono text-[12px] leading-[18px]"
-          style={{ padding: pad }}
-        >
-          {lines.map((row, i) => (
-            <div key={i}>
-              {row.length === 0 ? " " : row.map((s, k) => (
-                <span key={k} style={{ color: KIND_COLOR[s.kind], fontStyle: s.kind === "comment" ? "italic" : undefined }}>
-                  {s.text}
-                </span>
-              ))}
-            </div>
-          ))}
-        </pre>
-      </div>
-    );
   }
-
-  return (
-    <div className="relative min-h-full">
-      <div className="absolute bottom-0 left-0 top-0 z-10 w-11 select-none overflow-hidden pt-3 text-right font-mono text-[11px] leading-[18px] text-overlay0">
-        <div ref={gutRef}>
-          {gutter.map((n) => (
-            <div key={n} className="pr-2">{n}</div>
-          ))}
-        </div>
-      </div>
-      <pre
-        ref={preRef}
-        aria-hidden
-        className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre p-3 font-mono text-[12px] leading-[18px]"
-        style={{ padding: pad }}
-      >
-        {lines.map((row, i) => (
-          <div key={i}>
-            {row.length === 0 ? " " : row.map((s, k) => (
-              <span key={k} style={{ color: KIND_COLOR[s.kind], fontStyle: s.kind === "comment" ? "italic" : undefined }}>
-                {s.text}
-              </span>
-            ))}
-          </div>
-        ))}
-      </pre>
-      <textarea
-        ref={areaRef}
-        value={value}
-        onChange={(e) => onChange?.(e.target.value)}
-        onScroll={sync}
-        spellCheck={false}
-        wrap="off"
-        className="absolute inset-0 h-full w-full resize-none overflow-auto whitespace-pre bg-transparent p-3 font-mono text-[12px] leading-[18px] text-transparent outline-none"
-        style={{ padding: pad, caretColor: "var(--ctp-text)" }}
-      />
-    </div>
-  );
+  return { file: base, line: d.line, msg: d.msg, source: "compile" };
 }
 
 export default function CodeStudio() {
   const lang = useLang();
   const project = useStore(projectStore);
-  const file = useStore(codeFileStore);
-  const snippetSel = useStore(snippetSelStore);
+  const fileKey = useStore(codeFileStore);
+  const diags = useStore(diagnosticsStore);
   const [copied, setCopied] = useState(false);
   const [query, setQuery] = useState("");
-  const [snipError, setSnipError] = useState<string | null>(null);
-  const gotoRef = useRef<((line: number) => void) | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checkMsg, setCheckMsg] = useState<string | null>(null);
+  const apiRef = useRef<EditorApi | null>(null);
+  const liveOn = useStore(liveEnabledStore);
+  const live = useStore(liveStatusStore);
 
   const isCode = project.kind === "code";
-  const tabs: string[] = isCode ? Object.keys(project.codeFiles ?? {}) : ["main.ux", "devices.ux", "custom.ux"];
-  const active = tabs.includes(file) ? file : tabs[0];
+  const locked = !!project.locked;
+  const loop = loopOf(project);
+  const scripts = project.scripts ?? [];
 
   const files = useMemo(() => {
     try {
       return emitProject(project);
     } catch {
-      return { "main.ux": "" } as Record<string, string>;
+      return {} as Record<string, string>;
     }
   }, [project]);
-  const custom = project.customCode ?? "";
-  const customEditable = !isCode && !project.locked;
-  const snippet = !isCode ? ((project.snippets ?? []).find((s) => s.id === snippetSel) ?? null) : null;
-  const fileText = isCode ? (project.codeFiles?.[active] ?? files[active] ?? "") : active === "custom.ux" ? custom : (files[active] ?? "");
-  const text = snippet ? snippet.code : fileText;
-  const editable = snippet ? !project.locked : !isCode && active === "custom.ux" && customEditable;
+  const hooks = useMemo(() => definedHooks(project), [project]);
+  // Live check: every pause in editing streams the tree to /ws/check.
+  useEffect(() => {
+    if (liveOn) scheduleLiveCheck(project, lang);
+  }, [project, liveOn, lang]);
+  const libsUsed = useMemo(() => new Set(isCode ? [] : usedStdlib(project)), [project, isCode]);
+  const problems = useMemo<Problem[]>(() => {
+    if (isCode) return [];
+    const local = localProblems(project);
+    const compiled = diags.map((d) => mapDiagnostic(d, files, project.customCode ?? ""));
+    return [...local, ...compiled];
+  }, [project, diags, files, isCode]);
 
-  function setCustom(v: string) {
-    const id = currentIdStore.get();
-    const all = projectsStore.get();
-    const p = all[id];
-    if (p && p.kind === "visual") projectsStore.set({ ...all, [id]: { ...p, customCode: v, updatedAt: Date.now() } });
-  }
+  // ---- resolve the open document ----
+  const codeTabs = isCode ? Object.keys(project.codeFiles ?? {}) : [];
+  const snippet = null as { id: string; code: string } | null;
+  const script = scripts.find((s) => s.path === fileKey) ?? null;
+  const libName = fileKey.startsWith("lib/") ? fileKey.slice(4) : null;
+  let key = fileKey;
+  if (isCode && !codeTabs.includes(key)) key = codeTabs[0] ?? "main.ux";
+  if (!isCode && !script && !libName && key !== "custom.ux" && !(key in files)) key = loop === "script" ? "custom.ux" : "main.ux";
 
-  function setShown(v: string) {
-    if (snippet) setSnippetCode(snippet.id, v);
-    else setCustom(v);
+  let text = "";
+  let title = key;
+  let editable = false;
+  let onEdit: ((v: string) => void) | undefined;
+  if (isCode) {
+    text = project.codeFiles?.[key] ?? "";
+  } else if (script) {
+    text = script.code;
+    editable = !locked;
+    onEdit = (v) => setScriptCode(script.path, v);
+  } else if (libName) {
+    text = STDLIB[libName] ?? "";
+    title = libName;
+  } else if (key === "custom.ux") {
+    text = project.customCode ?? "";
+    editable = !locked;
+    onEdit = setCustomCode;
+  } else {
+    text = files[key] ?? "";
   }
+  const openFile = snippet ? null : libName ?? key;
 
   const lineCount = text === "" ? 1 : text.split("\n").length;
   const symbols = useMemo(() => outline(text), [text]);
@@ -315,157 +192,349 @@ export default function CodeStudio() {
     });
     return out;
   }, [text, query]);
+  const errorLines = useMemo(
+    () => new Set(problems.filter((x) => x.file === openFile && x.line).map((x) => x.line as number)),
+    [problems, openFile],
+  );
+  const imported = useMemo(() => importsOf(text).filter((n) => n in STDLIB), [text]);
+
+  function open(k: string) {
+    codeFileStore.set(k);
+        setQuery("");
+  }
+
+  function jump(pr: Problem) {
+    if (pr.file && pr.file !== openFile) {
+      const k = pr.file in STDLIB && !scripts.some((s) => s.path === pr.file) ? `lib/${pr.file}` : pr.file;
+      open(k);
+    }
+    if (pr.line) {
+      const line = pr.line;
+      requestAnimationFrame(() => requestAnimationFrame(() => apiRef.current?.goto(line)));
+    }
+  }
+
+  async function check() {
+    setChecking(true);
+    setCheckMsg(null);
+    try {
+      const r = await compileProject(projectStore.get(), "web", "rom", lang);
+      diagnosticsStore.set(r.diagnostics ?? []);
+      setCheckMsg(r.ok ? t(lang, "code.check_ok") : r.message);
+    } catch {
+      setCheckMsg(t(lang, "exp.offline"));
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  /** Insert at the caret when the open file is editable; else copy. */
+  function use(snippetText: string) {
+    if (editable && apiRef.current) {
+      apiRef.current.insert(snippetText);
+      return;
+    }
+    void navigator.clipboard?.writeText(snippetText).catch(() => undefined);
+    setNote(t(lang, "code.copied_ref"));
+    window.setTimeout(() => setNote(null), 1500);
+  }
+
+  function addHook(h: HookName) {
+    const cur = project.customCode ?? "";
+    setCustomCode(`${cur.replace(/\s*$/, "")}${cur.trim() ? "\n\n" : ""}${HOOK_STUBS[h]}`);
+    open("custom.ux");
+  }
+
+  function addImport(mod: string) {
+    if (!editable || !onEdit) {
+      use(`import "${mod}"`);
+      return;
+    }
+    if (importsOf(text).includes(mod)) return;
+    const lines = text.split("\n");
+    let at = 0;
+    lines.forEach((l, i) => {
+      if (/^\s*import\s+"/.test(l)) at = i + 1;
+    });
+    if (at === 0) {
+      // After a leading comment block, if any.
+      const m = text.match(/^\s*\([\s\S]*?\)\s*\n/);
+      at = m ? m[0].split("\n").length - 1 : 0;
+    }
+    lines.splice(at, 0, `import "${mod}"`);
+    onEdit(lines.join("\n"));
+  }
 
   async function copy() {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
-    } catch { /* clipboard denied */ }
+    } catch {
+      /* clipboard denied */
+    }
   }
+
   function download() {
     const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
     const a = document.createElement("a");
     a.href = url;
-    a.download = snippet ? `${snippet.id}.ux` : active;
+    a.download = snippet ? `${snippet.id}.ux` : (libName ?? key);
     document.body.appendChild(a);
     a.click();
     a.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
 
+  const rowCls = (active: boolean) =>
+    `flex w-full items-center gap-2 rounded-lg px-2 py-1.5 font-mono text-[12px] transition-colors ${
+      active ? "seg-active" : "text-subtext0 hover:bg-surface0 hover:text-text"
+    }`;
+  const muted = (active: boolean) => `ml-auto shrink-0 text-[10px] ${active ? "seg-active-muted" : "text-overlay0"}`;
+  const head = "font-mono text-[11px] uppercase tracking-widest text-subtext0";
+  const iconBtn = "grid size-6 shrink-0 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-text";
+  const lines = (s: string) => (s === "" ? 1 : s.split("\n").length);
+
+  const assets = scriptAssetNames(project);
+  const refGroups: Array<{ title: string; items: Array<{ label: string; insert: string }> }> = isCode
+    ? []
+    : loop === "script"
+      ? [
+          { title: t(lang, "ref.sprites"), items: assets.sprites.map((id) => ({ label: `&spr_${id}`, insert: `&spr_${id}` })) },
+          { title: t(lang, "ref.sounds"), items: assets.sounds.map((id) => ({ label: `snd_${id}()`, insert: `snd_${id}();` })) },
+          { title: t(lang, "ref.vars"), items: assets.vars.map((id) => ({ label: `var_${id}[0]`, insert: `var_${id}[0]` })) },
+          { title: t(lang, "ref.inputs"), items: assets.inputs.map((id) => ({ label: `KEY_${id.toUpperCase()}`, insert: `KEY_${id.toUpperCase()}` })) },
+          {
+            title: t(lang, "ref.devices"),
+            items: ["Screen.x", "Screen.y", "Screen.addr", "Screen.sprite", "Screen.pixel", "Controller.button", "Controller.key", "Mouse.x", "Mouse.y", "Mouse.state", "Audio0.pitch", "DateTime.second"].map(
+              (x) => ({ label: x, insert: x }),
+            ),
+          },
+        ]
+      : [
+          { title: t(lang, "ref.scenes"), items: project.scenes.map((s) => ({ label: `SC_${s.id.toUpperCase()}`, insert: `scene_go(SC_${s.id.toUpperCase()});` })) },
+          { title: t(lang, "ref.vars"), items: assets.vars.map((id) => ({ label: `var_${id}[0]`, insert: `var_${id}[0]` })) },
+          {
+            title: t(lang, "ref.my_vars"),
+            items: [...new Set((project.objectDefs ?? []).flatMap((d) => (d.vars ?? []).map((v) => v.id)))].map((id) => ({ label: `iv_${id}[self]`, insert: `iv_${id}[self]` })),
+          },
+          {
+            title: t(lang, "ref.state"),
+            items: ["self", "other", "ox[self]", "oy[self]", "ocell[self]", "oflags[self]", "ocount", "scene"].map((x) => ({ label: x, insert: x })),
+          },
+          { title: t(lang, "ref.sprites"), items: assets.sprites.map((id) => ({ label: `&spr_${id}`, insert: `&spr_${id}` })) },
+        ];
+
   return (
     <div className="absolute inset-0 overflow-hidden bg-base">
-      <div className="grid h-full gap-3 p-3 lg:grid-cols-[248px_minmax(0,1fr)_264px]">
+      <div className="grid h-full gap-3 p-3 lg:grid-cols-[256px_minmax(0,1fr)_272px]">
+        {/* ---------- files ---------- */}
         <section className="dock min-h-0 overflow-y-auto rounded-2xl p-3">
-          <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">{t(lang, "code.files")}</p>
-          <ul className="mt-2 space-y-0.5">
-            {tabs.map((f) => {
-              const body = isCode ? (project.codeFiles?.[f] ?? "") : f === "custom.ux" ? custom : (files[f] ?? "");
-              const n = body === "" ? 1 : body.split("\n").length;
-              return (
-                <li key={f}>
+          {isCode ? (
+            <>
+              <p className={head}>{t(lang, "code.files")}</p>
+              <ul className="mt-2 space-y-0.5">
+                {codeTabs.map((f) => (
+                  <li key={f}>
+                    <button onClick={() => open(f)} className={rowCls(key === f)}>
+                      <span className="truncate">{f}</span>
+                      <span className={muted(key === f)}>{lines(project.codeFiles?.[f] ?? "")} ln</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <>
+              <p className={head}>{t(lang, "loop.title")}</p>
+              <div role="radiogroup" aria-label={t(lang, "loop.title")} className="mt-2 grid grid-cols-2 gap-1 rounded-lg border border-surface0 p-1">
+                {(["engine", "script"] as const).map((m) => (
                   <button
-                    onClick={() => {
-                      codeFileStore.set(f);
-                      snippetSelStore.set(null);
-                    }}
-                    className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 font-mono text-[12px] transition-colors ${
-                      active === f ? "seg-active" : "text-subtext0 hover:bg-surface0 hover:text-text"
+                    key={m}
+                    role="radio"
+                    aria-checked={loop === m}
+                    disabled={locked}
+                    title={locked ? t(lang, "locked.note") : undefined}
+                    onClick={() => setLoopMode(m)}
+                    className={`rounded-md px-2 py-1 font-mono text-[11px] transition-colors disabled:cursor-not-allowed ${
+                      loop === m ? "seg-active" : "text-subtext0 hover:bg-surface0 hover:text-text"
                     }`}
                   >
-                    <span className="truncate">{f}</span>
-                    <span className={`ml-auto shrink-0 text-[10px] ${active === f ? "seg-active-muted" : "text-overlay0"}`}>{n} ln</span>
+                    {t(lang, m === "engine" ? "loop.engine" : "loop.script")}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-1.5 text-[11px] leading-relaxed text-overlay0">
+                {t(lang, loop === "engine" ? "loop.engine_hint" : "loop.script_hint")}
+              </p>
+              <label
+                className={`mt-2 flex items-start gap-2 text-[11px] leading-snug text-subtext0 ${locked ? "cursor-not-allowed" : "cursor-pointer"}`}
+                title={t(lang, "loop.game_cursor_hint")}
+              >
+                <input
+                  type="checkbox"
+                  checked={!!project.gameCursor}
+                  disabled={locked}
+                  onChange={(e) => setGameCursor(e.target.checked)}
+                  className="mt-0.5 accent-mauve"
+                />
+                <span>{t(lang, "loop.game_cursor")}</span>
+              </label>
+
+              <div className="mt-4 flex items-center justify-between">
+                <p className={head}>
+                  {t(lang, "code.scripts")} ({1 + scripts.length})
+                </p>
+                {!locked && (
+                  <button
+                    onClick={() => {
+                      const name = window.prompt(t(lang, "code.script_name"), "game");
+                      if (name !== null) setNote(addScript(name));
+                    }}
+                    title={t(lang, "code.script_add")}
+                    aria-label={t(lang, "code.script_add")}
+                    className={iconBtn}
+                  >
+                    <Plus size={13} />
+                  </button>
+                )}
+              </div>
+              <ul className="mt-2 space-y-0.5">
+                <li>
+                  <button onClick={() => open("custom.ux")} className={rowCls(!snippet && key === "custom.ux")}>
+                    <FileCode2 size={12} className="shrink-0" />
+                    <span className="truncate">custom.ux</span>
+                    <span className={muted(!snippet && key === "custom.ux")}>{t(lang, "code.hooks_badge")}</span>
                   </button>
                 </li>
-              );
-            })}
-          </ul>
-          {!isCode && (
-            <div className="mt-4">
-              <div className="flex items-center justify-between">
-                <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
-                  {t(lang, "code.snippets")} ({(project.snippets ?? []).length})
-                </p>
-                {!project.locked && (
-                  <button
-                    onClick={() => addSnippet("snippet")}
-                    title={t(lang, "ev.new_snippet")}
-                    aria-label={t(lang, "ev.new_snippet")}
-                    className="grid size-6 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
-                  >
-                    <Plus size={13} />
-                  </button>
-                )}
-              </div>
-              {(project.snippets ?? []).length === 0 ? (
-                <p className="mt-2 font-mono text-[11px] leading-relaxed text-overlay0">{t(lang, "code.snippets_empty")}</p>
-              ) : (
-                <ul className="mt-2 max-h-56 space-y-0.5 overflow-y-auto">
-                  {(project.snippets ?? []).map((s) => (
-                    <li key={s.id}>
-                      <button
-                        onClick={() => snippetSelStore.set(snippetSel === s.id ? null : s.id)}
-                        className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 font-mono text-[12px] transition-colors ${
-                          snippetSel === s.id ? "seg-active" : "text-subtext0 hover:bg-surface0 hover:text-text"
-                        }`}
-                      >
-                        <span className="truncate">{s.id}</span>
-                        <span className={`ml-auto shrink-0 text-[10px] ${snippetSel === s.id ? "seg-active-muted" : "text-overlay0"}`}>
-                          {s.code === "" ? 1 : s.code.split("\n").length} ln
+                {scripts.map((s, i) => {
+                  const active = !snippet && key === s.path;
+                  const bad = problems.some((x) => x.file === s.path);
+                  return (
+                    <li key={s.path} className="group relative">
+                      <button onClick={() => open(s.path)} className={rowCls(active)}>
+                        <FileCode2 size={12} className={`shrink-0 ${bad ? "text-red" : ""}`} />
+                        <span className="truncate">{s.path}</span>
+                        <span className={`${muted(active)} ${locked ? "" : "group-hover:invisible"}`}>{lines(s.code)} ln</span>
+                      </button>
+                      {!locked && (
+                        <span className="absolute right-1 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 group-hover:flex">
+                          <button onClick={() => moveScript(s.path, -1)} disabled={i === 0} aria-label={t(lang, "code.move_up")} className={`${iconBtn} size-5 disabled:opacity-30`}>
+                            <ArrowUp size={11} />
+                          </button>
+                          <button onClick={() => moveScript(s.path, 1)} disabled={i === scripts.length - 1} aria-label={t(lang, "code.move_down")} className={`${iconBtn} size-5 disabled:opacity-30`}>
+                            <ArrowDown size={11} />
+                          </button>
+                          <button
+                            onClick={() => {
+                              const name = window.prompt(t(lang, "sound.rename"), s.path.replace(/\.ux$/, ""));
+                              if (name !== null) setNote(renameScript(s.path, name));
+                            }}
+                            aria-label={`${t(lang, "sound.rename")} ${s.path}`}
+                            className={`${iconBtn} size-5`}
+                          >
+                            <Pencil size={11} />
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (window.confirm(`${t(lang, "code.script_delete")} ${s.path}?`)) setNote(deleteScript(s.path));
+                            }}
+                            aria-label={`${t(lang, "insp.remove")} ${s.path}`}
+                            className={`${iconBtn} size-5 hover:text-red`}
+                          >
+                            <Trash2 size={11} />
+                          </button>
                         </span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {snipError && <p className="mt-1 text-[12px] text-red">{snipError}</p>}
-            </div>
-          )}
-          {!isCode && (
-            <div className="mt-4">
-              <div className="flex items-center justify-between">
-                <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
-                  {t(lang, "code.variables")} ({(project.vars ?? []).length})
-                </p>
-                {!project.locked && (
-                  <button
-                    onClick={() => addVariable("var")}
-                    title={t(lang, "code.var_add")}
-                    aria-label={t(lang, "code.var_add")}
-                    className="grid size-6 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
-                  >
-                    <Plus size={13} />
-                  </button>
-                )}
-              </div>
-              {(project.vars ?? []).length === 0 ? (
-                <p className="mt-2 font-mono text-[11px] leading-relaxed text-overlay0">{t(lang, "code.vars_empty")}</p>
-              ) : (
-                <ul className="mt-2 max-h-56 space-y-1 overflow-y-auto">
-                  {(project.vars ?? []).map((v) => (
-                    <li key={v.id} className="flex items-center gap-1.5 rounded-lg border border-surface0 px-2 py-1">
-                      <button
-                        onClick={() => {
-                          if (project.locked) return;
-                          const name = window.prompt(t(lang, "sound.rename"), v.id);
-                          if (name !== null) setSnipError(renameVariable(v.id, name) ?? null);
-                        }}
-                        title={v.id}
-                        className="min-w-0 flex-1 truncate text-left font-mono text-[12px] hover:text-teal"
-                      >
-                        {v.id}
-                      </button>
-                      <input
-                        type="number"
-                        value={v.init}
-                        min={0}
-                        max={65535}
-                        disabled={!!project.locked}
-                        onChange={(e) => {
-                          const n = Math.round(e.target.valueAsNumber);
-                          if (!Number.isNaN(n)) setSnipError(setVariableInit(v.id, n) ?? null);
-                        }}
-                        aria-label={t(lang, "code.var_init")}
-                        className="w-16 rounded-md border border-surface1 bg-base px-1.5 py-1 text-right font-mono text-[11px] outline-none focus:border-mauve"
-                      />
-                      {!project.locked && (
-                        <button
-                          onClick={() => setSnipError(deleteVariable(v.id) ?? null)}
-                          title={t(lang, "insp.remove")}
-                          aria-label={`${t(lang, "insp.remove")} ${v.id}`}
-                          className="grid size-6 shrink-0 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-red"
-                        >
-                          <Trash2 size={12} />
-                        </button>
                       )}
                     </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+                  );
+                })}
+              </ul>
+              {scripts.length === 0 && <p className="mt-1.5 text-[11px] leading-relaxed text-overlay0">{t(lang, "code.scripts_empty")}</p>}
+
+              <div className="mt-4">
+                <div className="flex items-center justify-between">
+                  <p className={head}>
+                    {t(lang, "code.variables")} ({(project.vars ?? []).length})
+                  </p>
+                  {!locked && (
+                    <button onClick={() => addVariable("var")} title={t(lang, "code.var_add")} aria-label={t(lang, "code.var_add")} className={iconBtn}>
+                      <Plus size={13} />
+                    </button>
+                  )}
+                </div>
+                {(project.vars ?? []).length === 0 ? (
+                  <p className="mt-2 font-mono text-[11px] leading-relaxed text-overlay0">{t(lang, "code.vars_empty")}</p>
+                ) : (
+                  <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto">
+                    {(project.vars ?? []).map((v) => (
+                      <li key={v.id} className="flex items-center gap-1.5 rounded-lg border border-surface0 px-2 py-1">
+                        <button
+                          onClick={() => {
+                            if (locked) return;
+                            const name = window.prompt(t(lang, "sound.rename"), v.id);
+                            if (name !== null) setNote(renameVariable(v.id, name) ?? null);
+                          }}
+                          title={v.id}
+                          className="min-w-0 flex-1 truncate text-left font-mono text-[12px] hover:text-teal"
+                        >
+                          {v.id}
+                        </button>
+                        <input
+                          type="number"
+                          value={v.init}
+                          min={0}
+                          max={65535}
+                          disabled={locked}
+                          onChange={(e) => {
+                            const n = Math.round(e.target.valueAsNumber);
+                            if (!Number.isNaN(n)) setNote(setVariableInit(v.id, n) ?? null);
+                          }}
+                          aria-label={t(lang, "code.var_init")}
+                          className="w-16 rounded-md border border-surface1 bg-base px-1.5 py-1 text-right font-mono text-[11px] outline-none focus:border-mauve"
+                        />
+                        {!locked && (
+                          <button onClick={() => setNote(deleteVariable(v.id) ?? null)} title={t(lang, "insp.remove")} aria-label={`${t(lang, "insp.remove")} ${v.id}`} className={`${iconBtn} hover:text-red`}>
+                            <Trash2 size={12} />
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <p className={`${head} mt-4`}>{t(lang, "code.library")}</p>
+              <ul className="mt-2 max-h-56 space-y-0.5 overflow-y-auto">
+                {STDLIB_NAMES.map((n) => {
+                  const active = !snippet && libName === n;
+                  return (
+                    <li key={n}>
+                      <button onClick={() => open(`lib/${n}`)} title={moduleSummary(n)} className={rowCls(active)}>
+                        <Library size={12} className="shrink-0" />
+                        <span className="truncate">{n}</span>
+                        {libsUsed.has(n) && <span className={muted(active)}>{t(lang, "code.lib_used")}</span>}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+
+              <p className={`${head} mt-4`}>{t(lang, "code.generated")}</p>
+              <ul className="mt-2 space-y-0.5">
+                {GENERATED.filter((f) => f in files).map((f) => (
+                  <li key={f}>
+                    <button onClick={() => open(f)} className={rowCls(!snippet && key === f)}>
+                      <span className="truncate">{f}</span>
+                      <span className={muted(!snippet && key === f)}>{lines(files[f] ?? "")} ln</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
-          <p className="mb-2 mt-4 font-mono text-[11px] uppercase tracking-widest text-subtext0">{t(lang, "studio.symbols")}</p>
+
+          <p className={`${head} mb-2 mt-4`}>{t(lang, "studio.symbols")}</p>
           {symbols.length === 0 ? (
             <p className="font-mono text-[11px] text-overlay0">—</p>
           ) : (
@@ -473,70 +542,90 @@ export default function CodeStudio() {
               {symbols.map((s, i) => (
                 <li key={i}>
                   <button
-                    onClick={() => gotoRef.current?.(s.line)}
+                    onClick={() => apiRef.current?.goto(s.line)}
                     className="flex w-full items-center gap-2 rounded-md px-2 py-1 font-mono text-[11px] text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
                   >
                     <span className="truncate text-text">{s.name}</span>
-                    <span className="ml-auto shrink-0 text-overlay0">{s.kind}:{s.line}</span>
+                    <span className="ml-auto shrink-0 text-overlay0">
+                      {s.kind}:{s.line}
+                    </span>
                   </button>
                 </li>
               ))}
             </ul>
           )}
         </section>
+
+        {/* ---------- editor ---------- */}
         <section className="dock flex min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl">
           <div className="flex flex-wrap items-center gap-1.5 border-b border-surface0 p-2.5">
             <span className={`rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest ${editable ? "bg-teal/15 text-teal" : "tint-text-10 text-subtext1"}`}>
               {editable ? t(lang, "studio.editable") : t(lang, "studio.readonly")}
             </span>
             <span className="font-mono text-[11px] text-subtext0">
-              {snippet ? snippet.id : active} · {lineCount} {t(lang, "studio.lines")}
+              {title} · {lineCount} {t(lang, "studio.lines")}
             </span>
-            {snippet && !project.locked && (
-              <>
-                <button
-                  onClick={() => {
-                    const name = window.prompt(t(lang, "sound.rename"), snippet.id);
-                    if (name !== null) setSnipError(renameSnippet(snippet.id, name) ?? null);
-                  }}
-                  title={t(lang, "sound.rename")}
-                  className="rounded-md px-2 py-1 font-mono text-[11px] text-subtext0 hover:bg-surface0 hover:text-text"
-                >
-                  {t(lang, "sound.rename")}
-                </button>
-                <button
-                  onClick={() => setSnipError(deleteSnippet(snippet.id) ?? null)}
-                  title={t(lang, "sound.delete")}
-                  className="grid size-7 place-items-center rounded-md text-subtext0 hover:bg-surface0 hover:text-red"
-                >
-                  <Trash2 size={13} />
-                </button>
-              </>
-            )}
             <span className="ml-auto flex items-center gap-1">
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={t(lang, "studio.find")}
-                className="w-36 rounded-md border border-surface1 bg-base px-2 py-1 font-mono text-[11px] outline-none placeholder:text-overlay0 focus:border-mauve"
+                className="w-32 rounded-md border border-surface1 bg-base px-2 py-1 font-mono text-[11px] outline-none placeholder:text-overlay0 focus:border-mauve"
               />
               {query && <span className="font-mono text-[10px] text-overlay0">{hits.length}</span>}
-              <button onClick={() => void copy()} title={t(lang, "code.copy")} className="grid size-7 place-items-center rounded-md text-subtext0 hover:bg-surface0 hover:text-text">
+              <button onClick={() => void copy()} title={t(lang, "code.copy")} aria-label={t(lang, "code.copy")} className="grid size-7 place-items-center rounded-md text-subtext0 hover:bg-surface0 hover:text-text">
                 {copied ? <Check size={13} /> : <Copy size={13} />}
               </button>
-              <button onClick={download} title={t(lang, "code.download")} className="grid size-7 place-items-center rounded-md text-subtext0 hover:bg-surface0 hover:text-text">
+              <button onClick={download} title={t(lang, "code.download")} aria-label={t(lang, "code.download")} className="grid size-7 place-items-center rounded-md text-subtext0 hover:bg-surface0 hover:text-text">
                 <Download size={13} />
+              </button>
+              <button
+                onClick={() => setLiveEnabled(!liveOn)}
+                aria-pressed={liveOn}
+                title={t(lang, "code.live_hint")}
+                className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-mono text-[11px] ${liveOn ? "bg-surface0 text-text" : "text-overlay0 hover:bg-surface0"}`}
+              >
+                <span
+                  className={`size-2 rounded-full ${
+                    !liveOn || live.state === "off"
+                      ? "bg-overlay0"
+                      : live.state === "ok"
+                        ? "bg-green"
+                        : live.state === "error"
+                          ? "bg-red"
+                          : live.state === "offline"
+                            ? "bg-peach"
+                            : "animate-pulse bg-blue"
+                  }`}
+                />
+                {t(lang, "code.live")}
+                {liveOn && live.state !== "off" && live.state !== "idle" && (
+                  <span className="text-subtext0">
+                    {live.state === "ok"
+                      ? t(lang, "code.live_ok").replace("{ms}", String(live.ms ?? 0)).replace("{bytes}", String(live.romBytes ?? 0))
+                      : live.state === "error"
+                        ? (live.count ? t(lang, "code.live_err").replace("{n}", String(live.count)) : live.message ?? "")
+                        : live.state === "offline"
+                          ? t(lang, live.message === "login" ? "code.live_login" : "code.live_offline")
+                          : t(lang, "code.live_busy")}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => void check()}
+                disabled={checking}
+                title={t(lang, "code.check_hint")}
+                className="inline-flex items-center gap-1.5 rounded-md bg-surface0 px-2.5 py-1 font-mono text-[11px] text-text hover:bg-surface1 disabled:opacity-60"
+              >
+                {checking ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+                {t(lang, "code.check")}
               </button>
             </span>
           </div>
           {query && hits.length > 0 && (
             <div className="flex gap-1 overflow-x-auto border-b border-surface0 px-2.5 py-1.5">
               {hits.slice(0, 40).map((ln) => (
-                <button
-                  key={ln}
-                  onClick={() => gotoRef.current?.(ln)}
-                  className="shrink-0 rounded-md bg-surface0 px-2 py-0.5 font-mono text-[10px] text-subtext0 hover:text-text"
-                >
+                <button key={ln} onClick={() => apiRef.current?.goto(ln)} className="shrink-0 rounded-md bg-surface0 px-2 py-0.5 font-mono text-[10px] text-subtext0 hover:text-text">
                   {ln}
                 </button>
               ))}
@@ -544,33 +633,159 @@ export default function CodeStudio() {
             </div>
           )}
           <div className="min-h-0 flex-1 overflow-auto">
-            <CodeEditor value={text} onChange={setShown} readOnly={!editable} gotoRef={gotoRef} />
+            <CodeEditor
+              key={snippet ? `snip:${snippet.id}` : `file:${libName ?? key}`}
+              value={text}
+              onChange={onEdit}
+              readOnly={!editable}
+              apiRef={apiRef}
+              errorLines={errorLines}
+              onSave={() => void check()}
+            />
           </div>
-          <p className="border-t border-surface0 px-3 py-1.5 font-mono text-[10px] text-overlay0">
-            {isCode ? t(lang, "code.hand_note") : active === "custom.ux" ? t(lang, "code.custom_note") : t(lang, "code.note")}
-          </p>
-        </section>
-        <section className="dock h-fit rounded-2xl p-3 lg:sticky lg:top-3">
-          <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">{t(lang, "studio.symbols")}</p>
-          <p className="mt-2 font-mono text-[11px] leading-relaxed text-subtext0">
-            {t(lang, "code.side_note")}
-          </p>
-          <div className="mt-3 space-y-1 font-mono text-[11px]">
-            {[
-              ["( … )", "var(--ctp-overlay0)"],
-              ["\"str\"", "var(--ctp-green)"],
-              ["fn event", "var(--ctp-mauve)"],
-              ["u8 u16", "var(--ctp-teal)"],
-              ["@ | ; &", "var(--ctp-yellow)"],
-              [".dev/port", "var(--ctp-sky)"],
-            ].map(([s, c]) => (
-              <div key={s} className="flex items-center gap-2">
-                <span className="rounded bg-surface0 px-1.5 py-0.5" style={{ color: c }}>{s}</span>
+          {!isCode && (
+            <div className="max-h-36 shrink-0 overflow-y-auto border-t border-surface0">
+              <div className="flex items-center gap-2 px-3 py-1.5">
+                {problems.length === 0 ? (
+                  <CheckCircle2 size={12} className="text-green" />
+                ) : (
+                  <AlertTriangle size={12} className="text-red" />
+                )}
+                <span className="font-mono text-[10px] uppercase tracking-widest text-subtext0">
+                  {t(lang, "code.problems")} ({problems.length})
+                </span>
+                {(checkMsg || note) && <span className="truncate font-mono text-[11px] text-subtext0">· {note ?? checkMsg}</span>}
               </div>
-            ))}
-          </div>
+              {problems.length > 0 && (
+                <ul className="pb-1.5">
+                  {problems.slice(0, 50).map((pr, i) => (
+                    <li key={i}>
+                      <button
+                        onClick={() => jump(pr)}
+                        className="flex w-full items-baseline gap-2 px-3 py-0.5 text-left font-mono text-[11px] text-subtext0 hover:bg-surface0 hover:text-text"
+                      >
+                        <span className={`shrink-0 ${pr.source === "compile" ? "text-red" : "text-yellow"}`}>
+                          {pr.source === "compile" ? t(lang, "code.p_compile") : t(lang, "code.p_check")}
+                        </span>
+                        {pr.file && (
+                          <span className="shrink-0 text-overlay0">
+                            {pr.file}
+                            {pr.line ? `:${pr.line}` : ""}
+                          </span>
+                        )}
+                        <span className="min-w-0 break-words">{pr.msg}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          <p className="border-t border-surface0 px-3 py-1.5 font-mono text-[10px] text-overlay0">{footNote(lang, isCode, editable, !!libName, loop)}</p>
+        </section>
+
+        {/* ---------- reference ---------- */}
+        <section className="dock min-h-0 overflow-y-auto rounded-2xl p-3">
+          {isCode ? (
+            <p className="font-mono text-[11px] leading-relaxed text-subtext0">{t(lang, "code.side_note")}</p>
+          ) : (
+            <>
+              <p className={head}>{t(lang, "ref.hooks")}</p>
+              <ul className="mt-2 space-y-1">
+                {HOOKS.filter((h) => loop === "engine" || h !== "custom_draw").map((h) => {
+                  const has = hooks.has(h);
+                  const required = loop === "script" && h === "custom_frame";
+                  return (
+                    <li key={h} className="rounded-lg border border-surface0 px-2 py-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className={`font-mono text-[11px] ${has ? "text-text" : "text-subtext0"}`}>{h}()</span>
+                        {required && !has && <span className="font-mono text-[9px] uppercase text-red">{t(lang, "ref.required")}</span>}
+                        {has ? (
+                          <Check size={12} className="ml-auto text-green" aria-label={t(lang, "ref.defined")} />
+                        ) : (
+                          !locked && (
+                            <button onClick={() => addHook(h)} className="ml-auto rounded px-1.5 py-0.5 font-mono text-[10px] text-mauve hover:bg-surface0">
+                              + {t(lang, "ref.add_hook")}
+                            </button>
+                          )
+                        )}
+                      </div>
+                      <p className="mt-0.5 text-[11px] leading-snug text-overlay0">{t(lang, `hook.${h}.${loop}`)}</p>
+                    </li>
+                  );
+                })}
+              </ul>
+
+              <p className={`${head} mt-4`}>{t(lang, loop === "script" ? "ref.names_script" : "ref.names_engine")}</p>
+              <p className="mt-1 text-[11px] leading-snug text-overlay0">{t(lang, editable ? "ref.click_insert" : "ref.click_copy")}</p>
+              {refGroups
+                .filter((g) => g.items.length > 0)
+                .map((g) => (
+                  <div key={g.title} className="mt-2">
+                    <p className="font-mono text-[10px] text-overlay0">{g.title}</p>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {g.items.map((it) => (
+                        <button
+                          key={it.label}
+                          onClick={() => use(it.insert)}
+                          className="rounded bg-surface0 px-1.5 py-0.5 font-mono text-[10px] text-sky hover:bg-surface1"
+                        >
+                          {it.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+
+              <p className={`${head} mt-4`}>{t(lang, "ref.library")}</p>
+              {(libName ? [libName] : imported).length === 0 ? (
+                <p className="mt-1 text-[11px] leading-snug text-overlay0">{t(lang, "ref.library_empty")}</p>
+              ) : (
+                (libName ? [libName] : imported).map((mod) => (
+                  <div key={mod} className="mt-2">
+                    <p className="font-mono text-[10px] text-overlay0">
+                      {mod} <span className="text-overlay0/70">— {moduleSummary(mod)}</span>
+                    </p>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {moduleExports(STDLIB[mod]).map((x) => (
+                        <button
+                          key={x.name}
+                          onClick={() => use(x.kind === "fn" || x.kind === "macro" ? `${x.sig};` : x.sig)}
+                          title={x.kind}
+                          className={`rounded bg-surface0 px-1.5 py-0.5 font-mono text-[10px] hover:bg-surface1 ${
+                            x.kind === "macro" || x.kind === "fn" ? "text-mauve" : "text-peach"
+                          }`}
+                        >
+                          {x.sig}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
+              {!libName && editable && (
+                <div className="mt-3">
+                  <p className="font-mono text-[10px] text-overlay0">{t(lang, "ref.add_import")}</p>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {STDLIB_NAMES.filter((n) => !imported.includes(n)).map((n) => (
+                      <button key={n} onClick={() => addImport(n)} title={moduleSummary(n)} className="rounded border border-surface0 px-1.5 py-0.5 font-mono text-[10px] text-subtext0 hover:bg-surface0 hover:text-text">
+                        + {n}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </section>
       </div>
     </div>
   );
+}
+
+function footNote(lang: Lang, isCode: boolean, editable: boolean, isLib: boolean, loop: "engine" | "script"): string {
+  if (isCode) return t(lang, "code.hand_note");
+  if (isLib) return t(lang, "code.lib_note");
+  if (!editable) return t(lang, "code.note");
+  return t(lang, loop === "script" ? "code.script_note" : "code.custom_note");
 }
