@@ -30,7 +30,7 @@ export function artifactFilename(project: string, target: ExportTarget, mode: Ex
   if (mode === "tal") return `${slug}.tal`;
   if (mode === "rom") return `${slug}.rom`;
   if (target === "web") return `${slug}.html`;
-  if (target === "windows") return `${slug}-windows.zip`;
+  if (target === "windows") return `${slug}.exe`;
   if (target === "macos" || target === "macos-intel") return `${slug}.${target}`;
   return `${slug}.linux`;
 }
@@ -129,7 +129,7 @@ export async function compileProject(
       ? new TextEncoder().encode(payload)
       : Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
   if (art === "html_b64" && project.gameCursor) bytes = hideHostCursor(bytes);
-  const mime = art === "tal" ? "text/plain" : art === "html_b64" ? "text/html" : target === "windows" ? "application/zip" : "application/octet-stream";
+  const mime = art === "tal" ? "text/plain" : art === "html_b64" ? "text/html" : target === "windows" ? "application/vnd.microsoft.portable-executable" : "application/octet-stream";
   const result: CompileResult = {
     ok: true,
     message: t(lang, "exp.done"),

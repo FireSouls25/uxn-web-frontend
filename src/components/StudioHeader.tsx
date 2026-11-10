@@ -53,7 +53,7 @@ type ExportChoice = "web" | "linux" | "rom" | "tal" | "macos" | "macos-intel" | 
 const EXPORT_CHOICES: Array<{ id: ExportChoice; icon: typeof Globe; ext: string; os?: boolean }> = [
   { id: "web", icon: Globe, ext: ".html" },
   { id: "linux", icon: TerminalSquare, ext: "x86_64" },
-  { id: "windows", icon: Monitor, ext: ".zip", os: true },
+  { id: "windows", icon: Monitor, ext: ".exe", os: true },
   { id: "macos", icon: Apple, ext: "Apple silicon", os: true },
   { id: "macos-intel", icon: Apple, ext: "Intel", os: true },
   { id: "rom", icon: Cpu, ext: ".rom" },
