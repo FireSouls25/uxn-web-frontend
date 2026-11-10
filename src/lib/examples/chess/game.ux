@@ -64,15 +64,9 @@ buffer mvanim[6]: u8;
   zero-page, this doesn't). )
 buffer mvk[1]: u16;
 
-( Solid 8px tile (square halves pick color via blend) and the
-  valid-target dot. )
-data sqfill = [255, 255, 255, 255, 255, 255, 255, 255];
-data dot = [0, 0, 0, 24, 24, 0, 0, 0];
-
-( Mouse arrow: the VM hides the system cursor over the window
-  (SDL_ShowCursor off in uxn2.c), so uxn games draw their own —
-  without this the mouse visibly vanishes on top of the game. )
-data cursor = [192, 224, 240, 248, 252, 240, 200, 136];
+( Graphics are studio assets (assets.ux, imported by main.ux):
+  spr_pieces / spr_squares / spr_dot / spr_cursor, and the scenes
+  `board` (draw_scene_board) and `setup` (scn_setup rows). )
 
 data jigx = [3, 253, 2, 254, 1, 0];
 
@@ -93,7 +87,8 @@ text :: fn(x: u8, y: u8, s: &u8) {
 
 ( Cursor last in every scene draw, tip at the exact mouse pixel. )
 draw_cursor :: fn() {
-    blit(mgx, mgy, &cursor, 1);
+    ( blend 5: transparent, 1 black arrow, 2 light rim )
+    blit(mgx, mgy, &spr_cursor, 133);
 }
 
 ( Shared keyboard nav for two-item menus: arrows or W/S move the
@@ -233,19 +228,6 @@ clear_sel :: fn() {
     grabbed = 255;
 }
 
-( 0 empty, 1 white, 2 black piece-square color pair for fills.
-  u8 coordinates: the board spans x64-192, y0-128. )
-draw_square_bg :: fn(dx: u8, dy: u8, light: u8) {
-    mode: u8 = 1;
-    if light == 0 {
-        mode = 2;
-    }
-    blit(64 + dx * 16, dy * 16, &sqfill, mode);
-    blit(64 + dx * 16 + 8, dy * 16, &sqfill, mode);
-    blit(64 + dx * 16, dy * 16 + 8, &sqfill, mode);
-    blit(64 + dx * 16 + 8, dy * 16 + 8, &sqfill, mode);
-}
-
 ( Piece on a display cell, rotated 180 for the far side (both
   flips) so both players read their army upright. Shares the
   pixel plotter's frame (kind/side/mode live there, not here). )
@@ -257,26 +239,43 @@ draw_piece_at :: fn(dx: u8, dy: u8, p: u8) {
 draw_piece_px :: fn(x: u16, y: u16, p: u8) {
     k: u8 = kind_of(p);
     side: u8 = side_of(p);
-    mode: u8 = 128;
-    if side_of(p) != view_white {
-        mode = 176;
-    }
-    blit(x, y, tile_addr(k, side), mode);
+    ( far side = the army not at the bottom: view_white 1 puts white
+      (side 0) at the bottom, so it is far exactly when side and
+      view_white match. )
+    blit(x, y, tile_addr(k, side), piece_mode(side, 1 - (side ^ view_white)));
 }
 
+( The board is the `board` scene. While rows slide in (trans_t <
+  8), the rows not in yet are painted back to the panel color: a
+  fill from (64, trans_t*16) to the bottom-right corner. Displayed
+  parity is the same either way round, so a flip needs no redraw. )
 draw_board :: fn() {
-    dy: u8 = 0;
-    while dy < 8 {
-        if dy < trans_t {
-            dx: u8 = 0;
-            while dx < 8 {
-                ( displayed parity is always opposite the board
-                  parity, either way round )
-                draw_square_bg(dx, dy, 1 - (dx + dy) % 2);
-                dx = dx + 1;
-            }
+    draw_scene_board();
+    if trans_t < 8 {
+        Screen.x = 64;
+        Screen.y = trans_t * 16;
+        Screen.pixel = 128;
+    }
+}
+
+( Starting position from the Scene editor: every `pieces` node in
+  scene `setup` stands on a square (white's view: files from x64,
+  ranks from the top, 16px cells); its sheet cell is the piece code
+  minus one. Called after setup_board, which keeps the rest of the
+  state (turn, castling, clocks). )
+load_setup :: fn() {
+    r: u16 = 0;
+    while r < 64 {
+        board[r] = 0;
+        r = r + 1;
+    }
+    r = 0;
+    while r < SCN_SETUP_COUNT * SCN_ROW {
+        if scn_setup[r + 4] == SPR_PIECES {
+            ( x lo / y lo: the board fits in the first 256 pixels )
+            board[(7 - scn_setup[r + 3] / 16) * 8 + (scn_setup[r + 1] - 64) / 16] = scn_setup[r + 5] + 1;
         }
-        dy = dy + 1;
+        r = r + SCN_ROW;
     }
 }
 
@@ -292,7 +291,7 @@ draw_position :: fn() {
                 while dx < 8 {
                     sq: u8 = view_rank(dy) * 8 + view_file(dx);
                     if hl[sq] != 0 {
-                        blit(64 + dx * 16 + 4, dy * 16 + 4, &dot, 3);
+                        blit(64 + dx * 16 + 4, dy * 16 + 4, &spr_dot, 128);
                     }
                     dx = dx + 1;
                 }
@@ -462,6 +461,7 @@ after_move :: fn() {
 
 start_game :: fn() {
     setup_board();
+    load_setup();
     seed = DateTime.second;
     clear_sel();
     trans_t = 0;
@@ -614,8 +614,8 @@ draw_menu :: fn() {
     text(80, 56, "PLAY");
     text(80, 72, "QUIT");
     ( menu kings always face the viewer (mode 128, no flip) )
-    blit(60, 56, tile_addr(5, 0), 128);
-    blit(124, 56, tile_addr(5, 1), 128);
+    blit(60, 56, tile_addr(5, 0), piece_mode(0, 0));
+    blit(124, 56, tile_addr(5, 1), piece_mode(1, 0));
     if menu_sel == 0 {
         text(70, 56, ">");
     } else {
@@ -663,8 +663,8 @@ draw_color :: fn() {
     text(72, 20, "SIDE?");
     text(76, 52, "WHITE");
     text(76, 68, "BLACK");
-    blit(56, 52, tile_addr(5, 0), 128);
-    blit(56, 68, tile_addr(5, 1), 128);
+    blit(56, 52, tile_addr(5, 0), piece_mode(0, 0));
+    blit(56, 68, tile_addr(5, 1), piece_mode(1, 0));
     if menu_sel == 0 {
         text(66, 52, ">");
     } else {
@@ -847,13 +847,34 @@ game_frame :: fn() {
     draw_over();
 }
 
-( Input vectors: tiny latches, never game logic (vectors must stay
-  short — the mouse one fires per motion event). )
-on_key :: event() {
+( Boot: the mate jingle on track 1 (C5 E5 G5 C6), then the menu.
+  The host sets palette + screen size first (main.ux locally, the
+  project theme in uxn-forge), so this owns only game state. )
+game_boot :: fn() {
+    tracks[1].notes[0].pitch = 72;
+    tracks[1].notes[0].len = 8;
+    tracks[1].notes[1].pitch = 76;
+    tracks[1].notes[1].len = 8;
+    tracks[1].notes[2].pitch = 79;
+    tracks[1].notes[2].len = 8;
+    tracks[1].notes[3].pitch = 84;
+    tracks[1].notes[3].len = 16;
+    tracks[1].len = 4;
+    tracks[1].sample = &sq32;
+    tracks[1].slen = 32;
+    tracks[1].vol = 200;
+    tracks[1].adsr = 4369;
+    scene_go(SC_MENU);
+}
+
+( Input latches, called from the host's vector events: tiny, never
+  game logic (vectors must stay short — the mouse one fires per
+  motion event). Plain fns so any host can wire them. )
+game_key :: fn() {
     key_latch(keybuf);
     cbtn_latch(cbtnbuf);
 }
 
-on_mouse :: event() {
+game_mouse :: fn() {
     mouse_latch(mousebuf);
 }

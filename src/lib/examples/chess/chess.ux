@@ -1,0 +1,289 @@
+( chess.ux — the bridge between the rules (rules.ux, unchanged from
+  the hand-written game) and the engine's objects. Everything here is
+  something an event block calls: "Run function" for actions,
+  function values for numbers. Blocks pass u16, so every parameter
+  is u16; `to8` narrows through a mod type (ETAL has no casts).
+
+  Squares are 0-63, rank * 8 + file, rank 0 = white's home row. The
+  board is drawn at x 64-191, y 0-127, 16px squares; pieces sit 4px
+  inside their square. )
+
+import "rules.ux"
+
+view_white: u8 = 1;
+human: u8 = 0;
+sel_sq: u8 = 64;
+grabbed: u8 = 64;
+buffer hl[64]: u8;
+( last move, for the pieces to act out: from, to, captured square,
+  rook hop when castling — 64 = none )
+mv_from: u8 = 64;
+mv_to: u8 = 64;
+mv_cap: u8 = 64;
+mv_rf: u8 = 64;
+mv_rt: u8 = 64;
+was_check: u8 = 0;
+
+to8 :: fn(v: u16) -> u8 {
+    t: u16 mod 256 = v;
+    return t;
+}
+
+( A fresh game for the human playing `side` (0 white, 1 black). The
+  pieces themselves come from the play scene: each piece object
+  places itself with put_piece when the scene starts. )
+new_game :: fn(side: u16) {
+    setup_board();
+    i: u8 = 0;
+    while i < 64 {
+        board[i] = 0;
+        hl[i] = 0;
+        i = i + 1;
+    }
+    human = 0;
+    view_white = 1;
+    if side != 0 {
+        human = 1;
+        view_white = 0;
+    }
+    sel_sq = 64;
+    grabbed = 64;
+    mv_from = 64;
+    was_check = 0;
+}
+
+put_piece :: fn(sq: u16, code: u16) {
+    board[sq] = to8(code);
+}
+
+( Scene layout (white at the bottom) -> square. )
+layout_sq :: fn(x: u16, y: u16) -> u16 {
+    return (7 - y / 16) * 8 + (x - 64) / 16;
+}
+
+( Square -> where a piece draws, through the current view. )
+sq_x :: fn(sq: u16) -> u16 {
+    f: u16 = sq % 8;
+    if view_white == 0 { f = 7 - f; }
+    return 64 + f * 16 + 4;
+}
+
+sq_y :: fn(sq: u16) -> u16 {
+    r: u16 = sq / 8;
+    if view_white != 0 { r = 7 - r; }
+    return r * 16 + 4;
+}
+
+( Mouse pixel -> square, 64 when off the board. )
+mouse_sq :: fn(mx: u16, my: u16) -> u8 {
+    if mx < 64 { return 64; }
+    if mx >= 192 { return 64; }
+    if my >= 128 { return 64; }
+    f: u16 = (mx - 64) / 16;
+    r: u16 = my / 16;
+    if view_white != 0 { r = 7 - r; } else { f = 7 - f; }
+    return to8(r * 8 + f);
+}
+
+( 1 when a piece of `cell` (sheet cell = code - 1) belongs to the
+  side drawn at the top: those are rotated so both armies read
+  upright from their own end. )
+is_far :: fn(cell: u16) -> u16 {
+    side: u16 = 0;
+    if cell >= 6 { side = 1; }
+    if side == view_white { return 1; }
+    return 0;
+}
+
+cell_at :: fn(sq: u16) -> u16 {
+    p: u16 = board[sq];
+    if p == 0 { return 0; }
+    return p - 1;
+}
+
+( Turn the board around (and drop any selection: its dots would be
+  on the wrong squares). )
+flip_view :: fn() {
+    view_white = 1 - view_white;
+    sel_sq = 64;
+    grabbed = 64;
+}
+
+human_turn :: fn() -> u16 {
+    if turn == human { return 1; }
+    return 0;
+}
+
+white_to_move :: fn() -> u16 {
+    if turn == 0 { return 1; }
+    return 0;
+}
+
+grabbed_sq :: fn() -> u16 {
+    return grabbed;
+}
+
+is_target :: fn(sq: u16) -> u16 {
+    if sel_sq == 64 { return 0; }
+    return hl[sq];
+}
+
+select_sq :: fn(sq: u8) {
+    sel_sq = sq;
+    i: u8 = 0;
+    while i < 64 {
+        hl[i] = 0;
+        i = i + 1;
+    }
+    gen_legal(turn);
+    j: u8 = 0;
+    while j < 128 {
+        if j < moven {
+            if mfrom[j] == sq { hl[mto[j]] = 1; }
+        }
+        j = j + 1;
+    }
+}
+
+clear_sel :: fn() {
+    sel_sq = 64;
+    grabbed = 64;
+}
+
+( Play f -> t on the board and record what the pieces must do. )
+play_move :: fn(f: u8, t: u8) {
+    p: u8 = board[f];
+    mv_from = f;
+    mv_to = t;
+    mv_cap = 64;
+    mv_rf = 64;
+    mv_rt = 64;
+    do_move(f, t);
+    if u_cap != 0 {
+        mv_cap = t;
+        if u_epcap != 0 {
+            if p == 1 { mv_cap = t - 8; } else { mv_cap = t + 8; }
+        }
+    }
+    ( castling: the king hopped two files, its rook jumps over it )
+    if kind_of(p) == 5 {
+        if t == f + 2 { mv_rf = t + 1; mv_rt = t - 1; }
+        if f == t + 2 { mv_rf = t - 2; mv_rt = t + 1; }
+    }
+    clear_sel();
+}
+
+( Mouse pressed at mx, my. Returns what happened:
+  0 nothing · 1 a piece got selected (show its moves) · 2 a move was
+  played · 3 selection dropped · 4 not allowed. )
+press :: fn(mx: u16, my: u16) -> u16 {
+    sq: u8 = mouse_sq(mx, my);
+    if sq == 64 { return 0; }
+    if turn != human { return 4; }
+    if sel_sq != 64 {
+        if hl[sq] != 0 {
+            play_move(sel_sq, sq);
+            return 2;
+        }
+    }
+    p: u8 = board[sq];
+    if p != 0 {
+        if side_of(p) == turn {
+            select_sq(sq);
+            grabbed = sq;
+            return 1;
+        }
+    }
+    if sel_sq != 64 {
+        clear_sel();
+        return 3;
+    }
+    return 4;
+}
+
+( Mouse released: dropping a dragged piece. Returns 2 when the drop
+  played a move, 5 when the piece must go back, 0 otherwise. )
+release :: fn(mx: u16, my: u16) -> u16 {
+    if grabbed == 64 { return 0; }
+    sq: u8 = mouse_sq(mx, my);
+    g: u8 = grabbed;
+    grabbed = 64;
+    if sq == g { return 5; }
+    if sq != 64 {
+        if hl[sq] != 0 {
+            play_move(g, sq);
+            return 2;
+        }
+    }
+    return 5;
+}
+
+( The computer plays its move; 1 when it found one. )
+ai_move :: fn() -> u16 {
+    if turn == human { return 0; }
+    gen_legal(turn);
+    if moven == 0 { return 0; }
+    ai_choose(turn);
+    play_move(ai_f, ai_t);
+    return 1;
+}
+
+move_from :: fn() -> u16 { return mv_from; }
+move_to :: fn() -> u16 { return mv_to; }
+captured_sq :: fn() -> u16 { return mv_cap; }
+rook_from :: fn() -> u16 { return mv_rf; }
+rook_to :: fn() -> u16 { return mv_rt; }
+
+( 0 playing · 1 check · 2 checkmate · 3 draw — for the side to move. )
+status :: fn() -> u16 {
+    st: u8 = game_status(turn);
+    if st == ST_MATE { return 2; }
+    if st == ST_DRAW { return 3; }
+    if in_check(turn) != 0 { return 1; }
+    return 0;
+}
+
+( 1 the first frame a check appears (so the sound plays once). )
+new_check :: fn() -> u16 {
+    c: u8 = in_check(turn);
+    if c != 0 {
+        if was_check == 0 {
+            was_check = 1;
+            return 1;
+        }
+        return 0;
+    }
+    was_check = 0;
+    return 0;
+}
+
+( Material in pawns from white's view (the rules' piece values are
+  in tenths): 1000 + lead when white is ahead or level, else black's
+  lead — the panel shows "+n" or "-n". )
+material_white :: fn() -> u16 {
+    w: u16 = 1000;
+    sq: u8 = 0;
+    while sq < 64 {
+        if board[sq] != 0 {
+            if board[sq] < 7 { w = w + piece_value(kind_of(board[sq])) / 10; } else { w = w - piece_value(kind_of(board[sq])) / 10; }
+        }
+        sq = sq + 1;
+    }
+    if w >= 1000 { return w; }
+    return 1000 - w;
+}
+
+( Who won: 1 white, 2 black, 3 draw — after status() said it's over. )
+result :: fn() -> u16 {
+    st: u8 = game_status(turn);
+    if st == ST_DRAW { return 3; }
+    if turn == 0 { return 2; }
+    return 1;
+}
+
+( 1 while the side to move is in check — cheap enough for a label
+  that updates every frame. )
+checked :: fn() -> u16 {
+    if in_check(turn) != 0 { return 1; }
+    return 0;
+}
