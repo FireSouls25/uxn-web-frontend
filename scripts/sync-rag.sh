@@ -9,7 +9,7 @@ SRC="$ROOT/../backend/rag"
 DEST="$ROOT/src/lib/agent/corpus"
 [ -d "$SRC" ] || { echo "missing corpus: $SRC" >&2; exit 1; }
 mkdir -p "$DEST"
-for f in tools.md etal.md varvara.md examples.md; do
+for f in tools.md etal.md varvara.md examples.md engine.md; do
   [ -f "$SRC/$f" ] || { echo "missing $SRC/$f" >&2; exit 1; }
   cp "$SRC/$f" "$DEST/$f"
 done

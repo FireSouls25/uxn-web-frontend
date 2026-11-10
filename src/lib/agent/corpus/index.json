@@ -1,102 +1,150 @@
 {
   "version": 1,
-  "count": 22,
+  "count": 30,
   "chunks": [
+    {
+      "id": "engine.md#top",
+      "source": "engine.md",
+      "title": "engine",
+      "text": "# The engine model (how a uxn·forge game is built)\n\nGameMaker/Godot-style: **scenes** hold **objects**, objects come from\n**templates**, and behaviour is **events → actions** (the Blocks\nview). Scripts (`.ux` modules) hold the logic that blocks are too\ncoarse for, and blocks call into them. The engine compiles everything\nto one ETAL program (`main.ux` + your scripts)."
+    },
+    {
+      "id": "engine.md#pieces",
+      "source": "engine.md",
+      "title": "Pieces",
+      "text": "## Pieces\n* **Sprite**: art. 1×1 to 4×4 tiles of 8×8, 4 colors (indices 0–3).\n  A sprite can be a **sheet** (`set_sheet`): an object shows one\n  **cell**, and actions switch cells.\n* **Template** (`create_object_def`): an object type, like \"piece\" or\n  \"enemy\". It has default sprite and kind, **variables** (each instance\n  keeps its own copy: `add_template_var`) and **events**.\n* **Object / instance**: a template placed in a scene\n  (`place_instance`), or an inline object (`put_on_scene`), which is\n  its own one-off template. Instances keep their own position and\n  variable overrides.\n* **Scene**: a level or screen. It has objects, its own **scene\n  events** (the level controller: start, keys, timers, clicks\n  anywhere), and a **spawn pool** (free slots for `spawn` actions).\n  `p.start` is the first scene. Text objects (`set_label`) draw\n  strings; a `text` action redraws them with a number.\n* **Game variables** (`add_variable`): global u16 values, `var_<id>[0]`\n  in code. **Template variables**: per-instance u16, `iv_<name>[self]`\n  in code."
+    },
+    {
+      "id": "engine.md#levels-bigger-than-the-screen",
+      "source": "engine.md",
+      "title": "Levels bigger than the screen",
+      "text": "## Levels bigger than the screen\n* **Tile layer** (`set_tilemap`): a scene's grid of 8×8 cells from a\n  tile sheet (a sprite whose cells are 1×1 tiles). One byte per cell,\n  no object slots, so a 160×18 level is cheap. Listed cells are\n  **solid** for movement. The layer sets the scene's world size.\n  Users paint it in the Scene view (Tiles → paint).\n* **Camera** (`set_camera`): follows the first live instance of a\n  template, centered and clamped to the world. Objects marked **HUD**\n  (`set_hud`) stay fixed on screen (scores, lives).\n* **Movement presets** (`set_movement`) on a template:\n  `platformer` (arrows run, up/A/space jumps, gravity; solid tiles and\n  solid objects block) and `walker` (patrols, turns at walls and\n  ledges: enemies). The `jump {power}` action launches either one\n  upward (stomp bounces, springs). Mouse coordinates stay\n  screen-space."
+    },
+    {
+      "id": "engine.md#events-triggers-",
+      "source": "engine.md",
+      "title": "Events (triggers)",
+      "text": "## Events (triggers)\ncreate (scene starts / spawned), step (every frame), destroy,\nkey (named input or a controller button), click (pressed on this\nobject; on a scene: anywhere), release (mouse released anywhere),\ncollide (with any|solid|player|movable|def:<id>; the hit one is\n`other`), alarm (timer 0–3, armed by `wait`), message (sent by `send`\nto every object and the scene). Scenes have no collide/destroy."
+    },
+    {
+      "id": "engine.md#actions-all-values-are-u16-expressions-",
+      "source": "engine.md",
+      "title": "Actions (all values are u16 expressions)",
+      "text": "## Actions (all values are u16 expressions)\nmove, set_pos, glide (tween over frames), sprite, cell, look (blend,\nflips), show/hide, text, play (sound), song/song_stop, goto (switch\nscene), overlay (open a scene on top and freeze the one below: pause\nmenus) / back, wait (timer → alarm), destroy (self|other|def),\nspawn (new instance of a template), send (message), set (game var or\nmy/other var: set/add/sub), if/else, repeat, **call** (a script\nfunction), code (raw ETAL, last resort).\nValues: numbers, variables, `my`/`other` vars, x/y/cell/w/h of self or\nother, mouse x/y, random, math, and **function calls** (script fns\nthat return u16). Conditions: compare, button held, touching, mouse\nover, mouse down, all/any/not.\n\n**Rule of thumb:** placement, art, sound, input, scene flow and\nsimple state go in blocks. Rules, AI, tables and anything with loops\nover data go in a script function that blocks `call`."
+    },
+    {
+      "id": "engine.md#scripts-engine-contract",
+      "source": "engine.md",
+      "title": "Scripts ↔ engine contract",
+      "text": "## Scripts ↔ engine contract\n* Scripts are imported after the engine's state, so they can read and\n  write it. Public runtime names (slot arrays have 128 entries,\n  indexed by slot; `self` is the running object's slot, `other` is the\n  collide partner):\n  `ox[s] oy[s]` (u16 position), `ocell[s]` (u16 cell), `odef[s]` (u8\n  template index), `oflags[s]` (u8: bit0 alive, bit1 solid, bit2\n  movable, bit3 visible, bit4 player), `ocount`, `scene` (u8 current\n  scene id, compare with `SC_<SCENE>` constants), `scene_go`,\n  `var_<id>[0]`, `iv_<name>[slot]`.\n* Functions called from blocks take **u16 params only** and return\n  **u16** when used as a value (`-> u16`). Keep them small: every\n  param is a permanent zero-page byte.\n* Optional hooks in `custom.ux` (`set_custom_code`):\n  `custom_setup()` (boot), `custom_frame()` (each frame),\n  `custom_draw()` (after drawing: HUDs), `custom_key()` /\n  `custom_mouse()` (inside the vectors; latches only).\n* **Reserved names** (declaring them is an error): anything starting\n  `e_`, `spr_`, `var_`, `iv_`, `SC_`, plus `ox oy ot om ow oh otw oth\n  osw oflags odef osp ocell omx omy omw omh otx onv onf ogx ogy ogn\n  oan oaf oak oad oa0-3 st0-3 ocount scene"
+    },
+    {
+      "id": "engine.md#limits-that-shape-designs",
+      "source": "engine.md",
+      "title": "Limits that shape designs",
+      "text": "## Limits that shape designs\n128 object slots in total; the per-scene spawn pool is reserved\nfrom those. Collide pairs unroll per scene (keep targets narrow).\n4 audio voices; songs hold up to 16 steps per voice. Zero page is\n256 bytes and the engine uses much of it, so big games keep state in\n`buffer` arrays. Colors: 4 palette entries (`set_theme`); blends\n0/5/10/15 make color 0 transparent (pieces on a board use blend 0\nor 5)."
+    },
+    {
+      "id": "engine.md#workflow-the-agent-must-follow",
+      "source": "engine.md",
+      "title": "Workflow the agent must follow",
+      "text": "## Workflow the agent must follow\n1. The project summary at the top of each request is current. Use it,\n   and call `describe` / `scene_map` / `read_file` for details instead\n   of guessing ids.\n2. Plan in terms of templates, events and scripts before editing.\n3. Make the edits with tools. Read scripts before rewriting them\n   (`read_file`) and keep what you don't need to change.\n4. `validate` (instant, local), then `check_build` (real compiler),\n   and fix every error it names, repeating until clean.\n5. Reply with a short summary of what changed and how to try it\n   (Playtest)."
+    },
     {
       "id": "etal.md#top",
       "source": "etal.md",
       "title": "etal",
-      "text": "# ETAL cheat sheet (emitter subset)\n\nTyped DSL compiling to Uxntal. Every expression leaves exactly\n`sizeof(type)` bytes; `u8 → u16` widens, narrowing is explicit."
+      "text": "# ETAL language reference (what scripts are written in)\n\nETAL is a typed language that compiles to Uxntal for the Uxn VM.\nEvery expression leaves exactly `sizeof(type)` bytes on the stack.\nSource of truth: `uxn-dsl/docs/language/*.md`. When unsure, write the\ncode, run `check_build`, and fix what the compiler says."
     },
     {
-      "id": "etal.md#devices-declared-pages-typed-ports-",
+      "id": "etal.md#types",
       "source": "etal.md",
-      "title": "Devices (declared pages, typed ports)",
-      "text": "## Devices (declared pages, typed ports)\n```ux\ndevice Screen 32 { vector: 2  width: 2  height: 2  auto: 1  pad: 1  x: 2  y: 2  addr: 2  pixel: 1  sprite: 1 }\ndevice Controller 128 { vector: 2  button: 1  key: 1 }\ndevice Mouse 144 { vector: 2  x: 2  y: 2  state: 1 }\ndevice Audio0 48 { vector: 2  addr: 2  length: 2  volume: 1  adsr: 2  pitch: 1 }\n```\n\nReads: `x: u16 = Screen.width;` Writes: `Screen.sprite = 129;`\n(2-byte ports trigger device effects — order is semantic)."
+      "title": "Types",
+      "text": "## Types\n`u8` (1 byte), `u16` (2 bytes, big-endian), `bool` (0/1), `i8`/`i16`\n(two's complement; no signed `/` or `%`), `u8 mod N` / `u16 mod N`\n(every store wraps into [0,N)), `[N] T` fixed arrays, `&T` addresses,\nstructs. Literals take the smallest type that fits (0–255 is `u8`).\nArithmetic and bitwise ops give `u8` only when BOTH sides are `u8`,\notherwise `u16`. Comparisons give `bool`. `&&`/`||` are bitwise and\nevaluate both sides (no short-circuit).\n\n**No implicit narrowing.** `u8 → u16` widens automatically, but a\n`u16` into a `u8` is a type error. The narrowing bridge is a mod type:\n\n```ux\nto8 :: fn(v: u16) -> u8 {\n    t: u16 mod 256 = v;\n    return t;\n}\n```\n\nMasking (`v & 255`) still yields `u16`, so it does not narrow.\nThere are no casts and a `u16` never becomes a pointer."
     },
     {
-      "id": "etal.md#functions-events-vectors",
+      "id": "etal.md#declarations-the-second-symbol-decides-mutabilit",
       "source": "etal.md",
-      "title": "Functions, events, vectors",
-      "text": "## Functions, events, vectors\n```ux\nwrap :: fn(x: u16) -> u16 { return x; }\non_frame :: event() { draw_all(); }   (ends BRK, never JSR-called)\nmain :: event() { start(); }          (stays in the event loop)\nScreen.vector = &on_frame;            (arm the 60Hz handler)\n```\n\nNo recursion (static locals), no reentrancy. `match` over integer\nliterals plus trailing `_`. `for i in 0..N` (u16), `while`,\n`if/elif/else`. `print(\"...\")` inlines a console loop."
+      "title": "Declarations (the second symbol decides mutability)",
+      "text": "## Declarations (the second symbol decides mutability)\n```ux\nx: u16;              ( mutable, zero-page )\nx: u16 = 5;          ( mutable with initializer, runs at boot )\nn: u16 = 0;          ( prefer explicit types over `n := 0` )\nLIMIT : u16 : 20;    ( typed constant with storage )\nWIDTH :: 20;         ( free constant: the label IS the value )\nbuffer board[64]: u8;     ( main RAM array, global only )\ngrid: [16] u8;            ( small zero-page array )\ndata tile = [ 0x3c, 66, 129 ];   ( ROM bytes; &tile is its address; tile[i] reads )\nPoint :: struct { x: u16; y: u8; };   buffer pts[32]: Point;   pts[i].x = 4;\ngroup pos: u8 { x: u8  y: u8 }        ( zero-page struct, .pos/x )\nmeta { title: \"Game\", author: \"me\" }  ( once per program )\nimport \"rules.ux\"                      ( splice another file; include-once )\n```\n\nOnly GLOBAL arrays/buffers are indexable (no local arrays, no array\nliterals, no bounds checks). Arrays copy whole with `=` when type and\nlength match; otherwise they never touch the stack."
     },
     {
-      "id": "etal.md#memory",
+      "id": "etal.md#functions-events-macros",
       "source": "etal.md",
-      "title": "Memory",
-      "text": "## Memory\nGlobals live in 256B zero-page. `buffer buf[N]: u8|u16;` is main RAM.\n`data tile = [bytes];` is a ROM blob; `&tile` is its address.\nOne 8×8 2bpp tile = 16 planar bytes (channel one, then two);\nmulti-tile sprites concatenate tiles row-major (tile (tx,ty) at blob\noffset (ty·w+tx)·16), drawn with repeated addr+sprite writes.\n\nAssembler budget (measured, etal `-r`): a single `fn`/`event` holds\n~1200 label references before `References exceeded` fails the build\n(1200 OK, 1400 fails). Generated code keeps every function far below\nthat: shared loops over slots, per-scene setup/draw stay linear in\nleaf count with few refs per leaf — never unroll per-leaf code\nwithout counting."
+      "title": "Functions, events, macros",
+      "text": "## Functions, events, macros\n```ux\nadd :: fn(a: u16, b: u16) -> u16 { return a + b; }\non_frame :: event() { step(); }     ( a vector handler: ends with BRK )\nmacro clamp8(v: u16) -> u16 { return v & 255; }   ( inlined, type-checked )\n```\n\n* Valued fns MUST `return expr;` on every path (falling off the end\n  returns garbage).\n* Arguments widen `u8 → u16` at the call site; arity is checked;\n  call order is free (signatures are collected first).\n* **No recursion and no reentrancy**: params and locals are static\n  zero-page bytes. A fn calling itself corrupts its own locals.\n* Calling a valued fn as a bare statement warns; write `_ = f();`.\n* Events return with bare `return;` only."
     },
     {
-      "id": "etal.md#input-doctrine-hardware-facts-",
+      "id": "etal.md#statements",
       "source": "etal.md",
-      "title": "Input doctrine (hardware facts)",
-      "text": "## Input doctrine (hardware facts)\n`Controller.key` self-clears after firing — latch it in the controller\nvector, consume in the frame. Sub-frame taps are invisible to polling,\nso OR-accumulate buttons in the vector. Edge = `cur & (last ^ 255)`.\nD-pad mask bits: 16 up, 32 down, 64 left, 128 right. Key codes:\n32 space, 27 escape. Mouse state bit 1 = left."
+      "title": "Statements",
+      "text": "## Statements\n`if c { } elif c { } else { }`, `while c { }`,\n`for i in 0..n { }` (half-open; `i` is always u16; a pure bound is read\nonce), `match v { 0 => { } 1 => { } _ => { } }` (integer literals,\nlowers to an if-chain), `x += 1;` (all compound ops), `goto l;` /\n`label l;` (same fn), `assert c;`, `rpush x;` / `rpop;` (return stack),\n`raw { TAL }` (escape hatch; unchecked). Comments are `( … )`. Strings exist only as literals for `print(\"…\")`. Escapes are\n`\\n \\t \\\\ \\\"`."
+    },
+    {
+      "id": "etal.md#devices",
+      "source": "etal.md",
+      "title": "Devices",
+      "text": "## Devices\nPorts are typed: `Screen.x = 10;`, `b: u8 = Controller.button;`.\nWriting a sprite reads `addr/x/y/auto` at the moment `sprite` is\nwritten, so set those first. The engine declares every Varvara device\n(System, Console, Screen, Controller, Mouse, Audio0-3, DateTime).\nNever redeclare one."
+    },
+    {
+      "id": "etal.md#budgets-these-are-the-real-failure-modes",
+      "source": "etal.md",
+      "title": "Budgets: these are the real failure modes",
+      "text": "## Budgets: these are the real failure modes\n* **Zero page: 256 bytes.** Every global scalar, every fn param and\n  every local takes bytes for the whole program. The engine already\n  uses part of it. Prefer `buffer x[1]: u16;` (RAM, read `x[0]`) for\n  state, and reuse a few scratch globals instead of naming many locals.\n  The error is `zero-page overflow`.\n* **Label dictionary (`Symbols exceeded`).** Every fn, data blob,\n  buffer and branch is a label. In big programs, use fewer and shorter\n  fns, flatten nested ifs with `&&`, and prefer one sprite sheet over\n  many sprites.\n* **References per fn (~1200)**: split giant fns.\n* Unused `data` or globals give warnings. Delete them.\n* Drifblim rejects some label names that look like hex (`a1`, `f66`)\n  and `face`. Use distinctive names."
+    },
+    {
+      "id": "etal.md#input-facts",
+      "source": "etal.md",
+      "title": "Input facts",
+      "text": "## Input facts\n`Controller.key` self-clears right after its vector fires, so polling\nin the frame never sees it; latch it in a key vector. The engine\nalready does this, so engine code reads input through events or the\n`held` condition. D-pad bits: 1 A, 2 B, 4 select, 8 start, 16 up,\n32 down, 64 left, 128 right. Key codes: 32 space, 27 escape, 13 enter.\nMouse `state & 1` is the left button."
+    },
+    {
+      "id": "etal.md#common-compiler-errors-fix",
+      "source": "etal.md",
+      "title": "Common compiler errors → fix",
+      "text": "## Common compiler errors → fix\n* `type mismatch: u16 vs u8` → widen the target to u16, or narrow\n  with `to8` above.\n* `unknown identifier` → declare it (globals before use in that file)\n  or `import` the module that has it.\n* `discarded return value` → `_ = f();`.\n* `zero-page overflow` → move scalars into `buffer name[1]` and cut\n  locals/params.\n* `Symbols exceeded` / `References exceeded` → fewer labels, split fns.\n* `duplicate definition` → the name is already declared (in another\n  script, a library module, or the engine; see reserved names in\n  engine.md)."
     },
     {
       "id": "examples.md#top",
       "source": "examples.md",
       "title": "examples",
-      "text": "# Example: chess (the pattern to imitate)\n\nFull game in `frontend/src/lib/examples/chess/` (sources synced from\n`uxn-webpage/chess/`). Two layers, and custom code must follow them:\n\n1. **Pure rules** (`rules.ux`): everything over `buffer board[64]`\n   (squares 0–63, pieces 0 empty / 1–6 white / 7–12 black) — move\n   generation per piece, `attacked`, `in_check`, `gen_legal`,\n   `game_status`, `do_move`/`undo_move`, `setup_board`, plus a\n   material AI (`ai_choose`). No devices, no vectors, no imports\n   except data. This file splices verbatim into `customCode`.\n2. **Thin device UI** (`game.ux`): five scenes (menu/color/play/pause/\n   over), mouse drag-to-move, highlights, a cursor tile (the VM draws\n   no cursor), SFX. Scenes map 1:1 onto the visual scene model;\n   `tile_addr(kind, side)` computes ROM addresses arithmetically."
+      "text": "# Example: chess in the engine model (the pattern to imitate)\n\nThe Chess example (read-only; \"Duplicate to edit\") is built the way\nthe engine intends. Use it as the reference for \"blocks for the\ngame's shape, scripts for its rules\".\n\n* **Scenes**: `menu` (title + PLAY button), `side` (WHITE/BLACK\n  buttons set game var `side`), `play` (board tiles, 32 pieces, text\n  objects title/turn/score, FLIP and MENU buttons, `pool: 28` spawn\n  slots for move dots), `pause` and `over`. `pause` and `over` open\n  with `overlay` so the board stays frozen underneath; RESUME/Esc use\n  `back`. Inputs: `confirm` (Enter) and `pause` (Esc).\n* **Art**: `board4` (32×32 board tile used by `tile`), a `pieces`\n  sheet (one cell per piece kind and color), `dot`, `cursor`.\n* **Templates**:\n  * `tile`: board squares.\n  * `piece` (blend 0, template var `sq`): on create it sets\n    `sq = layout_sq(x, y)`, calls `put_piece(my sq, cell + 1)` and\n    snaps to `sq_x/sq_y`. Each step, if `grabbed_sq() == my sq`, it\n    follows the mouse. On message `moved`: if it was captured it\n    destroys itself; if it moved, it sets `sq = move_to()`, glides to\n    the new square and updates its cell. On message `rook` it does the"
     },
     {
-      "id": "examples.md#example-emitted-demo-what-visual-projects-lower-",
+      "id": "examples.md#example-sprout-run-platformer-no-scripts-",
       "source": "examples.md",
-      "title": "Example: emitted demo (what visual projects lower to)",
-      "text": "## Example: emitted demo (what visual projects lower to)\n`devices.ux` (System/Screen/Controller/Mouse/Audio pages) + `main.ux`:\n`meta`, `SC_*` constants, `data spr_*` 16-byte planar blobs, fixed\nslot buffers, `scene_go`, `pt_in_rect`/`overlap88`, `draw_all`,\n`setup_<scene>` + `<scene>_frame`, vector wiring, `main :: event`.\nFrame order: input latch → drive → anim → clicks/keys → ticks →\ncustom_frame → scene script → draw."
+      "title": "Example: Sprout Run (platformer, no scripts)",
+      "text": "## Example: Sprout Run (platformer, no scripts)\n* Scenes `title`, `level`, `win`, `lose`. `level` has a 160×18 tile\n  layer (sheet `tiles`: grass, dirt, brick, stone are solid; bush,\n  flower and fence are decor), `camera: follow hero`, and a HUD text\n  object `hud`.\n* Templates: `hero` (platformer, speed 2, jump 5, mask 2,3,12×13,\n  blend 5), `beetle` (walker, speed 1), `coin`, `flag`.\n* Hero events: collide coin → destroy other, coins +1, play coin, send\n  `score` (the HUD redraws `COINS ` + var coins on that message).\n  Collide beetle → if `my y + 12 < other y` (falling onto it):\n  destroy other, jump 3, play stomp; else play hurt and goto lose.\n  Collide flag → goto win. Step: if y > 144 (fell in a pit) → lose.\n* Level scene create: set coins 0."
     },
     {
-      "id": "examples.md#conventions-for-generated-custom-coexistence",
+      "id": "examples.md#small-patterns",
       "source": "examples.md",
-      "title": "Conventions for generated + custom coexistence",
-      "text": "## Conventions for generated + custom coexistence\n* Generated identifiers (`ox`, `scene_go`, `SC_*`, `spr_*`, `atick_*`,\n  `setup_*`, `*_frame`) are reserved; the checker rejects\n  redeclarations, the compiler catches the rest.\n* Hooks: `custom_setup()` runs once at boot, `custom_frame()` runs\n  every frame before drawing. Per-object `tick_<scene>_<id>(slot)`\n  gets the slot index for `ox[slot]`-style access.\n* One player per scene max (0 allowed); movable implies solid;\n  clicks accept nested paths (`rack/jar`); latch input in vectors,\n  consume in frames."
+      "title": "Small patterns",
+      "text": "## Small patterns\n* **Score HUD**: game var `score`; a text object `hud` \"SCORE\"; on a\n  coin's collide with player: set score add 1, then `text` on hud\n  with value var score, then destroy self.\n* **Timer spawner**: scene create: wait 60 slot 0. Scene alarm 0:\n  spawn enemy at (random 160, 0), then wait 60 slot 0 again.\n* **Pause**: scene key escape → overlay pause. Pause scene key escape →\n  back.\n* **Script value**: `dist :: fn(a: u16, b: u16) -> u16 { if a > b {\n  return a - b; } return b - a; }` used in an if condition: compare\n  `call dist(my x, other x)` lt 16."
     },
     {
       "id": "tools.md#top",
       "source": "tools.md",
       "title": "tools",
-      "text": "# Agent tools reference\n\nSource of truth: `frontend/src/lib/agent/tools.ts` (`TOOLS` + `runTool`).\nEvery tool validates like the UI; the backend compiler is final arbiter."
+      "text": "# Agent tools: how to use them together\n\nSource of truth: `frontend/src/lib/agent/tools.ts`. Each tool's own\ndescription and params travel with the request; this page covers how\nthey combine. Tools edit the open project in the user's tab (the same\nstore the UI edits), so the user sees every change live."
     },
     {
-      "id": "tools.md#project-scenes",
+      "id": "tools.md#looking-before-acting",
       "source": "tools.md",
-      "title": "Project & scenes",
-      "text": "## Project & scenes\n* `describe()` — snapshot `{project, scene, scenes, sprites, defs, sounds, anims}`. Start here.\n* `create_project {name}` / `open_project {id}` — fresh project / switch.\n* `create_scene {}` — empty scene, switches to it.\n* `nest_scene {scene, into?, x?, y?, name?}` — instance a subscene at an\n  offset (Godot-style). Cycles rejected. Children render at parent\n  offset + own position; editing them edits the home scene."
+      "title": "Looking before acting",
+      "text": "## Looking before acting\n* The request starts with a **project summary** (scenes, templates,\n  events, scripts, sprites, sounds, variables). Trust it for ids.\n* `describe` gives a compact snapshot again (after many edits).\n* `scene_map {scene?}` gives positions and sizes of every object;\n  `find_space` / `check_space` find free spots.\n* `read_file {path, from?, to?}` returns numbered source: a script\n  (`chess.ux`), `custom.ux`, a generated file (`main.ux`) or a\n  library module (`lib/fix16.ux`). Read a script before editing it.\n* `list_library {module?}` lists the standard modules or one module's\n  exports.\n* `preview_event` shows the ETAL an event lowers to."
     },
     {
-      "id": "tools.md#sprites-objects",
+      "id": "tools.md#building",
       "source": "tools.md",
-      "title": "Sprites & objects",
-      "text": "## Sprites & objects\n* `create_sprite {name, pixels?, w?, h?}` — library sprite, 1×1 to\n  4×4 tiles of 8×8 (bigger art = consecutive tiles, drawn tile by\n  tile). Pixels are 64·w·h indices 0–3 (**Uxn 2bpp hardware limit**),\n  tile-major row-major; index 0 paints palette 0 (opaque background,\n  not transparency).\n* `put_on_scene {sprite, scene?, x?, y?, kind?, name?}` — kinds:\n  `player` (≤1/scene, 0 allowed), `static`, `movable` (solid+pushable).\n  Coordinates are game pixels (origin top-left); use `scene_map` +\n  `find_space` so placements land coherently.\n* `move_object {object, x, y}` — absolute game pixels, clamped.\n  Validate with `check_space` first.\n* `rename_object {from, to}` — click bindings follow.\n* `set_mask {def|object, x?, y?, w?, h?}` — hitbox inside the sprite\n  (collision + clicks; drive keeps full bounds). Omit the numbers\n  to clear. Out-of-sprite boxes are rejected.\n* `delete_node {index, scene?}` / `reorder_nodes {from, to}` /\n  `move_node {from_scene, from_index, to_scene}` — draw order follows\n  list order; branch moves are cycle-guarded."
+      "title": "Building",
+      "text": "## Building\n* Art: `create_sprite` (pixels 0–3), `set_sheet`, `set_look`,\n  `add_anim_frame` / `set_anim`, `set_theme` (the 4 colors).\n* Things: `create_object_def` (template), `add_template_var`,\n  `place_instance`, `put_on_scene` (one-off object), `extract_object`,\n  `set_label` (text objects), `move_object`, `rename_object`,\n  `delete_node`, `reorder_nodes`, `move_node`, `nest_scene`.\n* Scenes: `create_scene`, `add_transition` (click/key → goto).\n* Behaviour: `add_event {def|object|scene, trigger, …}` returns the\n  event id; `add_action {…, event, action: JSON}` appends an action.\n  Nested bodies go inline (`then`, `else`, `body`) or via `path`\n  (`\"2.then\"`). Use `delete_event`, `delete_action` and\n  `preview_event` to iterate.\n* State: `add_variable` / `set_variable` / `rename_variable` /\n  `delete_variable` (game vars), `add_template_var` (per instance).\n* Sound: `create_sound` + `set_sound_voice`, `create_song` +\n  `set_song_note` / `set_song_vol`; `play` / `song` actions use them.\n* Code: `write_script {path, code}` (whole module, created or\n  replaced), `delete_script`, `set_custom_code` (hooks),\n  `set_loop` (engine | script)."
     },
     {
-      "id": "tools.md#space-coordinates",
+      "id": "tools.md#checking-always-before-saying-done-",
       "source": "tools.md",
-      "title": "Space & coordinates",
-      "text": "## Space & coordinates\n* The canvas is W×H **game pixels, origin top-left, +x right, +y\n  down**. Sizes are literal pixels (an 8×8 sprite is `w: 8, h:\n  8`); the 8px tile grid is a placement convention (snap), not a\n  boundary — any integer pixel is addressable.\n* `scene_map {scene?}` — `{width, height, objects: [{path, x, y,\n  w, h, kind, solid, sprite}]}` with effective kind/solid/sprite\n  (template fallbacks applied, subscene offsets accumulated).\n  Read this before placing or moving anything.\n* `find_space {w?, h?, scene?, nearX?, nearY?, avoid?}` — first free\n  8px-snapped `{x, y}` fitting w×h inside the canvas without\n  overlapping solid objects (`avoid: 'all'` dodges every object).\n  `ok: false` means nothing fits — shrink or move things first.\n* `check_space {x, y, w?, h?, scene?}` — `{inside, fits,\n  overlaps, solid}` for a candidate rect. `fits` means inside the\n  canvas with no solid overlap.\n* Solid = `solid` flag set or `movable` kind. Overlap is rectangle\n  intersection; touching edges do not overlap."
-    },
-    {
-      "id": "tools.md#object-templates-object-sprite-instance-",
-      "source": "tools.md",
-      "title": "Object templates (Object ≠ Sprite ≠ Instance)",
-      "text": "## Object templates (Object ≠ Sprite ≠ Instance)\n* `create_object_def {name, sprite?, kind?, anim?, tick?}` — behavior\n  template: default art, kind (`player` ≤1/scene, `static`,\n  `movable` = solid+pushable), animation, tick script. Editing the\n  def updates every instance at once.\n* `place_instance {def, scene?, x?, y?, name?}` — stamp an instance;\n  position is always instance state, other fields override per\n  instance (explicit values win, even `false`).\n* `extract_object {object}` — top-level inline leaf becomes a\n  template + instance pair (id and position stay, the rest moves\n  into the new def). Prefer this over rebuilding shared art by hand.\n* Leaves resolve at flatten time (local over def), so the emitter,\n  canvas and validation all see effective values. Physics rules,\n  player caps and anim-size matches check resolved leaves."
-    },
-    {
-      "id": "tools.md#events-blocks-visual-rules-that-compile-to-etal-",
-      "source": "tools.md",
-      "title": "Events & blocks (visual rules that compile to ETAL)",
-      "text": "## Events & blocks (visual rules that compile to ETAL)\n* `add_event {def|object, trigger, key?, target?}` — loop moments:\n  `create` (scene enter), `step` (every frame), `destroy`,\n  `key` (named input), `collide` (overlap vs\n  `any|solid|player|movable|def:<id>`), `click` (press on it),\n  `alarm` (slot countdown hits 0). One event per trigger+key/target.\n  Defs own their events; instances run them (no local event lists).\n* `add_block {def|object, event, op, ...}` — one action = fixed ETAL:\n  `move {dx,dy}` (pixels, clamped), `set_pos {x,y}`,\n  `sprite {sprite}` (swap art at runtime, same tile size as the\n  leaf — the draw loop unrolls the declared size),\n  `show`/`hide` (alive bit on/off without running destroy events),\n  `play {sound}` (named one-shot SFX — see below),\n  `song {song}` (start a named 4-voice loop in the shared\n  sequencer; one loop plays at a time and keeps playing across\n  scene switches), `song_stop` (silence it),\n  `goto {scene}`,\n  `overlay {scene}` (push the current scene, enter the target as a\n  **fresh instance** — its setup runs again, so it is menu\n  navigation, NOT freeze-pause), `back` (pop to the scene below;\n  8 deep, overflow and popping an empty sta"
-    },
-    {
-      "id": "tools.md#rules-as-code",
-      "source": "tools.md",
-      "title": "Rules as code",
-      "text": "## Rules as code\n* `script_object {object, code}` — ETAL statements wrapped as\n  `tick_<scene>_<id>(slot)`, called every frame. Full generated-state\n  access (`ox[slot]`, scene fns). Only redeclarations are rejected.\n* `creation_code {object, code}` — per-instance statements spliced\n  after the leaf's create-event blocks (GameMaker Creation Code).\n  Empty clears.\n* `script_scene {scene?, code}` — statements at the end of the frame.\n* Project `customCode` adds top-level declarations plus optional\n  `custom_setup()` (boot) / `custom_frame()` (every frame) hooks."
-    },
-    {
-      "id": "tools.md#sound-theme-build",
-      "source": "tools.md",
-      "title": "Sound, theme, build",
-      "text": "## Sound, theme, build\n* `set_sound {voice 0-3, note 0-107, vol 0-255}` — mix plays once on\n  boot via Audio0–3, shared square wave.\n* `create_sound {name}` — named one-shot SFX (up to 4 voices each;\n  index = Audio device, vol 0 = silent). Trigger it after boot with\n  `play {sound}`; an all-silent sound is rejected.\n* `set_sound_voice {sound, voice 0-3, note 0-107, vol 0-255}` —\n  voice editor for the library (same ranges as the boot mix).\n* `rename_sound {from, to}` — play blocks follow. `delete_sound`\n  is refused while a play block names the sound.\n* Songs (music): `create_song {name}` — named 4-voice loop, **max 16\n  steps per voice** (the live track buffers are 16 bytes per voice:\n  128 bytes of RAM). `set_song_note {song, voice 0-3, step 0-15,\n  pitch 0-107, len 1-255}` (omit pitch for a rest; pitch 127 is the\n  rest marker from `lib/song.ux`),\n  `set_song_vol {song, voice, vol 0-255}` (vol 0 = silent, and a\n  voice with no audible notes never gets an Audio device),\n  `rename_song {from, to}` (song blocks follow), `delete_song`\n  (refused while a song block names it). One loop plays at a time\n  through `song_tick()`, called once per frame from `on_frame` —\n  a single shared "
+      "title": "Checking (always, before saying \"done\")",
+      "text": "## Checking (always, before saying \"done\")\n1. `validate`: instant local checks (ids, references, reserved\n   names, budgets the editor knows).\n2. `check_build`: compiles with the real ETAL compiler on the server\n   and returns `{file, line, msg}` diagnostics mapped to the user's\n   files. Fix each one (`read_file` around the line, then\n   `write_script`) and check again. Stop after 3 failed rounds and\n   tell the user what is still wrong.\n3. `emit_files` only when you need to see all of the generated code.\n\nExport and playtest are UI buttons; tell the user to press Playtest."
     },
     {
       "id": "varvara.md#top",

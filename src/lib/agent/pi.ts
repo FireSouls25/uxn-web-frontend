@@ -20,8 +20,9 @@ import toolsMd from "./corpus/tools.md?raw";
 import etalMd from "./corpus/etal.md?raw";
 import varvaraMd from "./corpus/varvara.md?raw";
 import examplesMd from "./corpus/examples.md?raw";
+import engineMd from "./corpus/engine.md?raw";
 import { authFetch } from "../auth";
-import { TOOLS, runTool } from "./tools";
+import { TOOLS, runToolAsync } from "./tools";
 
 export interface TurnReply {
   content: string | null;
@@ -235,7 +236,7 @@ export function buildPiTools(): Array<AgentTool<TSchema, unknown>> {
     parameters: toSchema(t.params),
     execute: async (toolCallId: string, params: unknown) => {
       void toolCallId;
-      const result = runTool(t.name, (params ?? {}) as Record<string, unknown>);
+      const result = await runToolAsync(t.name, (params ?? {}) as Record<string, unknown>);
       return {
         content: [{ type: "text" as const, text: `${result.ok ? "ok" : "failed"}: ${result.message}${result.data ? `\ndata: ${JSON.stringify(result.data)}` : ""}` }],
         details: result,
@@ -244,17 +245,25 @@ export function buildPiTools(): Array<AgentTool<TSchema, unknown>> {
   }));
 }
 
-export const SYSTEM_PROMPT = `You are the Forge studio agent. You build Uxn games by calling tools — never invent project state, always describe() first.
+export const SYSTEM_PROMPT = `You are the uxn·forge studio agent. You build and fix Uxn games inside the user's open project by calling tools. The project changes live in their editor.
 
-${toolsMd}
+How you work:
+- Each user message starts with a "Current project" summary. It is fresh; use its ids. Never invent ids, files or functions: look them up (describe, scene_map, read_file, list_library).
+- Use the engine model: templates + events/actions for the game's shape, script functions (ETAL) for rules and data, called from blocks. Read engine.md below.
+- Write correct ETAL: u16 params/returns for functions blocks call, no implicit narrowing, no recursion, mind the 256-byte zero page. Read etal.md below.
+- Before you say you're done: validate, then check_build. Fix every error and re-check. If it still fails after 3 rounds, stop and explain what's left.
+- Read-only projects (examples) can't be edited: tell the user to press "Duplicate to edit".
+- Reply in the user's language. Be brief: say what you changed and how to try it (Playtest). Don't paste whole files into chat.
+
+${engineMd}
 
 ${etalMd}
 
+${toolsMd}
+
 ${varvaraMd}
 
-${examplesMd}
-
-Rules: one player per scene max (0 allowed); movable implies solid; click targets accept nested paths (rack/jar); validate before long chains; export only via the UI compile flow. Keep replies short; narrate each tool call as you go.`;
+${examplesMd}`;
 
 /** Stand-in identity for the model the backend picked. Pi wants a
     Model in its state; the real one is server-side and invisible. */

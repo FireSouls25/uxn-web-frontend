@@ -4,6 +4,7 @@ import { Bot, Loader2, Send, X } from "lucide-react";
 import type { Agent } from "@mariozechner/pi-agent-core";
 import { t, useLang, type Lang } from "../../lib/i18n";
 import { createStudioAgent } from "../../lib/agent/pi";
+import { buildPrompt } from "../../lib/agent/rag";
 
 interface Message {
   role: "user" | "agent" | "note" | "tool";
@@ -69,6 +70,7 @@ export default function AgentChat() {
     setBusy(true);
     try {
       const agent = (agentRef.current ??= createStudioAgent());
+      const prompt = buildPrompt(text);
       let current = "";
       const off = agent.subscribe((event) => {
         const ev = event as unknown as Record<string, unknown>;
@@ -89,7 +91,7 @@ export default function AgentChat() {
         }
       });
       try {
-        await agent.prompt(text);
+        await agent.prompt(prompt);
       } catch (err) {
         // prompt() resolves on error events; this only catches a truly
         // broken agent (aborted, or the transcript went bad).

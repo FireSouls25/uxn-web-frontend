@@ -9,7 +9,6 @@
    compiler remains the final arbiter at export. */
 import {
   addAnimFrame,
-  addBinding,
   addBlock,
   addBlockAt,
   addDef,
@@ -18,7 +17,7 @@ import {
   addNode,
   addObject,
   addScene,
-  addSnippet,
+  addScript,
   addSong,
   addSound,
   addSprite,
@@ -28,6 +27,7 @@ import {
   deleteBlockAt,
   deleteEvent,
   deleteNode,
+  deleteScript,
   deleteSong,
   deleteSound,
   deleteVariable,
@@ -47,10 +47,13 @@ import {
   sceneIdStore,
   selectionStore,
   setLeafLabel,
+  setLeafLook,
+  setSpriteCell,
+  setCustomCode,
+  setLoopMode,
   setMask,
+  setScriptCode,
   setObjectPos,
-  setSceneFrameCode,
-  setSnippetCode,
   setSongNote,
   setSongVol,
   setSoundVoice,
@@ -58,10 +61,20 @@ import {
   setTheme,
   setVariableInit,
   setVoice,
+  BLOCK_OPS,
+  addDefVar,
+  addInput,
+  readOwnerEvents,
+  setSceneCamera,
+  setSceneTilemap,
 } from "../store";
-import { emitProject, flattenScene, previewOwnerEvent, projectDefs, spritePxOf, validateProject } from "../project";
-import type { Block, BlockPath, EventTrigger, ObjectKind, ValueOperand } from "../project";
+import { definedHooks, emitProject, flattenScene, loopOf, projectDefs, spritePxOf, validateProject } from "../project";
+import { previewEvent } from "../engine";
+import { STDLIB, STDLIB_NAMES, moduleExports, moduleSummary } from "../stdlib";
+import type { Block, BlockPath, ButtonName, EventTrigger, ObjectKind } from "../project";
 import type { EventOwner } from "../store";
+import { compileProject } from "../export";
+import { tilesFromRows, type Movement, type ObjectEvent, type Project } from "../project";
 
 export interface ToolResult {
   ok: boolean;
@@ -74,10 +87,113 @@ export interface ToolDef {
   description: string;
   params: Record<string, { type: string; required?: boolean; description?: string }>;
   run: (args: Record<string, unknown>) => ToolResult;
+  /** Tools that need the network (check_build). The agent loop awaits
+      this when present; sync callers get `run`'s answer instead. */
+  runAsync?: (args: Record<string, unknown>) => Promise<ToolResult>;
 }
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
 const num = (v: unknown, fallback = 0): number => (typeof v === "number" ? v : fallback);
+
+
+/* ---- project context: what the agent sees at the top of every request ---- */
+
+function eventTag(e: ObjectEvent): string {
+  const arg = e.key ?? e.button ?? e.target ?? e.message ?? (e.trigger === "alarm" ? String(e.alarm ?? 0) : "");
+  return `${e.id}:${e.trigger}${arg ? `(${arg})` : ""}[${e.blocks.length}]`;
+}
+
+/** `name(a, b) -> u16` for every fn/macro a script declares. */
+export function scriptSignatures(code: string): string[] {
+  const out: string[] = [];
+  const re = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*::\s*(fn|event)\s*\(([^)]*)\)\s*(->\s*[A-Za-z0-9_]+)?/gm;
+  for (const m of code.matchAll(re)) {
+    const params = m[3].replace(/\s+/g, " ").trim();
+    out.push(`${m[1]}(${params})${m[4] ? ` ${m[4].replace(/\s+/g, " ")}` : ""}${m[2] === "event" ? " [event]" : ""}`);
+  }
+  return out;
+}
+
+/** Compact, current picture of the open project (ids the tools take),
+    capped so it never crowds out the request. */
+export function projectContext(p: Project = projectStore.get(), max = 6000): string {
+  const L: string[] = [];
+  const cur = sceneIdStore.get();
+  L.push(
+    `Project "${p.name}" (id ${p.id}, ${p.kind}${p.locked ? ", READ-ONLY: tell the user to Duplicate to edit" : ""}), loop ${loopOf(p)}, canvas ${p.width}x${p.height}, start scene ${p.start}, open scene ${cur}.`,
+  );
+  if (p.kind === "code") {
+    L.push(`Code project files: ${Object.keys(p.codeFiles ?? {}).join(", ")}; entry ${p.entry ?? "main.ux"}.`);
+    return L.join("\n").slice(0, max);
+  }
+  L.push("Scenes:");
+  for (const s of p.scenes) {
+    const nodes = s.nodes.map((n) => {
+      const what = n.scene ? `scene:${n.scene}` : n.def ? `${n.def}` : n.sprite ? `sprite:${n.sprite}` : "text";
+      return `${n.id}=${what}@${n.x},${n.y}${n.label ? ` "${n.label}"` : ""}${(n.events?.length ?? 0) > 0 ? ` events[${n.events!.map(eventTag).join(" ")}]` : ""}`;
+    });
+    const shown = nodes.length > 14 ? [...nodes.slice(0, 14), `…+${nodes.length - 14} more (scene_map)`] : nodes;
+    L.push(`- ${s.id}${s.pool ? ` pool ${s.pool}` : ""}${(s.events?.length ?? 0) > 0 ? ` | scene events: ${s.events!.map(eventTag).join(" ")}` : ""}`);
+    if (shown.length) L.push(`    objects: ${shown.join("; ")}`);
+  }
+  const defs = projectDefs(p);
+  if (defs.length) {
+    L.push("Templates:");
+    for (const d of defs) {
+      const vars = (d.vars ?? []).map((v) => `${v.id}=${v.init ?? 0}`).join(",");
+      L.push(`- ${d.id}: sprite ${d.sprite || "-"}, ${d.kind}${d.blend !== undefined ? `, blend ${d.blend}` : ""}${vars ? `, vars ${vars}` : ""}${(d.events?.length ?? 0) > 0 ? `, events ${d.events!.map(eventTag).join(" ")}` : ""}`);
+    }
+  }
+  if ((p.vars ?? []).length) L.push(`Game variables: ${p.vars!.map((v) => `${v.id}=${v.init ?? 0}`).join(", ")}`);
+  if (p.inputs.length) L.push(`Inputs: ${p.inputs.map((i) => `${i.id}=${i.key}`).join(", ")}`);
+  L.push(`Sprites: ${p.sprites.map((s) => `${s.id}(${(s.w ?? 1) * 8}x${(s.h ?? 1) * 8}${s.cell ? ` sheet of ${s.cell.w}x${s.cell.h}-tile cells` : ""})`).join(", ") || "none"}`);
+  if (p.anims.length) L.push(`Animations: ${p.anims.map((a) => `${a.id}[${a.frames.length}]`).join(", ")}`);
+  L.push(`Sounds: ${(p.sounds ?? []).map((s) => s.id).join(", ") || "none"}; songs: ${(p.songs ?? []).map((s) => s.id).join(", ") || "none"}`);
+  const scripts = p.scripts ?? [];
+  if (scripts.length) {
+    L.push("Scripts (functions blocks can call):");
+    for (const s of scripts) {
+      const imports = [...s.code.matchAll(/^\s*import\s+"([^"]+)"/gm)].map((m) => m[1]);
+      L.push(`- ${s.path} (${s.code.split("\n").length} lines${imports.length ? `, imports ${imports.join(" ")}` : ""}): ${scriptSignatures(s.code).join("; ") || "no fns"}`);
+    }
+  }
+  const hooks = [...definedHooks(p)];
+  if (hooks.length || (p.customCode ?? "").trim()) L.push(`custom.ux hooks: ${hooks.join(", ") || "none"}`);
+  const sel = selectionStore.get();
+  if (sel !== null && sel !== undefined) L.push(`Selected: ${JSON.stringify(sel)}`);
+  const out = L.join("\n");
+  return out.length > max ? `${out.slice(0, max)}\n…(truncated: call describe/scene_map/read_file for more)` : out;
+}
+
+function numbered(text: string, from: number, to: number): string {
+  const lines = text.split("\n");
+  const a = Math.max(1, from);
+  const b = Math.min(lines.length, to);
+  const out: string[] = [];
+  for (let i = a; i <= b; i++) out.push(`${String(i).padStart(4)}  ${lines[i - 1]}`);
+  return out.join("\n");
+}
+
+/** Source text for read_file: script, custom.ux, generated file, or
+    library module (`lib/name.ux` or bare name). */
+function sourceOf(path: string): { path: string; text: string } | null {
+  const p = projectStore.get();
+  if (p.kind === "code" && p.codeFiles && path in p.codeFiles) return { path, text: p.codeFiles[path] };
+  const script = (p.scripts ?? []).find((s) => s.path === path);
+  if (script) return { path, text: script.code };
+  if (path === "custom.ux") return { path, text: p.customCode ?? "" };
+  const lib = path.startsWith("lib/") ? path.slice(4) : path;
+  const libName = lib.endsWith(".ux") ? lib : `${lib}.ux`;
+  let files: Record<string, string> = {};
+  try {
+    files = emitProject(p);
+  } catch {
+    files = {};
+  }
+  if (path in files) return { path, text: files[path] };
+  if (libName in STDLIB) return { path: `lib/${libName}`, text: STDLIB[libName] };
+  return null;
+}
 
 function snapshot(): Record<string, unknown> {
   const p = projectStore.get();
@@ -89,6 +205,9 @@ function snapshot(): Record<string, unknown> {
     defs: projectDefs(p).map((d) => d.id),
     sounds: (p.sounds ?? []).map((s) => s.id),
     anims: p.anims.map((a) => a.id),
+    loop: loopOf(p),
+    scripts: (p.scripts ?? []).map((s) => s.path),
+    hooks: [...definedHooks(p)],
   };
 }
 
@@ -256,127 +375,115 @@ export const TOOLS: ToolDef[] = [
   {
     name: "add_event",
     description:
-      "Add an event to a template ({def}) or an inline leaf ({object}, top-level of current scene). Triggers: create (scene enter), step (every frame), destroy, key (named input), collide (overlap vs any|solid|player|movable|def:<id>), click (press on it), alarm (slot 0-3 countdown hits 0, set by wait blocks with the same slot). One event per trigger+key/target/slot.",
+      "Add an event to an owner: a template ({def}), an inline object ({object}, top-level of the current scene) or a scene ({scene}; scene events are the level's controller). Triggers: create (scene start; scenes run theirs before their objects'), step (every frame), destroy, key ({key}: named input id, or {button}: a|b|select|start|up|down|left|right), click (mouse pressed on this object; on a scene: anywhere), release (mouse released anywhere), collide ({target}: any|solid|player|movable|def:<id> — the hit object is 'other' in its actions), alarm ({timer} 0-3, armed by wait actions), message ({message}: name, fired by send actions). Scenes can't use collide/destroy.",
     params: {
-      def: { type: "string", description: "Object template id (exactly one of def/object)" },
-      object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
-      trigger: { type: "string", required: true, description: "create|step|destroy|key|collide|click|alarm" },
-      key: { type: "string", description: "Named input id (key trigger)" },
-      target: { type: "string", description: "any|solid|player|movable|def:<id> (collide trigger)" },
-      alarm: { type: "number", description: "Slot 0-3 (alarm trigger, default 0)" },
+      def: { type: "string", description: "Template id (one of def/object/scene)" },
+      object: { type: "string", description: "Inline object id in the current scene" },
+      scene: { type: "string", description: "Scene id: scene-level event" },
+      trigger: { type: "string", required: true, description: "create|step|destroy|key|click|release|collide|alarm|message" },
+      key: { type: "string", description: "key: named input id" },
+      button: { type: "string", description: "key: controller button instead of a key" },
+      target: { type: "string", description: "collide: any|solid|player|movable|def:<id>" },
+      timer: { type: "number", description: "alarm: 0-3" },
+      message: { type: "string", description: "message: name" },
     },
     run: (args) => {
       const owner = ownerOf(args);
-      if (!owner) return { ok: false, message: "name exactly one of def/object" };
+      if (!owner) return { ok: false, message: "name exactly one of def/object/scene" };
       const id = addEvent(owner, str(args["trigger"]) as EventTrigger, {
         key: str(args["key"]) || undefined,
+        button: (str(args["button"]) || undefined) as ButtonName | undefined,
         target: str(args["target"]) || undefined,
-        alarm: args["alarm"] === undefined ? undefined : num(args["alarm"]),
+        alarm: args["timer"] === undefined ? undefined : num(args["timer"]),
+        message: str(args["message"]) || undefined,
       });
-      if (!id) return { ok: false, message: "event refused (unknown owner, trigger, key, target, or slot)" };
+      if (!id) return { ok: false, message: "event refused (unknown owner or trigger, or an object-only trigger on a scene)" };
       return { ok: true, message: `event ${id}`, data: { id } };
     },
   },
   {
-    name: "add_block",
+    name: "add_action",
     description:
-      "Append a visual action to an event (see add_event). Ops: move {dx,dy} (pixels, clamped), set_pos {x,y}, sprite {sprite} (swap art, same tile size), show/hide (alive bit, no destroy event), play {sound} (named one-shot SFX — see create_sound), song {song} (start a named 4-voice loop — see create_song), song_stop (silence the loop), goto {scene}, overlay {scene} (push the current scene and enter the target fresh — pause menus), back (pop to the scene below), destroy {target?} (self default, else any|solid|player|movable|def:<id> unrolled like collide), wait {ticks 1-255, slot?} (arms the alarm event with the same slot), run {snippet} (named ETAL snippet — see add_snippet), code {code} (legacy inline ETAL, prefer run), button {label, action} (labeled annotation, lowers to a comment), set {variable, set_mode, set_value} (named u16 variable — see add_variable), if {if_left, if_op, if_right} (branch with then/else block lists; operands kind:ref). Every op lowers to fixed ETAL — use preview_event to see it.",
+      'Add an action to an event, as JSON {"op": ...}. Every number field is a VALUE: a plain number, or {"k":"var","name"} (game variable), {"k":"my","name","of"?:"other"} (template variable), {"k":"prop","prop":"x|y|cell|w|h","of"?:"other"}, {"k":"mouse","axis":"x|y"}, {"k":"random","max":V}, {"k":"math","op":"+|-|*|/|%","a":V,"b":V}, {"k":"call","fn","args":[V]} (script function returning u16). Ops: move{dx,dy} (signed), set_pos{x,y}, glide{x,y,frames 1-255}, sprite{sprite,cell?}, cell{cell}, look{blend?0-15,flipX?,flipY?}, show, hide, text{text ≤24 ASCII, value?} (draws text, then a number), play{sound}, song{song}, song_stop, goto{scene}, overlay{scene} (opens a scene on top, freezing the one below — pause menus), back (close the overlay, resume), wait{ticks,slot?0-3} (starts a timer → alarm event), destroy{target?: self|other|def:<id>}, spawn{def,x,y} (new instance of a template, uses the scene\'s spawn slots), send{message}, set{name,scope?:"global"|"self"|"other",mode:"set|add|sub",value}, if{cond,then:[...],else?:[...]}, repeat{times,index?:<game var>,body:[...]}, call{fn,args:[V]} (script function), jump{power 1-8} (launch upward; templates with platformer/walker movement), code{code} (raw ETAL; self = this object\'s slot). CONDITIONS: {"k":"cmp","a":V,"op":"eq|neq|lt|lte|gt|gte","b":V}, {"k":"held","button"}, {"k":"touching","target"}, {"k":"mouse_over"}, {"k":"mouse_down"}, {"k":"all","of":[C]}, {"k":"any","of":[C]}, {"k":"not","c":C}. Nested if/repeat bodies can be given inline or filled later with path "2.then" / "0.body". Run validate after — it names any bad reference.',
     params: {
-      def: { type: "string", description: "Object template id (exactly one of def/object)" },
-      object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
+      def: { type: "string", description: "Template id (one of def/object/scene)" },
+      object: { type: "string", description: "Inline object id in the current scene" },
+      scene: { type: "string", description: "Scene id (scene event)" },
       event: { type: "string", required: true, description: "Event id from add_event" },
-      op: { type: "string", required: true, description: "move|set_pos|sprite|show|hide|play|song|song_stop|goto|overlay|back|destroy|wait|run|code|button|set|if" },
-      dx: { type: "number", description: "move: pixels" },
-      dy: { type: "number", description: "move: pixels" },
-      x: { type: "number", description: "set_pos: pixels" },
-      y: { type: "number", description: "set_pos: pixels" },
-      sound: { type: "string", description: "play: named sound id (see create_sound)" },
-      song: { type: "string", description: "song: named song id (see create_song)" },
-      scene: { type: "string", description: "goto/overlay: target scene" },
-      target: { type: "string", description: "destroy: self default, else any|solid|player|movable|def:<id>" },
-      sprite: { type: "string", description: "sprite: sprite id, same tile size as the leaf" },
-      ticks: { type: "number", description: "wait: 1-255" },
-      wait_slot: { type: "number", description: "wait: alarm slot 0-3, default 0" },
-      code: { type: "string", description: "code: raw ETAL statements (legacy inline; prefer run)" },
-      snippet: { type: "string", description: "run: named snippet id (see add_snippet)" },
-      label: { type: "string", description: "button: 1-32 character label" },
-      action: { type: "string", description: "button: named action (at most 64 characters)" },
-      variable: { type: "string", description: "set: variable id (see add_variable)" },
-      set_mode: { type: "string", description: "set: set|=|+=|-=, default set" },
-      set_value: { type: "number", description: "set: 0-65535" },
-      if_left: { type: "string", description: "if: left operand kind:ref — var:score, const:5, pos:x|y, btn:up|down|left|right" },
-      if_op: { type: "string", description: "if: eq|neq|lt|lte|gt|gte, default neq" },
-      if_right: { type: "string", description: "if: right operand, same encoding, default const:0" },
-      path: { type: "string", description: "Nested if branch 1.then (default top level)" },
+      action: { type: "string", required: true, description: "The action as JSON" },
+      path: { type: "string", description: "Nested body: 1.then | 1.else | 0.body (default top level)" },
       index: { type: "number", description: "Insert position, default append" },
     },
     run: (args) => {
       const owner = ownerOf(args);
-      if (!owner) return { ok: false, message: "name exactly one of def/object" };
-      const block = blockOf(args);
-      if (!block) return { ok: false, message: `bad op or missing fields for '${args["op"]}'` };
+      if (!owner) return { ok: false, message: "name exactly one of def/object/scene" };
+      let block: Block;
+      try {
+        block = (typeof args["action"] === "object" ? args["action"] : JSON.parse(str(args["action"]))) as Block;
+      } catch {
+        return { ok: false, message: "action must be JSON like {\"op\":\"play\",\"sound\":\"blip\"}" };
+      }
+      if (!block || typeof block !== "object" || !BLOCK_OPS.includes(block.op)) return { ok: false, message: `unknown op '${(block as { op?: unknown })?.op}'` };
       const path = parsePath(str(args["path"]));
-      if (!path) return { ok: false, message: "bad path (want 1.then)" };
-      const ok = addBlockAt(owner, str(args["event"]), block, args["index"] === undefined ? undefined : num(args["index"]), path);
-      if (!ok) return { ok: false, message: "block refused (unknown owner, event or path)" };
-      return { ok: true, message: `${(block as Block).op} added`, data: {} };
+      if (!path) return { ok: false, message: "bad path (want 1.then, 1.else or 0.body)" };
+      if (!addBlockAt(owner, str(args["event"]), block, args["index"] === undefined ? undefined : num(args["index"]), path))
+        return { ok: false, message: "action refused (unknown owner, event or path)" };
+      return { ok: true, message: `${block.op} added` };
     },
   },
   {
     name: "delete_event",
-    description: "Delete an event (and its blocks) from a template or inline leaf.",
+    description: "Delete an event (and its actions).",
     params: {
-      def: { type: "string", description: "Object template id (exactly one of def/object)" },
-      object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
+      def: { type: "string", description: "Template id (one of def/object/scene)" },
+      object: { type: "string", description: "Inline object id in the current scene" },
+      scene: { type: "string", description: "Scene id (scene event)" },
       event: { type: "string", required: true, description: "Event id" },
     },
     run: (args) => {
       const owner = ownerOf(args);
-      if (!owner) return { ok: false, message: "name exactly one of def/object" };
+      if (!owner) return { ok: false, message: "name exactly one of def/object/scene" };
       if (!deleteEvent(owner, str(args["event"]))) return { ok: false, message: "unknown owner or event" };
       return { ok: true, message: "event deleted" };
     },
   },
   {
-    name: "delete_block",
-    description: "Delete one block of an event by index (path addresses a nested if branch, e.g. 1.then).",
+    name: "delete_action",
+    description: "Delete one action of an event by index (path addresses a nested body, e.g. 1.then).",
     params: {
-      def: { type: "string", description: "Object template id (exactly one of def/object)" },
-      object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
+      def: { type: "string", description: "Template id (one of def/object/scene)" },
+      object: { type: "string", description: "Inline object id in the current scene" },
+      scene: { type: "string", description: "Scene id (scene event)" },
       event: { type: "string", required: true, description: "Event id" },
-      index: { type: "number", required: true, description: "Block index" },
-      path: { type: "string", description: "Nested if branch 1.then (default top level)" },
+      index: { type: "number", required: true, description: "Action index" },
+      path: { type: "string", description: "Nested body 1.then | 1.else | 0.body" },
     },
     run: (args) => {
       const owner = ownerOf(args);
-      if (!owner) return { ok: false, message: "name exactly one of def/object" };
+      if (!owner) return { ok: false, message: "name exactly one of def/object/scene" };
       const path = parsePath(str(args["path"]));
-      if (!path) return { ok: false, message: "bad path (want 1.then)" };
+      if (!path) return { ok: false, message: "bad path" };
       if (!deleteBlockAt(owner, str(args["event"]), num(args["index"]), path)) return { ok: false, message: "unknown owner, event, path or index" };
-      return { ok: true, message: "block deleted" };
+      return { ok: true, message: "action deleted" };
     },
   },
   {
     name: "preview_event",
-    description:
-      "Show the exact ETAL an event lowers to (same function the emitter calls — preview and build cannot disagree).",
+    description: "Show the exact ETAL an event's actions lower to (the emitter's own lowering).",
     params: {
-      def: { type: "string", description: "Object template id (exactly one of def/object)" },
-      object: { type: "string", description: "Inline leaf id (exactly one of def/object)" },
+      def: { type: "string", description: "Template id (one of def/object/scene)" },
+      object: { type: "string", description: "Inline object id in the current scene" },
+      scene: { type: "string", description: "Scene id (scene event)" },
       event: { type: "string", required: true, description: "Event id" },
     },
     run: (args) => {
       const p = projectStore.get();
       const owner = ownerOf(args);
-      if (!owner) return { ok: false, message: "name exactly one of def/object", data: {} };
-      const lines = previewOwnerEvent(
-        p,
-        sceneIdStore.get(),
-        "def" in owner ? { def: owner.def } : { leaf: owner.leaf },
-        str(args["event"]),
-      );
-      if (!lines) return { ok: false, message: "unknown owner or event", data: {} };
-      return { ok: true, message: lines.join("\n") || "(no blocks)", data: { etal: lines } };
+      if (!owner) return { ok: false, message: "name exactly one of def/object/scene" };
+      const ev = readOwnerEvents(p, owner)?.find((e) => e.id === str(args["event"]));
+      if (!ev) return { ok: false, message: "unknown owner or event" };
+      const lines = previewEvent(p, ev, "scene" in owner && !("leaf" in owner));
+      return { ok: true, message: lines.join("\n") || "(no actions)", data: { etal: lines } };
     },
   },
   {
@@ -415,72 +522,149 @@ export const TOOLS: ToolDef[] = [
   {
     name: "add_transition",
     description:
-      "Bind an event to a scene switch: click an object (press-in-rect, mouse left) or press a key code (32 space, 27 escape). Object may be a nested path like rack/jar.",
+      "Shortcut: switch scenes on input. click + {object} adds a click event with a go-to action to that inline object (or its template); key + {key} (named input id) or {code} (key code, 32 space, 27 escape) adds a scene key event. Same as add_event + add_action.",
     params: {
       event: { type: "string", required: true, description: "click|key" },
-      object: { type: "string", description: "Object id or nested path (click only)" },
-      key: { type: "number", description: "Key code 0-255 (key only)" },
+      object: { type: "string", description: "Object id in the current scene (click)" },
+      key: { type: "string", description: "Named input id (key)" },
+      code: { type: "number", description: "Key code 0-255 (key, creates the input)" },
       goto: { type: "string", required: true, description: "Target scene id" },
     },
     run: (args) => {
       const p = projectStore.get();
       const goto = str(args["goto"]);
       if (!p.scenes.some((s) => s.id === goto)) return { ok: false, message: `unknown scene ${goto}` };
+      const scene = sceneIdStore.get();
+      let owner: EventOwner;
+      let id: string | null;
       if (str(args["event"]) === "key") {
-        addBinding("key", null, goto, num(args["key"], 32));
+        owner = { scene };
+        const key = str(args["key"]) || addInput(num(args["code"], 32));
+        id = addEvent(owner, "key", { key });
       } else {
-        addBinding("click", str(args["object"]), goto);
+        const node = p.scenes.find((s) => s.id === scene)?.nodes.find((n) => n.id === str(args["object"]) && !n.scene);
+        if (!node) return { ok: false, message: `unknown object ${args["object"]}` };
+        owner = node.def ? { def: node.def } : { leaf: node.id };
+        id = addEvent(owner, "click");
       }
-      return { ok: true, message: `${args["event"]} → ${goto}` };
+      if (!id || !addBlockAt(owner, id, { op: "goto", scene: goto }, undefined, [])) return { ok: false, message: "refused" };
+      return { ok: true, message: `${args["event"]} → ${goto}`, data: { event: id } };
     },
   },
   {
-    name: "script_object",
+    name: "add_template_var",
     description:
-      "Attach a per-object ETAL script, wrapped as tick_<scene>_<id>(slot) and called every frame. Full access to generated state (ox[slot], scene fns). Reserved generated names rejected; compiler errors surface at export.",
+      "Give a template a variable: every instance gets its own copy (\"my hp\", \"my square\"), starting at {init} (instances may override). Read it in values as {\"k\":\"my\",\"name\"}, change it with set{scope:\"self\"}.",
     params: {
-      object: { type: "string", required: true, description: "Top-level object id in current scene" },
-      code: { type: "string", required: true, description: "ETAL statements" },
+      def: { type: "string", required: true, description: "Template id" },
+      name: { type: "string", required: true, description: "Variable name" },
+      init: { type: "number", description: "Start value 0-65535" },
     },
     run: (args) => {
-      patchObject(str(args["object"]), { tick: str(args["code"]) || undefined });
-      return { ok: true, message: `script set on ${args["object"]}` };
+      const id = addDefVar(str(args["def"]), str(args["name"]), num(args["init"]));
+      if (!id) return { ok: false, message: `unknown template ${args["def"]}` };
+      return { ok: true, message: `variable ${id}`, data: { id } };
     },
   },
   {
-    name: "creation_code",
+    name: "set_movement",
     description:
-      "Attach per-instance creation code: ETAL statements spliced after the leaf's create-event blocks in its create fn, run on scene enter (GameMaker Creation Code — the escape hatch that prevents template proliferation). Empty clears.",
+      "Give a template built-in movement. platformer: arrows run, up/A/space jumps, gravity; solid tiles and solid objects block. walker: patrols left/right with gravity, turning at walls and ledges (enemies). speed 1-4 px/frame, jump 1-8 (height ≈ 3·j·(j+1)/2 px). movement \"\" removes it.",
     params: {
-      object: { type: "string", required: true, description: "Top-level object id in current scene" },
-      code: { type: "string", required: true, description: "ETAL statements" },
+      def: { type: "string", required: true, description: "Template id" },
+      movement: { type: "string", required: true, description: "platformer | walker | \"\"" },
+      speed: { type: "number", description: "1-4" },
+      jump: { type: "number", description: "1-8 (platformer)" },
+    },
+    run: (args) => {
+      const id = str(args["def"]);
+      if (!projectDefs(projectStore.get()).some((d) => d.id === id)) return { ok: false, message: `unknown template '${id}'` };
+      const m = str(args["movement"]);
+      if (m !== "" && m !== "platformer" && m !== "walker") return { ok: false, message: "movement must be platformer, walker or empty" };
+      patchDef(id, {
+        movement: (m || undefined) as Movement | undefined,
+        ...(m ? { controls: false } : {}),
+        ...(args["speed"] !== undefined ? { speed: num(args["speed"]) } : {}),
+        ...(args["jump"] !== undefined ? { jump: num(args["jump"]) } : {}),
+      });
+      return { ok: true, message: m ? `${id} moves as ${m}` : `${id}: movement removed` };
+    },
+  },
+  {
+    name: "set_hud",
+    description: "Fix a template (all its instances) or an inline object to the screen so the camera doesn't move it: scores, lives, labels.",
+    params: {
+      def: { type: "string", description: "Template id (one of def/object)" },
+      object: { type: "string", description: "Inline object id in the current scene" },
+      on: { type: "string", description: "\"false\" to undo (default true)" },
+    },
+    run: (args) => {
+      const on = str(args["on"]) !== "false";
+      const def = str(args["def"]);
+      if (def) {
+        if (!projectDefs(projectStore.get()).some((d) => d.id === def)) return { ok: false, message: `unknown template '${def}'` };
+        patchDef(def, { hud: on || undefined });
+        return { ok: true, message: `${def} hud ${on}` };
+      }
+      const obj = str(args["object"]);
+      const scene = projectStore.get().scenes.find((s) => s.id === sceneIdStore.get());
+      if (!scene?.nodes.some((n) => n.id === obj)) return { ok: false, message: `no object '${obj}' in this scene` };
+      patchObject(obj, { hud: on || undefined });
+      return { ok: true, message: `${obj} hud ${on}` };
+    },
+  },
+  {
+    name: "set_camera",
+    description: "Make a scene's camera follow the first live instance of a template (centered, clamped to the level). follow \"\" fixes the camera. The level size comes from the scene's tile layer.",
+    params: {
+      scene: { type: "string", description: "Scene id (default current)" },
+      follow: { type: "string", required: true, description: "Template id or \"\"" },
     },
     run: (args) => {
       const p = projectStore.get();
-      const scene = p.scenes.find((s) => s.id === sceneIdStore.get());
-      const node = scene?.nodes.find((o) => o.id === str(args["object"]) && !o.scene);
-      if (!node) return { ok: false, message: `unknown object ${args["object"]}` };
-      patchObject(node.id, { initCode: str(args["code"]) || undefined });
-      return { ok: true, message: `creation code set on ${node.id}` };
+      const scene = str(args["scene"]) || sceneIdStore.get();
+      if (!p.scenes.some((s) => s.id === scene)) return { ok: false, message: `unknown scene '${scene}'` };
+      const follow = str(args["follow"]);
+      if (follow && !projectDefs(p).some((d) => d.id === follow)) return { ok: false, message: `unknown template '${follow}'` };
+      setSceneCamera(scene, follow);
+      return { ok: true, message: follow ? `camera follows ${follow}` : "camera fixed" };
     },
   },
   {
-    name: "script_scene",
+    name: "set_tilemap",
     description:
-      "Attach a per-scene ETAL script, spliced at the end of the scene frame (after input/drive/ticks, before drawing). Same reserved names as custom code.",
+      "Give a scene a tile layer (a level bigger than the screen: 1 byte per 8×8 cell, no object slots). sprite must be a sheet with 1×1-tile cells (set_sheet cell_w 1 cell_h 1). rows: the level as text, one line per tile row; legend maps each character to a sheet cell (0-based), other characters are empty. solid: sheet cells that block movement. Example: rows \"      \\n  ==  \\nGGGGGG\", legend {\"G\":0,\"=\":6}, solid [0,6]. Omit rows to remove the layer.",
     params: {
-      scene: { type: "string", description: "Scene id, default current" },
-      code: { type: "string", required: true, description: "ETAL statements" },
+      scene: { type: "string", description: "Scene id (default current)" },
+      sprite: { type: "string", description: "Tile sheet sprite id" },
+      rows: { type: "string", description: "Level text, newline-separated" },
+      legend: { type: "string", description: "JSON {char: cell}" },
+      solid: { type: "array", description: "Solid cells" },
     },
     run: (args) => {
       const p = projectStore.get();
-      const id = str(args["scene"]) || sceneIdStore.get();
-      if (!p.scenes.some((s) => s.id === id)) return { ok: false, message: `unknown scene ${id}` };
-      const prev = sceneIdStore.get();
-      sceneIdStore.set(id);
-      setSceneFrameCode(str(args["code"]));
-      sceneIdStore.set(prev);
-      return { ok: true, message: `scene script set on ${id}` };
+      const scene = str(args["scene"]) || sceneIdStore.get();
+      if (!p.scenes.some((s) => s.id === scene)) return { ok: false, message: `unknown scene '${scene}'` };
+      const rows = str(args["rows"]);
+      if (!rows) {
+        setSceneTilemap(scene, undefined);
+        return { ok: true, message: `${scene}: tile layer removed` };
+      }
+      const sprite = str(args["sprite"]);
+      const spr = p.sprites.find((s) => s.id === sprite);
+      if (!spr) return { ok: false, message: `unknown sprite '${sprite}'` };
+      let legend: Record<string, number> = {};
+      try {
+        legend = (typeof args["legend"] === "object" ? args["legend"] : JSON.parse(str(args["legend"], "{}"))) as Record<string, number>;
+      } catch {
+        return { ok: false, message: "legend must be JSON like {\"G\":0}" };
+      }
+      const oneBased = Object.fromEntries(Object.entries(legend).map(([k, v]) => [k, Number(v) + 1]));
+      const map = tilesFromRows(rows.split("\n"), oneBased);
+      const solid = Array.isArray(args["solid"]) ? (args["solid"] as unknown[]).map(Number) : [];
+      setSceneTilemap(scene, { sprite, cols: map.cols, rows: map.rows, tiles: map.tiles, solid });
+      const errs = validateProject(projectStore.get()).filter((e) => e.includes(`scene '${scene}' tiles`));
+      return errs.length ? { ok: false, message: errs.join("; ") } : { ok: true, message: `${scene}: ${map.cols}×${map.rows} tiles (${map.cols * 8}×${map.rows * 8} px)` };
     },
   },
   {
@@ -525,29 +709,70 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: "add_snippet",
+    name: "set_loop",
     description:
-      "Add a named ETAL snippet to the Code library (same gate as tick text). Connect it to object events with a run block — the replacement for inline code blocks.",
-    params: {
-      name: { type: "string", required: true, description: "Display name, becomes the id when valid" },
-      code: { type: "string", description: "ETAL statements (default ox[slot] = ox[slot];)" },
-    },
+      "Choose who runs the frame. engine (default): scenes, objects and blocks run; code plugs in via hooks. script: custom_frame() IS the game loop — no scene runtime; the engine boots theme/screen/variables, wires the key/mouse vectors to custom_key/custom_mouse, and exports the assets your code names: &spr_<sprite>, snd_<sound>(), var_<variable>[0], KEY_<INPUT>. An empty project switched to script gets a working starter custom.ux.",
+    params: { mode: { type: "string", required: true, description: "engine|script" } },
     run: (args) => {
-      const id = addSnippet(str(args["name"], "snippet"), str(args["code"], "ox[slot] = ox[slot];"));
-      return { ok: true, message: `snippet ${id}`, data: { id } };
+      const mode = str(args["mode"]);
+      if (mode !== "engine" && mode !== "script") return { ok: false, message: "mode must be engine|script" };
+      setLoopMode(mode);
+      return { ok: true, message: `loop ${loopOf(projectStore.get())}` };
     },
   },
   {
-    name: "set_snippet_code",
-    description: "Replace a named snippet's ETAL statements (validated at export like all ETAL).",
+    name: "set_custom_code",
+    description:
+      "Replace custom.ux: top-level ETAL (fns, globals, data, import lines) plus the hooks custom_setup, custom_frame, custom_draw (engine loop only), custom_key, custom_mouse — each called when defined. import lines hoist to the top of main.ux.",
+    params: { code: { type: "string", required: true, description: "Full custom.ux source" } },
+    run: (args) => {
+      setCustomCode(str(args["code"]));
+      return { ok: true, message: `custom.ux set; hooks: ${[...definedHooks(projectStore.get())].join(", ") || "none"}` };
+    },
+  },
+  {
+    name: "write_script",
+    description:
+      "Create or replace a script module (a whole .ux file, imported by main.ux in list order). Scripts may import each other and library modules by name (see list_library). Engine loop: scripts see engine state (ox/oy/var_*/SC_*); script loop: they see assets.ux. Globals must be declared before use (fns can be called from anywhere).",
     params: {
-      snippet: { type: "string", required: true, description: "Snippet id from add_snippet" },
-      code: { type: "string", required: true, description: "ETAL statements" },
+      path: { type: "string", required: true, description: "File name, e.g. game.ux (letters, digits, _)" },
+      code: { type: "string", required: true, description: "Full ETAL source" },
     },
     run: (args) => {
-      const err = setSnippetCode(str(args["snippet"]), str(args["code"]));
+      const path = str(args["path"]).trim();
+      const p = projectStore.get();
+      if ((p.scripts ?? []).some((s) => s.path === path)) {
+        const err = setScriptCode(path, str(args["code"]));
+        return err ? { ok: false, message: err } : { ok: true, message: `${path} updated` };
+      }
+      const err = addScript(path, str(args["code"]));
       if (err) return { ok: false, message: err };
-      return { ok: true, message: `snippet ${args["snippet"]} set` };
+      const made = (projectStore.get().scripts ?? []).at(-1)?.path;
+      return { ok: true, message: `${made} created`, data: { path: made } };
+    },
+  },
+  {
+    name: "delete_script",
+    description: "Delete a script module. Refused while another file imports it.",
+    params: { path: { type: "string", required: true, description: "Script file name" } },
+    run: (args) => {
+      const err = deleteScript(str(args["path"]));
+      return err ? { ok: false, message: err } : { ok: true, message: `${args["path"]} deleted` };
+    },
+  },
+  {
+    name: "list_library",
+    description:
+      "Standard library modules scripts can import by name (screen, font, input, audio, song, scene, menu, timer, fix16, trig, …). With a module, lists its fns/macros/constants with call forms.",
+    params: { module: { type: "string", description: "e.g. screen.ux — omit to list all modules" } },
+    run: (args) => {
+      const mod = str(args["module"]);
+      if (!mod) {
+        return { ok: true, message: `${STDLIB_NAMES.length} modules`, data: { modules: STDLIB_NAMES.map((n) => ({ name: n, summary: moduleSummary(n) })) } };
+      }
+      const name = mod.endsWith(".ux") ? mod : `${mod}.ux`;
+      if (!(name in STDLIB)) return { ok: false, message: `unknown module '${mod}'` };
+      return { ok: true, message: name, data: { exports: moduleExports(STDLIB[name]) } };
     },
   },
   {
@@ -692,6 +917,45 @@ export const TOOLS: ToolDef[] = [
       const err = setLeafLabel(str(args["object"]), text || undefined);
       if (err) return { ok: false, message: err };
       return { ok: true, message: text ? `label '${text}' set` : "label cleared" };
+    },
+  },
+  {
+    name: "set_sheet",
+    description:
+      "Make a sprite a sheet of equal cells ({cell_w}×{cell_h} tiles, must divide the sprite; omit both for the whole sprite). A scene node then shows one cell (set_look {cell}) and measures as one cell; script code still reads the whole sheet at &spr_<id>, cell n's first tile at row-major cell offsets.",
+    params: {
+      sprite: { type: "string", required: true, description: "Sprite id" },
+      cell_w: { type: "number", description: "Cell width in tiles" },
+      cell_h: { type: "number", description: "Cell height in tiles" },
+    },
+    run: (args) => {
+      const w = num(args["cell_w"], 0);
+      const h = num(args["cell_h"], 0);
+      const err = setSpriteCell(str(args["sprite"]), w && h ? { w, h } : null);
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: w && h ? `sheet of ${w}×${h} cells` : "whole sprite" };
+    },
+  },
+  {
+    name: "set_look",
+    description:
+      "How a top-level leaf ({object}, current scene) draws — Varvara's sprite byte: {cell} (which sheet cell, 0-based), {flip_x}/{flip_y} (mirror), {blend} 0-15 (palette remap: 1 = identity opaque, the default; 5 = identity with color 0 transparent; 0 = 1→c0 2→c1 3→c2 with 0 transparent; blends 0/5/10/15 are the transparent ones). Same sprite, other colors or facing — no copies. The scene canvas paints exactly what the VM does. Only the given fields change.",
+    params: {
+      object: { type: "string", required: true, description: "Top-level leaf id in the current scene" },
+      cell: { type: "number", description: "Sheet cell index" },
+      flip_x: { type: "boolean", description: "Mirror left-right" },
+      flip_y: { type: "boolean", description: "Mirror up-down" },
+      blend: { type: "number", description: "Varvara blend 0-15" },
+    },
+    run: (args) => {
+      const look: Parameters<typeof setLeafLook>[1] = {};
+      if (typeof args["cell"] === "number") look.cell = args["cell"];
+      if (typeof args["flip_x"] === "boolean") look.flipX = args["flip_x"];
+      if (typeof args["flip_y"] === "boolean") look.flipY = args["flip_y"];
+      if (typeof args["blend"] === "number") look.blend = args["blend"];
+      const err = setLeafLook(str(args["object"]), look);
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: "look set" };
     },
   },
   {
@@ -1008,6 +1272,48 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "read_file",
+    description:
+      "Read source with line numbers: a script (game.ux), custom.ux, a generated file (main.ux, devices.ux) or a library module (lib/fix16.ux). Read a script before rewriting it, and read around a line check_build reports. Long files: pass from/to (max 400 lines per call).",
+    params: {
+      path: { type: "string", required: true, description: "File name, e.g. chess.ux, main.ux, lib/screen.ux" },
+      from: { type: "number", description: "First line (default 1)" },
+      to: { type: "number", description: "Last line (default from+399)" },
+    },
+    run: (args) => {
+      const src = sourceOf(str(args["path"]).trim());
+      if (!src) return { ok: false, message: `no file '${str(args["path"])}' (scripts: ${(projectStore.get().scripts ?? []).map((s) => s.path).join(", ") || "none"})` };
+      const total = src.text.split("\n").length;
+      const from = Math.max(1, num(args["from"], 1));
+      const to = Math.min(total, num(args["to"], from + 399), from + 399);
+      return { ok: true, message: `${src.path} lines ${from}-${to} of ${total}`, data: { text: numbered(src.text, from, to) } };
+    },
+  },
+  {
+    name: "check_build",
+    description:
+      "Compile the project with the real ETAL compiler (server) and return its diagnostics [{file, line, msg}]. Run after validate and after every script change; fix every diagnostic (read_file around the line) and check again until it passes.",
+    params: {},
+    run: () => ({ ok: false, message: "check_build needs the agent loop (async)" }),
+    runAsync: async () => {
+      const p = projectStore.get();
+      const errs = validateProject(p);
+      if (errs.length > 0) return { ok: false, message: `validation: ${errs.join("; ")}` };
+      const r = await compileProject(p, "web", "rom", "en");
+      if (r.ok) return { ok: true, message: `compiles cleanly (${r.bytes?.length ?? 0} byte ROM)` };
+      const diags = (r.diagnostics ?? []).map((d) => ({
+        file: d.file ? d.file.slice(d.file.lastIndexOf("/") + 1) : null,
+        line: d.line,
+        msg: d.msg,
+      }));
+      return {
+        ok: false,
+        message: diags.length ? `${diags.length} compiler error(s): ${diags.slice(0, 8).map((d) => `${d.file ?? "?"}:${d.line ?? "?"} ${d.msg}`).join(" | ")}` : r.message,
+        data: { diagnostics: diags, hint: "main.ux is generated: an error there usually comes from a block's code/call or a name clash — use preview_event / read_file main.ux around the line." },
+      };
+    },
+  },
+  {
     name: "describe",
     description: "Summarize the current project: scenes, sprites, anims, selection. Start here, then scene_map for positions.",
     params: {},
@@ -1020,26 +1326,14 @@ export const TOOLS: ToolDef[] = [
 function ownerOf(args: Record<string, unknown>): EventOwner | null {
   const def = str(args["def"]);
   const object = str(args["object"]);
-  if (def && object) return null;
+  const scene = str(args["scene"]);
+  if ([def, object, scene].filter(Boolean).length !== 1) return null;
   if (def) return { def };
   if (object) return { leaf: object };
-  return null;
+  return { scene };
 }
 
-function parseOperand(s: string): ValueOperand | null {
-  const i = s.indexOf(":");
-  const kind = i < 0 ? s : s.slice(0, i);
-  const ref = i < 0 ? "" : s.slice(i + 1);
-  if (kind === "var" && ref) return { kind, name: ref };
-  if (kind === "const" && ref !== "" && Number.isInteger(Number(ref))) return { kind, value: Number(ref) };
-  if (kind === "pos" && (ref === "x" || ref === "y")) return { kind, axis: ref };
-  if (kind === "btn" && (ref === "up" || ref === "down" || ref === "left" || ref === "right"))
-    return { kind, dir: ref };
-  return null;
-}
-
-/** "1.then" → [1, "then"] (parent list address inside nested if
-    branches); "" → top level. Null on malformed. */
+/** "1.then.0.body" → [1, "then", 0, "body"]; "" → top level. */
 function parsePath(s: string): BlockPath | null {
   if (!s) return [];
   const out: BlockPath = [];
@@ -1048,77 +1342,21 @@ function parsePath(s: string): BlockPath | null {
   for (let i = 0; i < segs.length; i += 2) {
     const idx = segs[i];
     const br = segs[i + 1];
-    if (!/^\d+$/.test(idx) || (br !== "then" && br !== "else")) return null;
+    if (!/^\d+$/.test(idx) || (br !== "then" && br !== "else" && br !== "body")) return null;
     out.push(Number(idx), br);
   }
   return out;
 }
 
-function blockOf(args: Record<string, unknown>): Block | null {
-  const op = str(args["op"]);
-  if (op === "move") return { op, dx: num(args["dx"]), dy: num(args["dy"]) };
-  if (op === "set_pos") return { op, x: num(args["x"]), y: num(args["y"]) };
-  if (op === "play") {
-    if (!str(args["sound"])) return null;
-    return { op, sound: str(args["sound"]) };
+/** Agent-loop entry: awaits network tools, runs the rest in place. */
+export async function runToolAsync(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  const tool = TOOLS.find((t) => t.name === name);
+  if (!tool?.runAsync) return runTool(name, args);
+  try {
+    return await tool.runAsync(args);
+  } catch (e) {
+    return { ok: false, message: (e as Error).message };
   }
-  if (op === "goto") {
-    if (!str(args["scene"])) return null;
-    return { op, scene: str(args["scene"]) };
-  }
-  if (op === "song") {
-    if (!str(args["song"])) return null;
-    return { op, song: str(args["song"]) };
-  }
-  if (op === "song_stop") return { op };
-  if (op === "overlay") {
-    if (!str(args["scene"])) return null;
-    return { op, scene: str(args["scene"]) };
-  }
-  if (op === "back") return { op };
-  if (op === "destroy") {
-    const target = str(args["target"]);
-    if (target && target !== "self") return { op, target };
-    return { op };
-  }
-  if (op === "wait") {
-    const slot = num(args["wait_slot"], 0);
-    if (!Number.isInteger(slot) || slot < 0 || slot > 3) return null;
-    return slot === 0 ? { op, ticks: num(args["ticks"], 30) } : { op, ticks: num(args["ticks"], 30), slot };
-  }
-  if (op === "sprite") {
-    if (!str(args["sprite"])) return null;
-    return { op, sprite: str(args["sprite"]) };
-  }
-  if (op === "show") return { op };
-  if (op === "hide") return { op };
-  if (op === "code") {
-    if (!str(args["code"]).trim()) return null;
-    return { op, code: str(args["code"]) };
-  }
-  if (op === "run") {
-    if (!str(args["snippet"])) return null;
-    return { op, snippet: str(args["snippet"]) };
-  }
-  if (op === "set") {
-    if (!str(args["variable"])) return null;
-    const mode = str(args["set_mode"], "set");
-    if (mode !== "set" && mode !== "add" && mode !== "sub") return null;
-    return { op, name: str(args["variable"]), mode, value: num(args["set_value"]) };
-  }
-  if (op === "if") {
-    const left = parseOperand(str(args["if_left"], "btn:up"));
-    const right = parseOperand(str(args["if_right"], "const:0"));
-    const cmp = str(args["if_op"], "neq");
-    if (!left || !right) return null;
-    if (cmp !== "eq" && cmp !== "neq" && cmp !== "lt" && cmp !== "lte" && cmp !== "gt" && cmp !== "gte") return null;
-    return { op, cond: { left, op: cmp, right }, then: [], else: [] };
-  }
-  if (op === "button") {
-    if (!str(args["label"]).trim()) return null;
-    return { op, label: str(args["label"]).slice(0, 32), action: str(args["action"]).slice(0, 64) };
-  }
-  return null;
 }
 
 export function runTool(name: string, args: Record<string, unknown>): ToolResult {

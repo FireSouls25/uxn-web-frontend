@@ -27,22 +27,16 @@ describe("agent tools", () => {
     expect(runTool("nope", {}).ok).toBe(false);
   });
 
-  it("builds a scene with full controls in code", () => {
+  it("builds a scene with full controls through tools", () => {
     expect(runTool("create_scene", {}).data).toMatchObject({ id: "scene" });
     expect(runTool("create_sprite", { name: "ship", pixels: Array(64).fill(2) }).ok).toBe(true);
-    const put = runTool("put_on_scene", { sprite: "ship", kind: "player", x: 10, y: 10, name: "hero" });
-    expect(put.ok).toBe(true);
-    expect(runTool("script_object", { object: "hero", code: "ox[slot] = ox[slot];" }).ok).toBe(true);
-    expect(runTool("script_scene", { code: "tick = tick + 1;" }).ok).toBe(true);
-    expect(runTool("add_transition", { event: "key", key: 32, goto: "title" }).ok).toBe(true);
+    expect(runTool("put_on_scene", { sprite: "ship", kind: "player", x: 10, y: 10, name: "hero" }).ok).toBe(true);
+    expect(runTool("add_transition", { event: "key", code: 32, goto: "title" }).ok).toBe(true);
     expect(runTool("set_sound", { voice: 0, note: 72, vol: 120 }).ok).toBe(true);
     expect(runTool("set_theme", { r: 0, g: 0, b: 0 }).ok).toBe(true);
-    const v = runTool("validate", {});
-    expect(v).toMatchObject({ ok: true });
-    const emit = runTool("emit_files", {});
-    expect(emit.ok).toBe(true);
-    const files = (emit.data as { files: Record<string, string> }).files;
-    expect(files["main.ux"]).toContain("tick_scene_hero");
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+    const files = (runTool("emit_files", {}).data as { files: Record<string, string> }).files;
+    expect(files["main.ux"]).toContain("setup_scene :: fn()");
   });
 
   it("nests scenes and refuses cycles", () => {
@@ -60,8 +54,9 @@ describe("agent tools", () => {
   it("rejects bad references with messages", () => {
     expect(runTool("put_on_scene", { sprite: "ghost" }).ok).toBe(false);
     expect(runTool("add_transition", { event: "click", object: "x", goto: "nowhere" }).ok).toBe(false);
-    // click target missing but goto valid: binding added, validation catches
-    runTool("add_transition", { event: "click", object: "nope", goto: "title" });
+    expect(runTool("add_transition", { event: "click", object: "nope", goto: "title" }).ok).toBe(false);
+    const ev = runTool("add_event", { object: "hero", trigger: "step" }).data as { id: string };
+    runTool("add_action", { object: "hero", event: ev.id, action: JSON.stringify({ op: "goto", scene: "nowhere" }) });
     expect(runTool("validate", {}).ok).toBe(false);
   });
 
@@ -80,117 +75,64 @@ describe("agent tools", () => {
     expect(main).toContain("Screen.addr = ot[");
   });
 
-  it("authors behavior through events and blocks", () => {
+  it("authors behaviour through events and JSON actions", () => {
     expect(runTool("create_object_def", { name: "coin_obj", sprite: "coin" }).ok).toBe(true);
-    const ev = runTool("add_event", { def: "coin_obj", trigger: "click" });
-    expect(ev).toMatchObject({ ok: true, data: { id: "ev_1" } });
+    expect(runTool("add_event", { def: "coin_obj", trigger: "click" })).toMatchObject({ ok: true, data: { id: "ev_1" } });
     expect(runTool("create_sound", { name: "sfx" }).ok).toBe(true);
     expect(runTool("set_sound_voice", { sound: "sfx", voice: 1, note: 72, vol: 100 }).ok).toBe(true);
-    expect(runTool("set_sound_voice", { sound: "nope", voice: 0, note: 60, vol: 100 }).ok).toBe(false);
-    expect(runTool("add_block", { def: "coin_obj", event: "ev_1", op: "play", sound: "sfx" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "coin_obj", event: "ev_1", op: "play", sound: "nope" }).ok).toBe(true);
-    expect(runTool("validate", {})).toMatchObject({ ok: false });
-    expect(runTool("delete_block", { def: "coin_obj", event: "ev_1", index: 1 }).ok).toBe(true);
-    expect(runTool("add_block", { def: "coin_obj", event: "ev_1", op: "frobnicate" }).ok).toBe(false);
+    const add = (action: unknown, extra: Record<string, unknown> = {}) => runTool("add_action", { def: "coin_obj", event: "ev_1", action: JSON.stringify(action), ...extra });
+    expect(add({ op: "play", sound: "sfx" }).ok).toBe(true);
+    expect(add({ op: "play", sound: "nope" }).ok).toBe(true);
+    expect(runTool("validate", {}).ok).toBe(false);
+    expect(runTool("delete_action", { def: "coin_obj", event: "ev_1", index: 1 }).ok).toBe(true);
+    expect(add({ op: "frobnicate" }).ok).toBe(false);
+    expect(runTool("add_action", { def: "coin_obj", event: "ev_1", action: "{not json" }).ok).toBe(false);
     expect(runTool("rename_sound", { from: "sfx", to: "ping" }).ok).toBe(true);
-    expect(runTool("delete_sound", { sound: "ping" }).ok).toBe(false); // still referenced
-    expect(runTool("create_sound", { name: "tmp" }).ok).toBe(true);
-    expect(runTool("delete_sound", { sound: "tmp" }).ok).toBe(true);
+    expect(runTool("delete_sound", { sound: "ping" }).ok).toBe(false); // still played
+    // Values, conditions and nested bodies.
+    expect(runTool("add_variable", { name: "score" }).ok).toBe(true);
+    expect(add({ op: "set", name: "score", mode: "add", value: { k: "math", op: "+", a: 1, b: { k: "random", max: 3 } } }).ok).toBe(true);
+    expect(add({ op: "if", cond: { k: "all", of: [{ k: "cmp", a: { k: "var", name: "score" }, op: "gte", b: 10 }, { k: "mouse_down" }] }, then: [] }).ok).toBe(true);
+    expect(add({ op: "goto", scene: "play" }, { path: "2.then" }).ok).toBe(true);
+    expect(add({ op: "hide" }, { path: "bogus" }).ok).toBe(false);
     expect(runTool("validate", {})).toMatchObject({ ok: true });
-    expect(runTool("place_instance", { def: "coin_obj", name: "bonus", x: 0, y: 0 }).ok).toBe(true);
-    expect(runTool("add_event", { object: "coin", trigger: "collide", target: "def:coin_obj" }).ok).toBe(true);
-    expect(runTool("add_block", { object: "coin", event: "ev_1", op: "destroy" }).ok).toBe(true);
-    const preview = runTool("preview_event", { object: "coin", event: "ev_1" });
-    expect(preview.ok).toBe(true);
-    expect(preview.message as string).toContain("oflags[slot] = oflags[slot] & 247;");
+    const preview = runTool("preview_event", { def: "coin_obj", event: "ev_1" });
+    expect(preview.message as string).toContain("var_score[0] = var_score[0] + (1 + e_rnd(3));");
+    expect(preview.message as string).toContain("e_sy[0] = SC_PLAY;");
+    // Template variables + collisions with "other".
+    expect(runTool("add_template_var", { def: "coin_obj", name: "worth", init: 5 }).ok).toBe(true);
+    expect(runTool("add_event", { def: "coin_obj", trigger: "collide", target: "player" }).ok).toBe(true);
+    expect(runTool("add_action", { def: "coin_obj", event: "ev_2", action: JSON.stringify({ op: "set", name: "score", mode: "add", value: { k: "my", name: "worth" } }) }).ok).toBe(true);
+    expect(runTool("add_action", { def: "coin_obj", event: "ev_2", action: JSON.stringify({ op: "destroy" }) }).ok).toBe(true);
     expect(runTool("validate", {})).toMatchObject({ ok: true });
-    const emit = runTool("emit_files", {});
-    const main = (emit.data as { files: Record<string, string> }).files["main.ux"];
-    expect(main).toContain("collide_title_coin_0");
-    expect(runTool("delete_block", { object: "coin", event: "ev_1", index: 0 }).ok).toBe(true);
-    expect(runTool("delete_event", { object: "coin", event: "ev_1" }).ok).toBe(true);
-    expect(runTool("preview_event", { object: "coin", event: "ev_1" }).ok).toBe(false);
+    expect(runTool("delete_event", { def: "coin_obj", event: "ev_2" }).ok).toBe(true);
+    expect(runTool("preview_event", { def: "coin_obj", event: "ev_2" }).ok).toBe(false);
   });
 
-  it("authors code and button blocks through tools", () => {
-    expect(runTool("create_object_def", { name: "lamp", sprite: "wall" }).ok).toBe(true);
-    expect(runTool("add_event", { def: "lamp", trigger: "step" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "lamp", event: "ev_1", op: "code", code: "ox[slot] = ox[slot];" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "lamp", event: "ev_1", op: "code", code: "  " }).ok).toBe(false);
-    expect(runTool("add_block", { def: "lamp", event: "ev_1", op: "button", label: "jump", action: "play" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "lamp", event: "ev_1", op: "button", label: "", action: "play" }).ok).toBe(false);
-    const preview = runTool("preview_event", { def: "lamp", event: "ev_1" });
-    expect(preview.ok).toBe(true);
-    expect(preview.message as string).toContain("ox[slot] = ox[slot];");
-    expect(preview.message as string).toContain("( button 'jump' -> play )");
-    expect(runTool("validate", {})).toMatchObject({ ok: true });
-  });
-
-  it("authors snippets and run blocks through tools", () => {
-    expect(runTool("create_object_def", { name: "gear", sprite: "wall" }).ok).toBe(true);
-    expect(runTool("add_event", { def: "gear", trigger: "step" }).ok).toBe(true);
-    expect(runTool("add_snippet", { name: "spin", code: "ox[slot] = ox[slot] + 1;" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "gear", event: "ev_1", op: "run", snippet: "spin" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "gear", event: "ev_1", op: "run", snippet: "nope" }).ok).toBe(true);
-    expect(runTool("validate", {})).toMatchObject({ ok: false });
-    expect(runTool("delete_block", { def: "gear", event: "ev_1", index: 1 }).ok).toBe(true);
-    expect(runTool("validate", {})).toMatchObject({ ok: true });
-    expect(runTool("set_snippet_code", { snippet: "spin", code: "  " }).ok).toBe(true);
-    expect(runTool("validate", {})).toMatchObject({ ok: false });
-    expect(runTool("set_snippet_code", { snippet: "spin", code: "ox[slot] = 1;" }).ok).toBe(true);
+  it("puts level rules on the scene itself", () => {
+    expect(runTool("add_event", { scene: "title", trigger: "collide" }).ok).toBe(false);
+    const ev = runTool("add_event", { scene: "title", trigger: "message", message: "boom" });
+    expect(ev.ok).toBe(true);
+    const id = (ev.data as { id: string }).id;
+    expect(runTool("add_action", { scene: "title", event: id, action: JSON.stringify({ op: "move", dx: 1, dy: 0 }) }).ok).toBe(true);
+    expect(runTool("validate", {}).message).toContain("scene events can't move");
+    expect(runTool("delete_action", { scene: "title", event: id, index: 0 }).ok).toBe(true);
+    expect(runTool("add_action", { scene: "title", event: id, action: JSON.stringify({ op: "overlay", scene: "play" }) }).ok).toBe(true);
+    expect(runTool("add_transition", { event: "key", code: 13, goto: "play" }).ok).toBe(true);
     expect(runTool("validate", {})).toMatchObject({ ok: true });
   });
 
-  it("authors variables, set/if and nested paths through tools", () => {
-    expect(runTool("add_variable", { name: "score", init: 0 }).ok).toBe(true);
-    expect(runTool("add_variable", { name: "score" }).ok).toBe(true); // score_2
-    expect(runTool("set_variable", { variable: "score", init: 5 }).ok).toBe(true);
-    expect(runTool("set_variable", { variable: "nope", init: 1 }).ok).toBe(false);
-    expect(runTool("create_object_def", { name: "counter", sprite: "wall" }).ok).toBe(true);
-    expect(runTool("add_event", { def: "counter", trigger: "step" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "counter", event: "ev_1", op: "set", variable: "score", set_mode: "add", set_value: 1 }).ok).toBe(true);
-    expect(runTool("add_block", { def: "counter", event: "ev_1", op: "if", if_left: "var:score", if_op: "gte", if_right: "const:10" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "counter", event: "ev_1", op: "show", path: "1.then" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "counter", event: "ev_1", op: "show", path: "bogus" }).ok).toBe(false);
+  it("sets sheet cells and node looks through tools", () => {
+    // hero is a 1×1 sprite: a 1×1 grid is the whole sprite (no sheet).
+    expect(runTool("set_sheet", { sprite: "hero", cell_w: 2, cell_h: 1 }).ok).toBe(false);
+    expect(runTool("set_look", { object: "hero", flip_x: true, blend: 5 }).ok).toBe(true);
+    expect(runTool("set_look", { object: "hero", blend: 16 }).ok).toBe(false);
+    expect(runTool("set_look", { object: "ghost", blend: 5 }).ok).toBe(false);
     expect(runTool("validate", {})).toMatchObject({ ok: true });
-    const preview = runTool("preview_event", { def: "counter", event: "ev_1" });
-    expect(preview.ok).toBe(true);
-    expect(preview.message as string).toContain("if var_score[0] >= 10 {");
-    expect(runTool("delete_block", { def: "counter", event: "ev_1", index: 0, path: "1.then" }).ok).toBe(true);
-    expect(runTool("delete_variable", { variable: "score" }).ok).toBe(false); // still referenced
-    expect(runTool("rename_variable", { from: "score", to: "points" }).ok).toBe(true);
-    expect(runTool("validate", {})).toMatchObject({ ok: true });
-  });
-  it("authors songs, labels and overlay blocks through tools", () => {
-    expect(runTool("create_song", { name: "theme" }).ok).toBe(true);
-    expect(runTool("create_song", { name: "theme" }).ok).toBe(true); // theme_2
-    expect(runTool("set_song_note", { song: "theme", voice: 0, step: 0, pitch: 60, len: 2 }).ok).toBe(true);
-    expect(runTool("set_song_note", { song: "theme", voice: 0, step: 1, pitch: 200 }).ok).toBe(false);
-    expect(runTool("set_song_note", { song: "theme", voice: 4, step: 1, pitch: 60 }).ok).toBe(false);
-    expect(runTool("set_song_note", { song: "theme", voice: 0, step: 16, pitch: 60 }).ok).toBe(false);
-    expect(runTool("set_song_note", { song: "ghost", voice: 0, step: 0, pitch: 60 }).ok).toBe(false);
-    expect(runTool("set_song_vol", { song: "theme", voice: 0, vol: 200 }).ok).toBe(true);
-    expect(runTool("set_song_vol", { song: "theme", voice: 0, vol: 900 }).ok).toBe(false);
-    const menu = runTool("create_scene", {}).data as { id: string };
-    expect(runTool("create_object_def", { name: "juke", sprite: "wall" }).ok).toBe(true);
-    expect(runTool("add_event", { def: "juke", trigger: "create" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "juke", event: "ev_1", op: "song", song: "theme" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "juke", event: "ev_1", op: "song_stop" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "juke", event: "ev_1", op: "overlay", scene: menu.id }).ok).toBe(true);
-    expect(runTool("add_block", { def: "juke", event: "ev_1", op: "back" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "juke", event: "ev_1", op: "song" }).ok).toBe(false);
-    expect(runTool("validate", {})).toMatchObject({ ok: true });
-    const preview = runTool("preview_event", { def: "juke", event: "ev_1" });
-    expect(preview.message as string).toContain("song_theme_start();");
-    expect(preview.message as string).toContain(`scene_go(SC_${menu.id.toUpperCase()});`);
-    expect(preview.message as string).toContain("overlay_back();");
-    // Refused while referenced, retargeted on rename, gone after.
-    expect(runTool("delete_song", { song: "theme" }).ok).toBe(false);
-    expect(runTool("rename_song", { from: "theme", to: "loop" }).ok).toBe(true);
-    expect(runTool("validate", {})).toMatchObject({ ok: true });
-    expect(runTool("delete_block", { def: "juke", event: "ev_1", index: 0 }).ok).toBe(true);
-    expect(runTool("delete_song", { song: "loop" }).ok).toBe(true);
-    expect(runTool("validate", {})).toMatchObject({ ok: true });
+    const main = ((runTool("emit_files", {}).data as { files: Record<string, string> }).files["main.ux"]) ?? "";
+    expect(main).toContain(`data e_rows = [`);
+    expect(main).toContain(`${0x80 | 0x10 | 5}, 57`);
+    expect(runTool("set_look", { object: "hero", flip_x: false, blend: 1 }).ok).toBe(true);
   });
 
   it("authors labels on leaves through tools", () => {
@@ -203,36 +145,14 @@ describe("agent tools", () => {
     expect(runTool("validate", {})).toMatchObject({ ok: true });
   });
 
-  it("authors sprite, visibility and targeted destroy through tools", () => {
-    expect(runTool("create_object_def", { name: "mimic", sprite: "wall" }).ok).toBe(true);
-    expect(runTool("add_event", { def: "mimic", trigger: "step" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "mimic", event: "ev_1", op: "sprite", sprite: "hero" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "mimic", event: "ev_1", op: "sprite", sprite: "nope" }).ok).toBe(true);
-    expect(runTool("validate", {})).toMatchObject({ ok: false });
-    expect(runTool("delete_block", { def: "mimic", event: "ev_1", index: 1 }).ok).toBe(true);
-    expect(runTool("add_block", { def: "mimic", event: "ev_1", op: "hide" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "mimic", event: "ev_1", op: "show" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "mimic", event: "ev_1", op: "destroy", target: "movable" }).ok).toBe(true);
-    expect(runTool("add_block", { def: "mimic", event: "ev_1", op: "destroy", target: "bogus" }).ok).toBe(true);
-    expect(runTool("validate", {})).toMatchObject({ ok: false });
-    const preview = runTool("preview_event", { def: "mimic", event: "ev_1" });
-    expect(preview.ok).toBe(true);
-    expect(preview.message as string).toContain("ot[slot] = &spr_hero;");
-    expect(preview.message as string).toContain("oflags[slot] = oflags[slot] & 247;");
-  });
-
-  it("sets creation code and tunes animations", () => {
-    expect(runTool("creation_code", { object: "wall", code: "ox[slot] = ox[slot];" }).ok).toBe(true);
-    expect(runTool("creation_code", { object: "missing", code: "x" }).ok).toBe(false);
-    expect(runTool("creation_code", { object: "wall", code: "" }).ok).toBe(true);
+  it("tunes animations", () => {
     expect(runTool("add_anim_frame", { anim: "spin", sprite: "hero" }).ok).toBe(true);
     expect(runTool("add_anim_frame", { anim: "spin", sprite: "ghost" }).ok).toBe(false);
     expect(runTool("set_anim", { anim: "spin", rate: 12, pingpong: true }).ok).toBe(true);
     expect(runTool("set_anim", { anim: "nope", rate: 12 }).ok).toBe(false);
     expect(runTool("validate", {})).toMatchObject({ ok: true });
-    const emit = runTool("emit_files", {});
-    const main = (emit.data as { files: Record<string, string> }).files["main.ux"];
-    expect(main).toContain("adir_title_coin");
+    const main = (runTool("emit_files", {}).data as { files: Record<string, string> }).files["main.ux"];
+    expect(main).toContain("anim_tick :: fn()");
   });
 
   it("sets hitboxes from either side", () => {
@@ -286,5 +206,48 @@ describe("agent tools", () => {
     expect(runTool("check_space", { x: 200, y: 200 }).data).toMatchObject({ inside: false, fits: false });
     expect(runTool("scene_map", { scene: "nowhere" }).ok).toBe(false);
     expect(runTool("find_space", { w: 999, h: 999 }).ok).toBe(false);
+  });
+
+  it("scripts a whole game on the script loop", () => {
+    expect(runTool("set_loop", { mode: "bogus" }).ok).toBe(false);
+    expect(runTool("set_loop", { mode: "script" }).ok).toBe(true);
+    // An existing custom.ux is kept; give it the frame hook explicitly.
+    expect(runTool("set_custom_code", { code: "custom_frame :: fn() {\n    hud_tick();\n}" }).message).toContain("custom_frame");
+    const made = runTool("write_script", {
+      path: "hud.ux",
+      code: `import "screen.ux"\nhud_tick :: fn() {\n    clear(128);\n    blit(4, 4, &spr_hero, 129);\n}`,
+    });
+    expect(made.ok).toBe(true);
+    expect(runTool("write_script", { path: "hud.ux", code: `import "screen.ux"\nhud_tick :: fn() {\n    clear(129);\n}` }).message).toContain("updated");
+    expect(runTool("validate", {}).ok).toBe(true);
+    const snap = runTool("describe", {}).data as { loop: string; scripts: string[]; hooks: string[] };
+    expect(snap).toMatchObject({ loop: "script", scripts: ["hud.ux"], hooks: ["custom_frame"] });
+    const lib = runTool("list_library", { module: "screen" });
+    expect((lib.data as { exports: Array<{ sig: string }> }).exports.map((x) => x.sig)).toContain("blit(x, y, tile, mode)");
+    expect(runTool("list_library", { module: "nope" }).ok).toBe(false);
+    expect(projectStore.get().loop).toBe("script");
+    // Refused while imported; fine once nothing imports it.
+    runTool("write_script", { path: "util.ux", code: "util_x :: fn() { }" });
+    runTool("write_script", { path: "hud.ux", code: `import "util.ux"\nhud_tick :: fn() {\n    util_x();\n}` });
+    expect(runTool("delete_script", { path: "util.ux" }).ok).toBe(false);
+    runTool("write_script", { path: "hud.ux", code: "hud_tick :: fn() { }" });
+    expect(runTool("delete_script", { path: "util.ux" }).ok).toBe(true);
+  });
+
+  it("builds a scrolling level: tile layer, movement, camera, hud", () => {
+    const tiles = Array.from({ length: 2 * 64 }, (_, i) => (i < 64 ? 2 : 1));
+    expect(runTool("create_sprite", { name: "ground", pixels: tiles, w: 2, h: 1 }).ok).toBe(true);
+    expect(runTool("set_sheet", { sprite: "ground", cell_w: 1, cell_h: 1 }).ok).toBe(true);
+    const rows = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG"].join("\n");
+    expect(runTool("set_tilemap", { scene: "play", sprite: "ground", rows, legend: '{"G":0}', solid: [0] })).toMatchObject({ ok: true });
+    expect(runTool("create_object_def", { name: "runner", sprite: "hero" }).ok).toBe(true);
+    expect(runTool("set_movement", { def: "runner", movement: "platformer", jump: 4 })).toMatchObject({ ok: true });
+    expect(runTool("set_movement", { def: "runner", movement: "fly" }).ok).toBe(false);
+    expect(runTool("place_instance", { def: "runner", scene: "play", x: 8, y: 16 }).ok).toBe(true);
+    expect(runTool("set_camera", { scene: "play", follow: "runner" })).toMatchObject({ ok: true });
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+    const main = (runTool("emit_files", {}).data as { files: Record<string, string> }).files["main.ux"];
+    expect(main).toContain("e_camera();");
+    expect(runTool("set_tilemap", { scene: "play", sprite: "ground", rows: "GG", legend: '{"G":5}' }).ok).toBe(false);
   });
 });
