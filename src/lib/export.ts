@@ -50,6 +50,35 @@ export interface CompileResult extends ExportResult {
   bytes?: Uint8Array;
   mime?: string;
   filename?: string;
+  /** Server compile job (share links point at it). */
+  jobId?: string;
+}
+
+/* Last successful builds by request, so pressing Playtest again on an
+   unchanged project opens instantly instead of re-sending the whole
+   tree. Small and in memory: a handful of web pages at most. */
+const BUILD_CACHE_MAX = 4;
+const buildCache = new Map<string, CompileResult>();
+
+function cacheKey(target: string, mode: string, entry: string, files: Record<string, string>, cursor: boolean): string {
+  const names = Object.keys(files).sort();
+  return JSON.stringify([target, mode, entry, cursor, names.map((n) => [n, files[n]])]);
+}
+
+function remember(key: string, r: CompileResult): void {
+  buildCache.delete(key);
+  buildCache.set(key, r);
+  while (buildCache.size > BUILD_CACHE_MAX) buildCache.delete(buildCache.keys().next().value as string);
+}
+
+function authHeader(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem("uxn.session");
+    const access = raw ? (JSON.parse(raw) as { access?: string }).access : undefined;
+    return access ? { Authorization: `Bearer ${access}` } : {};
+  } catch {
+    return {};
+  }
 }
 
 /** Validate → emit → POST /compile, returning the artifact bytes
@@ -65,17 +94,18 @@ export async function compileProject(
   if (errs.length > 0) return { ok: false, message: errs[0] };
   const files = emitProject(project);
   const entry = project.kind === "code" ? (project.entry ?? "main.ux") : "main.ux";
+  const key = cacheKey(target, mode, entry, files, !!project.gameCursor);
+  const hit = buildCache.get(key);
+  if (hit) {
+    remember(key, hit);
+    return { ...hit, filename: artifactFilename(project.name, target, mode) };
+  }
 
   let res: Response;
   try {
-    const raw = localStorage.getItem("uxn.session");
-    const access = raw ? (JSON.parse(raw) as { access?: string }).access : undefined;
     res = await fetch(`${API_URL}/compile`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(access ? { Authorization: `Bearer ${access}` } : {}),
-      },
+      headers: { "Content-Type": "application/json", ...authHeader() },
       body: JSON.stringify({ target, mode, entry, files, lang }),
     });
   } catch {
@@ -87,20 +117,29 @@ export async function compileProject(
     const detail = (data as { detail?: string }).detail;
     return { ok: false, message: typeof detail === "string" ? detail : t(lang, "exp.failed") };
   }
-  const body = data as { status: string; message: string; diagnostics: Diagnostic[]; artifacts: Record<string, string> };
+  const body = data as { status: string; job_id?: string; message: string; diagnostics: Diagnostic[]; artifacts: Record<string, string> };
   if (body.status !== "ok") {
     return { ok: false, message: body.message || t(lang, "exp.failed"), diagnostics: body.diagnostics };
   }
-  const key = mode === "tal" ? "tal" : mode === "rom" ? "rom_b64" : target === "web" ? "html_b64" : "bundle_b64";
-  const payload = body.artifacts[key];
+  const art = mode === "tal" ? "tal" : mode === "rom" ? "rom_b64" : target === "web" ? "html_b64" : "bundle_b64";
+  const payload = body.artifacts[art];
   if (typeof payload !== "string") return { ok: false, message: t(lang, "exp.failed") };
   let bytes: Uint8Array =
-    key === "tal"
+    art === "tal"
       ? new TextEncoder().encode(payload)
       : Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
-  if (key === "html_b64" && project.gameCursor) bytes = hideHostCursor(bytes);
-  const mime = key === "tal" ? "text/plain" : key === "html_b64" ? "text/html" : target === "windows" ? "application/zip" : "application/octet-stream";
-  return { ok: true, message: t(lang, "exp.done"), bytes, mime, filename: artifactFilename(project.name, target, mode) };
+  if (art === "html_b64" && project.gameCursor) bytes = hideHostCursor(bytes);
+  const mime = art === "tal" ? "text/plain" : art === "html_b64" ? "text/html" : target === "windows" ? "application/zip" : "application/octet-stream";
+  const result: CompileResult = {
+    ok: true,
+    message: t(lang, "exp.done"),
+    bytes,
+    mime,
+    filename: artifactFilename(project.name, target, mode),
+    jobId: body.job_id,
+  };
+  remember(key, result);
+  return result;
 }
 
 /** Web page: the game draws its own pointer, so hide the browser's
@@ -123,4 +162,33 @@ export async function exportProject(
   if (!r.ok || !r.bytes) return { ok: r.ok, message: r.message, diagnostics: r.diagnostics };
   downloadBlob(r.bytes, r.filename ?? "game", r.mime ?? "application/octet-stream");
   return { ok: true, message: r.message };
+}
+
+export interface ShareResult {
+  ok: boolean;
+  message: string;
+  url?: string;
+  expiresAt?: string;
+  diagnostics?: Diagnostic[];
+}
+
+/** Compile the web page (cached if unchanged) and ask the server for a
+    temporary public link to it: a small, throwaway deploy. */
+export async function shareProject(project: Project, lang: Lang): Promise<ShareResult> {
+  const built = await compileProject(project, "web", "bundle", lang);
+  if (!built.ok || !built.jobId) return { ok: false, message: built.message, diagnostics: built.diagnostics };
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}/share`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeader() },
+      body: JSON.stringify({ job_id: built.jobId, title: project.name.slice(0, 64), hide_cursor: !!project.gameCursor }),
+    });
+  } catch {
+    return { ok: false, message: t(lang, "exp.offline") };
+  }
+  if (res.status === 401) return { ok: false, message: t(lang, "exp.login") };
+  const data = (await res.json().catch(() => ({}))) as { url?: string; expires_at?: string; detail?: string };
+  if (!res.ok || !data.url) return { ok: false, message: typeof data.detail === "string" ? data.detail : t(lang, "share.failed") };
+  return { ok: true, message: t(lang, "share.ready"), url: data.url, expiresAt: data.expires_at };
 }
