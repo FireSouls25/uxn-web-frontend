@@ -5,8 +5,8 @@
   is u16; `to8` narrows through a mod type (ETAL has no casts).
 
   Squares are 0-63, rank * 8 + file, rank 0 = white's home row. The
-  board is drawn at x 64-191, y 0-127, 16px squares; pieces sit 4px
-  inside their square. )
+  board is drawn at x 64-255, y 0-191, 24px squares; 16px pieces sit
+  4px inside their square. )
 
 import "rules.ux"
 
@@ -58,47 +58,29 @@ put_piece :: fn(sq: u16, code: u16) {
 
 ( Scene layout (white at the bottom) -> square. )
 layout_sq :: fn(x: u16, y: u16) -> u16 {
-    return (7 - y / 16) * 8 + (x - 64) / 16;
+    return (7 - y / 24) * 8 + (x - 64) / 24;
 }
 
 ( Square -> where a piece draws, through the current view. )
 sq_x :: fn(sq: u16) -> u16 {
     f: u16 = sq % 8;
     if view_white == 0 { f = 7 - f; }
-    return 64 + f * 16 + 4;
+    return 64 + f * 24 + 4;
 }
 
 sq_y :: fn(sq: u16) -> u16 {
     r: u16 = sq / 8;
     if view_white != 0 { r = 7 - r; }
-    return r * 16 + 4;
+    return r * 24 + 4;
 }
 
 ( Mouse pixel -> square, 64 when off the board. )
 mouse_sq :: fn(mx: u16, my: u16) -> u8 {
-    if mx < 64 { return 64; }
-    if mx >= 192 { return 64; }
-    if my >= 128 { return 64; }
-    f: u16 = (mx - 64) / 16;
-    r: u16 = my / 16;
+    if mx < 64 || my >= 192 { return 64; }
+    f: u16 = (mx - 64) / 24;
+    r: u16 = my / 24;
     if view_white != 0 { r = 7 - r; } else { f = 7 - f; }
     return to8(r * 8 + f);
-}
-
-( 1 when a piece of `cell` (sheet cell = code - 1) belongs to the
-  side drawn at the top: those are rotated so both armies read
-  upright from their own end. )
-is_far :: fn(cell: u16) -> u16 {
-    side: u16 = 0;
-    if cell >= 6 { side = 1; }
-    if side == view_white { return 1; }
-    return 0;
-}
-
-cell_at :: fn(sq: u16) -> u16 {
-    p: u16 = board[sq];
-    if p == 0 { return 0; }
-    return p - 1;
 }
 
 ( Turn the board around (and drop any selection: its dots would be
@@ -137,10 +119,8 @@ select_sq :: fn(sq: u8) {
     }
     gen_legal(turn);
     j: u8 = 0;
-    while j < 128 {
-        if j < moven {
-            if mfrom[j] == sq { hl[mto[j]] = 1; }
-        }
+    while j < moven {
+        if mfrom[j] == sq { hl[mto[j]] = 1; }
         j = j + 1;
     }
 }
@@ -166,10 +146,8 @@ play_move :: fn(f: u8, t: u8) {
         }
     }
     ( castling: the king hopped two files, its rook jumps over it )
-    if kind_of(p) == 5 {
-        if t == f + 2 { mv_rf = t + 1; mv_rt = t - 1; }
-        if f == t + 2 { mv_rf = t - 2; mv_rt = t + 1; }
-    }
+    if kind_of(p) == 5 && t == f + 2 { mv_rf = t + 1; mv_rt = t - 1; }
+    if kind_of(p) == 5 && f == t + 2 { mv_rf = t - 2; mv_rt = t + 1; }
     clear_sel();
 }
 
@@ -180,19 +158,15 @@ press :: fn(mx: u16, my: u16) -> u16 {
     sq: u8 = mouse_sq(mx, my);
     if sq == 64 { return 0; }
     if turn != human { return 4; }
-    if sel_sq != 64 {
-        if hl[sq] != 0 {
-            play_move(sel_sq, sq);
-            return 2;
-        }
+    if sel_sq != 64 && hl[sq] != 0 {
+        play_move(sel_sq, sq);
+        return 2;
     }
     p: u8 = board[sq];
-    if p != 0 {
-        if side_of(p) == turn {
-            select_sq(sq);
-            grabbed = sq;
-            return 1;
-        }
+    if p != 0 && side_of(p) == turn {
+        select_sq(sq);
+        grabbed = sq;
+        return 1;
     }
     if sel_sq != 64 {
         clear_sel();
@@ -208,12 +182,10 @@ release :: fn(mx: u16, my: u16) -> u16 {
     sq: u8 = mouse_sq(mx, my);
     g: u8 = grabbed;
     grabbed = 64;
-    if sq == g { return 5; }
-    if sq != 64 {
-        if hl[sq] != 0 {
-            play_move(g, sq);
-            return 2;
-        }
+    ( dropping back on its own square is never a target )
+    if sq != 64 && hl[sq] != 0 {
+        play_move(g, sq);
+        return 2;
     }
     return 5;
 }
@@ -246,15 +218,10 @@ status :: fn() -> u16 {
 ( 1 the first frame a check appears (so the sound plays once). )
 new_check :: fn() -> u16 {
     c: u8 = in_check(turn);
-    if c != 0 {
-        if was_check == 0 {
-            was_check = 1;
-            return 1;
-        }
-        return 0;
-    }
-    was_check = 0;
-    return 0;
+    n: u16 = 0;
+    if c != 0 && was_check == 0 { n = 1; }
+    was_check = c;
+    return n;
 }
 
 ( Material in pawns from white's view (the rules' piece values are
@@ -286,4 +253,28 @@ result :: fn() -> u16 {
 checked :: fn() -> u16 {
     if in_check(turn) != 0 { return 1; }
     return 0;
+}
+
+( The selected square, 64 when none: the highlight frame sits on it. )
+selected_sq :: fn() -> u16 {
+    return sel_sq;
+}
+
+( Piece code (1-12) on a square, 0 when empty. )
+code_at :: fn(sq: u16) -> u16 {
+    return board[sq];
+}
+
+( The art is three 2x2 sheets of 16px cells (a sprite holds at most
+  4x4 tiles): pawn + queen, knight + bishop, rook + king, white on
+  the top row. pc_cell is a code's cell in its sheet. )
+pc_cell :: fn(code: u16) -> u16 {
+    ( column 1 for B, Q and K: (3k / 4) is odd exactly for k 2, 4, 5 )
+    k: u16 = (code - 1) % 6;
+    return (k * 3 / 4) % 2 + (code - 1) / 6 * 2;
+}
+
+( The panel's turn king: its cell in the rook + king sheet. )
+turn_cell :: fn() -> u16 {
+    return 1 + turn * 2;
 }

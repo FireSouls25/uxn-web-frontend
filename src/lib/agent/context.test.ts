@@ -21,8 +21,8 @@ describe("agent context", () => {
     const ctx = projectContext();
     expect(ctx).toContain('Project "Chess"');
     expect(ctx).toContain("READ-ONLY");
-    expect(ctx).toMatch(/- play pool 28/);
-    expect(ctx).toMatch(/piece: sprite pieces.*vars sq=0/);
+    expect(ctx).toMatch(/- play pool 30/);
+    expect(ctx).toMatch(/piece: sprite pc_pq.*vars sq=0/);
     expect(ctx).toContain("layout_sq(x: u16, y: u16) -> u16");
     expect(ctx).toContain("Game variables: side=0");
     expect(ctx.length).toBeLessThan(6200);

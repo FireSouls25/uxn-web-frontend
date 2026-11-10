@@ -349,9 +349,9 @@ describe("chess, built in the engine model", () => {
     expect(p.loop ?? "engine").toBe("engine");
     expect(validateProject(p)).toEqual([]);
     const piece = p.objectDefs?.find((d) => d.id === "piece");
-    expect(piece?.vars).toEqual([{ id: "sq", init: 0 }]);
+    expect(piece?.vars).toEqual([{ id: "sq", init: 0 }, { id: "code", init: 1 }]);
     expect(piece?.events?.map((e) => e.trigger)).toEqual(["create", "step", "message", "message", "message"]);
-    expect(p.scenes.map((s) => s.id)).toEqual(["menu", "side", "play", "pause", "over"]);
+    expect(p.scenes.map((s) => s.id)).toEqual(["menu", "play", "pause", "over"]);
     expect(sceneFlow(p).some((e) => e.from === "play" && e.to === "pause" && e.kind === "overlay")).toBe(true);
   });
 
@@ -361,15 +361,13 @@ describe("chess, built in the engine model", () => {
     expect(r.stderr).not.toMatch(/warning/i);
     const s = run(r.rom, [
       ["frames", 2],
-      ["click", 90, 60], // PLAY
-      ["frames", 2],
-      ["click", 76, 55], // WHITE
+      ["click", 80, 111], // WHITE
       ["frames", 4],
       ["snap", "start"],
-      ["click", 136, 104], // e2
+      ["click", 172, 156], // e2
       ["frames", 2],
       ["snap", "selected"],
-      ["click", 136, 72], // e4
+      ["click", 172, 108], // e4
       ["frames", 60],
       ["snap", "replied"],
       ["key", 27],
@@ -379,7 +377,7 @@ describe("chess, built in the engine model", () => {
       ["snap", "resumed"],
     ]);
     const sq = (snap: string[], file: number, rank: number): string =>
-      snap.slice((8 - rank) * 16, (9 - rank) * 16).map((row) => row.slice(64 + file * 16, 80 + file * 16)).join("");
+      snap.slice((8 - rank) * 24, (9 - rank) * 24).map((row) => row.slice(64 + file * 24, 88 + file * 24)).join("");
     const empty = (snap: string[], file: number, rank: number): boolean => new Set(sq(snap, file, rank)).size === 1;
     // e2 holds a pawn, e4 is empty; selecting e2 drops dots on e3/e4.
     expect(empty(s.start, 4, 2)).toBe(false);
@@ -392,7 +390,7 @@ describe("chess, built in the engine model", () => {
     const blackHome = [7, 6].flatMap((rank) => [0, 1, 2, 3, 4, 5, 6, 7].map((f) => empty(s.replied, f, rank)));
     expect(blackHome.filter(Boolean).length).toBeGreaterThan(0);
     // Pause then resume: the frozen board comes back exactly.
-    expect(s.resumed.slice(0, 120).map((r) => r.slice(64)).join("")).toBe(s.replied.slice(0, 120).map((r) => r.slice(64)).join(""));
+    expect(s.resumed.map((r) => r.slice(64)).join("")).toBe(s.replied.map((r) => r.slice(64)).join(""));
   });
 });
 
