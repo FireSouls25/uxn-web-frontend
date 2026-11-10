@@ -1,10 +1,13 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useStore } from "@nanostores/react";
 import { AnimatePresence, motion } from "motion/react";
-import { Bot, Loader2, Send, X } from "lucide-react";
+import { Bot, Loader2, MessageSquare, Plug, Send, X } from "lucide-react";
 import type { Agent } from "@mariozechner/pi-agent-core";
 import { t, useLang, type Lang } from "../../lib/i18n";
 import { createStudioAgent } from "../../lib/agent/pi";
 import { buildPrompt } from "../../lib/agent/rag";
+import { bridgeStore, resumeBridge } from "../../lib/agent/bridge";
+import ConnectAgent from "./ConnectAgent";
 
 interface Message {
   role: "user" | "agent" | "note" | "tool";
@@ -45,6 +48,10 @@ export default function AgentChat() {
   const [busy, setBusy] = useState(false);
   const [messages, setMessages] = useState<Message[]>([{ role: "note", key: "agent.welcome" }]);
   const agentRef = useRef<Agent | null>(null);
+  const [view, setView] = useState<"chat" | "connect">("chat");
+  const bridge = useStore(bridgeStore);
+  // A paired outside agent keeps working across reloads and pages.
+  useEffect(() => resumeBridge(), []);
 
   function push(role: Message["role"], text?: string, key?: string) {
     setMessages((m) => [...m, { role, text, key }]);
@@ -115,6 +122,7 @@ export default function AgentChat() {
         className="fixed bottom-5 right-5 z-50 grid size-12 place-items-center rounded-full bg-mauve text-crust shadow-lg"
       >
         {open ? <X size={20} /> : <Bot size={20} />}
+        {bridge.status === "on" && <span title={t(lang, "bridge.s_on")} className="absolute right-0.5 top-0.5 size-3 rounded-full border-2 border-mauve bg-green" />}
       </motion.button>
       <AnimatePresence>
         {open && (
@@ -127,8 +135,20 @@ export default function AgentChat() {
           >
             <div className="flex items-center gap-2 border-b border-surface0 px-3.5 py-2.5">
               <Bot size={15} className="text-mauve" />
-              <span className="text-[13px] font-semibold">{t(lang, "agent.title")}</span>
+              <span className="text-[13px] font-semibold">{t(lang, view === "chat" ? "agent.title" : "bridge.title")}</span>
+              <button
+                onClick={() => setView(view === "chat" ? "connect" : "chat")}
+                title={t(lang, view === "chat" ? "bridge.title" : "agent.title")}
+                aria-label={t(lang, view === "chat" ? "bridge.title" : "agent.title")}
+                className="ml-auto grid size-7 place-items-center rounded-md text-subtext0 transition-colors hover:bg-surface0 hover:text-text"
+              >
+                {view === "chat" ? <Plug size={14} className={bridge.status === "on" ? "text-green" : ""} /> : <MessageSquare size={14} />}
+              </button>
             </div>
+            {view === "connect" ? (
+              <ConnectAgent />
+            ) : (
+            <>
             <div className="flex-1 space-y-2 overflow-y-auto px-3.5 py-3">
               {messages.map((m, i) => (
                 <div
@@ -169,6 +189,8 @@ export default function AgentChat() {
                 <Send size={15} />
               </button>
             </form>
+            </>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
