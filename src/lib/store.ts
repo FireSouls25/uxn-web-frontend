@@ -4,17 +4,23 @@
    studio pages sit behind RequireAuth, so there is no guest path. */
 import { atom, computed } from "nanostores";
 import {
+  MAX_SCRIPTS,
   MAX_SONG_STEPS,
   MAX_SPRITE_TILES,
   SAMPLE_PROJECT,
-  eachBlock,
+  SCRIPT_STARTER,
+  GENERATED_FILES,
+  scriptTemplate,
+  type LoopMode,
   flattenScene,
   migrateProject,
   projectDefs,
   spritePxOf,
   spriteTiles,
   type Block,
+  type BlockOp,
   type BlockPath,
+  type ButtonName,
   type EventTrigger,
   type FlatLeaf,
   type HitBox,
@@ -24,9 +30,14 @@ import {
   type ObjectKind,
   type Project,
   type SceneNode,
-  type ValueOperand,
+  type Tilemap,
+  type Value,
 } from "./project";
+import { eachBlock, mapBehaviour, renameRef, usesRef } from "./engine";
 
+import { STDLIB } from "./stdlib";
+
+const STDLIB_SET: Record<string, true> = Object.fromEntries(Object.keys(STDLIB).map((k) => [k, true]));
 const STORE_KEY = "uxn.projects.v1";
 const LEGACY_KEY = "uxn.project";
 
@@ -109,20 +120,31 @@ export const voiceSelStore = atom<number>(0);
     Mutually exclusive with voiceSelStore the same way defSel is
     with selectionStore: picking one clears the other. */
 export const soundSelStore = atom<string | null>(null);
-export const codeFileStore = atom<string>("main.ux");
+/** Script-loop projects have nothing to show on the scene canvas, so
+    a fresh /studio load lands them on their code (openProject sets the
+    same thing, but the navigation to /studio reloads every store). */
+const _startScript = (() => {
+  const all = _initial?.projects;
+  const id = _initial?.current;
+  return !!(all && id && all[id]?.loop === "script");
+})();
+export const codeFileStore = atom<string>(_startScript ? "custom.ux" : "main.ux");
+/** Compiler diagnostics from the last Check/Playtest/Export, so the
+    Code page can list them and jump to file:line. */
+export const diagnosticsStore = atom<Array<{ file: string | null; line: number | null; col: number | null; msg: string }>>([]);
 /** Selected named snippet (Code page edits it). Independent from
     codeFileStore: files and snippets share the editor shell. */
 export const snippetSelStore = atom<string | null>(null);
 /** Selected named song (Sound page edits it). */
 export const songSelStore = atom<string | null>(null);
-export const viewStore = atom<"scene" | "sprites" | "events" | "sound" | "code">("scene");
+export const viewStore = atom<"scene" | "sprites" | "events" | "sound" | "code">(_startScript ? "code" : "scene");
 
 /* Canvas-first studio chrome. viewStore above now only opens the
    sprite/sound/code dialogs; the canvas itself runs on these. */
 export const canvasModeStore = atom<"scene" | "logic">("scene");
 /** Blocks-view level: the scene map first, double-click a scene to
     drill into its objects. */
-export const mapLevelStore = atom<"map" | "objects">("map");
+export const mapLevelStore = atom<"map" | "objects">("objects");
 export const overlayStore = atom<{ left: boolean; right: boolean }>({ left: true, right: true });
 export function toggleOverlay(side: "left" | "right"): void {
   const cur = overlayStore.get();
@@ -136,6 +158,15 @@ export function openPlaytest(url: string): void {
   if (prev) URL.revokeObjectURL(prev);
   playtestStore.set(url);
 }
+/** Bumped to ask the header to compile + open a playtest (it owns the
+    busy/error state); lets the script-loop banner offer Playtest. */
+export const playRequestStore = atom<number>(0);
+export function requestPlaytest(): void {
+  playRequestStore.set(playRequestStore.get() + 1);
+}
+/** sessionStorage flag: "start a playtest once /studio opens this
+    project" (the Projects page Play button). */
+export const PLAY_ON_OPEN_KEY = "uxn.playOnOpen";
 export function closePlaytest(): void {
   const prev = playtestStore.get();
   if (prev) URL.revokeObjectURL(prev);
@@ -212,10 +243,13 @@ export function openProject(id: string): void {
   currentIdStore.set(id);
   sceneIdStore.set(all[id].start || all[id].scenes[0]?.id || "");
   selectionStore.set(null);
-  viewStore.set(all[id].kind === "code" ? "code" : "scene");
+  viewStore.set(all[id].kind === "code" || all[id].loop === "script" ? "code" : "scene");
+  codeFileStore.set(all[id].loop === "script" ? "custom.ux" : "main.ux");
+  snippetSelStore.set(null);
+  diagnosticsStore.set([]);
 }
 
-export function createProject(name: string): string {
+export function createProject(name: string, loop: LoopMode = "engine"): string {
   const clean = name.trim().slice(0, 48) || "Untitled";
   let id = slug(clean);
   const all = projectsStore.get();
@@ -227,9 +261,10 @@ export function createProject(name: string): string {
     id,
     name: clean,
     author: base.author,
-    scenes: [{ id: "main", nodes: [], clicks: [], keys: [] }],
+    scenes: [{ id: "main", nodes: [] }],
     start: "main",
     updatedAt: Date.now(),
+    ...(loop === "script" ? { loop, customCode: SCRIPT_STARTER } : {}),
   };
   projectsStore.set({ ...all, [id]: p });
   openProject(id);
@@ -472,85 +507,119 @@ export function setLeafLabel(leafId: string, label: string | undefined): string 
   return null;
 }
 
-/* Object events: GameMaker-style trigger lists on defs and inline
-   leaves. Owners address a def or a top-level leaf of the current
-   scene; nested leaves inherit home-leaf events (edit them there). */
+/** Set how a top-level leaf draws: sheet cell, flips, Varvara blend.
+    Only the given fields change; null clears one back to default. */
+export function setLeafLook(
+  leafId: string,
+  look: { cell?: number | null; flipX?: boolean | null; flipY?: boolean | null; blend?: number | null },
+): string | null {
+  const p = projectStore.get();
+  if (p.locked) return "this example is read-only — duplicate it to edit";
+  const scene = currentScene(p, sceneIdStore.get());
+  const node = scene.nodes.find((o) => o.id === leafId && !o.scene);
+  if (!node) return `unknown leaf '${leafId}'`;
+  if (look.blend != null && (!Number.isInteger(look.blend) || look.blend < 0 || look.blend > 15)) return "blend must be 0–15";
+  if (look.cell != null && (!Number.isInteger(look.cell) || look.cell < 0)) return "cell must be a whole number ≥ 0";
+  const patch: Partial<SceneNode> = {};
+  if (look.cell !== undefined) patch.cell = look.cell || undefined;
+  if (look.flipX !== undefined) patch.flipX = look.flipX || undefined;
+  if (look.flipY !== undefined) patch.flipY = look.flipY || undefined;
+  if (look.blend !== undefined) patch.blend = look.blend === null || look.blend === 1 ? undefined : look.blend;
+  patchObject(leafId, patch);
+  return null;
+}
 
-/** An event owner: a template, or a top-level leaf of the current scene. */
-export type EventOwner = { def: string } | { leaf: string };
+/* Behaviour editing: events on templates, inline objects and scenes.
+   Owners address a template ({def}), an inline object ({leaf}, in the
+   current scene unless `scene` is given) or a scene ({scene}). */
 
-function readOwnerEvents(p: Project, owner: EventOwner): ObjectEvent[] | null {
+/** An event owner: a template, an inline object, or a scene. */
+export type EventOwner = { def: string } | { leaf: string; scene?: string } | { scene: string };
+
+export function readOwnerEvents(p: Project, owner: EventOwner): ObjectEvent[] | null {
   if ("def" in owner) {
     const def = projectDefs(p).find((d) => d.id === owner.def);
     return def ? (def.events ?? []) : null;
   }
-  const scene = currentScene(p, sceneIdStore.get());
-  const node = scene.nodes.find((o) => o.id === owner.leaf && !o.scene);
-  if (!node || node.def) return null;
-  return node.events ?? [];
+  if ("leaf" in owner) {
+    const scene = owner.scene ? p.scenes.find((s) => s.id === owner.scene) : currentScene(p, sceneIdStore.get());
+    const node = scene?.nodes.find((o) => o.id === owner.leaf && !o.scene);
+    if (!node || node.def) return null;
+    return node.events ?? [];
+  }
+  const scene = p.scenes.find((s) => s.id === owner.scene);
+  return scene ? (scene.events ?? []) : null;
 }
 
 function writeOwnerEvents(owner: EventOwner, fn: (events: ObjectEvent[]) => ObjectEvent[]): boolean {
   const p = projectStore.get();
-  if (readOwnerEvents(p, owner) === null) return false;
+  if (p.locked || readOwnerEvents(p, owner) === null) return false;
   updateCurrent((prev) => {
     if ("def" in owner) {
+      return { ...prev, objectDefs: projectDefs(prev).map((d) => (d.id === owner.def ? { ...d, events: fn(d.events ?? []) } : d)) };
+    }
+    if ("leaf" in owner) {
+      const sid = owner.scene ?? currentScene(prev, sceneIdStore.get()).id;
       return {
         ...prev,
-        objectDefs: projectDefs(prev).map((d) => (d.id === owner.def ? { ...d, events: fn(d.events ?? []) } : d)),
+        scenes: prev.scenes.map((s) =>
+          s.id !== sid ? s : { ...s, nodes: s.nodes.map((o) => (o.id === owner.leaf && !o.scene ? { ...o, events: fn(o.events ?? []) } : o)) },
+        ),
       };
     }
-    const scene = currentScene(prev, sceneIdStore.get());
-    return {
-      ...prev,
-      scenes: prev.scenes.map((s) =>
-        s.id !== scene.id
-          ? s
-          : { ...s, nodes: s.nodes.map((o) => (o.id === owner.leaf ? { ...o, events: fn(o.events ?? []) } : o)) },
-      ),
-    };
+    return { ...prev, scenes: prev.scenes.map((s) => (s.id === owner.scene ? { ...s, events: fn(s.events ?? []) } : s)) };
   });
   return true;
 }
 
-const EVENT_ID = /^[A-Za-z][A-Za-z0-9_]*$/;
+const TRIGGERS_ALL: EventTrigger[] = ["create", "step", "destroy", "key", "click", "release", "collide", "alarm", "message"];
 
-/** Add an event; returns its id (ev_N). Unknown owner, bad trigger
-    or dangling key/target refs are refused. Alarm events take an
-    optional slot 0–3 (default 0, stored only when nonzero). */
-export function addEvent(
-  owner: EventOwner,
-  trigger: EventTrigger,
-  params?: { key?: string; target?: string; alarm?: number },
-): string | null {
+export interface EventParams {
+  key?: string;
+  button?: ButtonName;
+  target?: string;
+  alarm?: number;
+  message?: string;
+}
+
+/** Add an event; returns its id (ev_N). Unknown owner or trigger, or
+    a scene asked for an object-only trigger, are refused. Parameters
+    are stored as given (validation reports dangling references, so
+    the editor can create the event first and pick its key after). */
+export function addEvent(owner: EventOwner, trigger: EventTrigger, params: EventParams = {}): string | null {
   const p = projectStore.get();
   const cur = readOwnerEvents(p, owner);
-  if (!cur) return null;
-  if (trigger !== "create" && trigger !== "step" && trigger !== "destroy" && trigger !== "key" && trigger !== "collide" && trigger !== "click" && trigger !== "alarm")
-    return null;
-  if (trigger === "key" && (params?.key === undefined || !p.inputs.some((i) => i.id === params.key))) return null;
-  if (trigger === "collide") {
-    const t = params?.target ?? "";
-    const ok =
-      t === "any" || t === "solid" || t === "player" || t === "movable" ||
-      (t.startsWith("def:") && projectDefs(p).some((d) => d.id === t.slice(4)));
-    if (!ok) return null;
-  }
-  if (trigger === "alarm" && params?.alarm !== undefined && (!Number.isInteger(params.alarm) || params.alarm < 0 || params.alarm > 3))
-    return null;
+  if (!cur || !TRIGGERS_ALL.includes(trigger)) return null;
+  if ("scene" in owner && !("leaf" in owner) && (trigger === "collide" || trigger === "destroy")) return null;
   let id = "ev_1";
   let n = 2;
   while (cur.some((e) => e.id === id)) id = `ev_${n++}`;
-  const alarm = trigger === "alarm" ? (params?.alarm ?? 0) : undefined;
-  const event: ObjectEvent = {
-    id,
-    trigger,
-    ...(trigger === "key" ? { key: params?.key } : {}),
-    ...(trigger === "collide" ? { target: params?.target } : {}),
-    ...(alarm ? { alarm } : {}),
-    blocks: [],
-  };
+  const event: ObjectEvent = { id, trigger, ...cleanParams(trigger, params, p), blocks: [] };
   return writeOwnerEvents(owner, (events) => [...events, event]) ? id : null;
+}
+
+function cleanParams(trigger: EventTrigger, params: EventParams, p: Project): Partial<ObjectEvent> {
+  if (trigger === "key") return params.button ? { button: params.button } : { key: params.key ?? p.inputs[0]?.id ?? "" };
+  if (trigger === "collide") return { target: params.target ?? "any" };
+  if (trigger === "alarm") return params.alarm ? { alarm: params.alarm } : {};
+  if (trigger === "message") return { message: params.message ?? "go" };
+  return {};
+}
+
+/** Change an event's trigger details (key, button, target, timer,
+    message). The trigger itself stays — delete and re-add to change it. */
+export function patchEvent(owner: EventOwner, eventId: string, params: EventParams): boolean {
+  const p = projectStore.get();
+  const ev = readOwnerEvents(p, owner)?.find((e) => e.id === eventId);
+  if (!ev) return false;
+  return writeOwnerEvents(owner, (events) =>
+    events.map((e) => {
+      if (e.id !== eventId) return e;
+      const { key: _k, button: _b, target: _t, alarm: _a, message: _m, ...rest } = e;
+      void _k, _b, _t, _a, _m;
+      return { ...rest, ...cleanParams(e.trigger, { ...e, ...params }, p) } as ObjectEvent;
+    }),
+  );
 }
 
 export function deleteEvent(owner: EventOwner, eventId: string): boolean {
@@ -560,131 +629,120 @@ export function deleteEvent(owner: EventOwner, eventId: string): boolean {
   return writeOwnerEvents(owner, (events) => events.filter((e) => e.id !== eventId));
 }
 
-const BLOCK_OPS = [
-  "move", "set_pos", "play", "song", "song_stop", "goto", "overlay", "back",
-  "destroy", "wait", "code", "run", "button", "sprite", "show", "hide", "set", "if",
+export function moveEvent(owner: EventOwner, eventId: string, delta: number): boolean {
+  const p = projectStore.get();
+  const cur = readOwnerEvents(p, owner);
+  const i = cur?.findIndex((e) => e.id === eventId) ?? -1;
+  if (!cur || i < 0 || i + delta < 0 || i + delta >= cur.length) return false;
+  return writeOwnerEvents(owner, (events) => {
+    const copy = [...events];
+    const [e] = copy.splice(i, 1);
+    copy.splice(i + delta, 0, e);
+    return copy;
+  });
+}
+
+export const BLOCK_OPS: BlockOp[] = [
+  "move", "set_pos", "glide", "sprite", "cell", "look", "show", "hide", "text",
+  "play", "song", "song_stop", "goto", "overlay", "back", "wait", "destroy", "spawn",
+  "send", "set", "if", "repeat", "call", "jump", "code",
 ];
 
+type Seg = number | "then" | "else" | "body";
+
+/** The child list a (block index, branch) pair opens. */
+function childOf(b: Block | undefined, br: Seg | undefined): Block[] | null {
+  if (!b) return null;
+  if (b.op === "if" && (br === "then" || br === "else")) return br === "then" ? (b.then ?? []) : (b.else ?? []);
+  if (b.op === "repeat" && br === "body") return b.body ?? [];
+  return null;
+}
+
 /** Immutable read of a (possibly nested) list. */
-function readBlocksAt(blocks: Block[], parent: (number | "then" | "else")[]): Block[] | null {
-  let arr = blocks;
-  let i = 0;
-  while (i < parent.length) {
+export function readBlocksAt(blocks: Block[], parent: Seg[]): Block[] | null {
+  let arr: Block[] | null = blocks;
+  for (let i = 0; i < parent.length; i += 2) {
     const idx = parent[i];
-    const br = parent[i + 1];
-    if (typeof idx !== "number" || (br !== "then" && br !== "else")) return null;
-    const b = arr[idx];
-    if (!b || b.op !== "if") return null;
-    arr = br === "then" ? (b.then ?? []) : (b.else ?? []);
-    i += 2;
+    if (typeof idx !== "number" || !arr) return null;
+    arr = childOf(arr[idx], parent[i + 1]);
   }
   return arr;
 }
 
 /** Immutable rewrite of one nested list. */
-function writeBlocksAt(
-  blocks: Block[],
-  parent: (number | "then" | "else")[],
-  fn: (arr: Block[]) => Block[],
-): Block[] | null {
+function writeBlocksAt(blocks: Block[], parent: Seg[], fn: (arr: Block[]) => Block[]): Block[] | null {
   if (parent.length === 0) return fn(blocks);
   const [idx, br, ...rest] = parent;
-  if (typeof idx !== "number" || (br !== "then" && br !== "else")) return null;
-  let ok = true;
-  const next = blocks.map((b, i) => {
-    if (i !== idx || b.op !== "if") return b;
-    const child = br === "then" ? [...(b.then ?? [])] : [...(b.else ?? [])];
-    const patched = writeBlocksAt(child, rest, fn);
-    if (!patched) {
-      ok = false;
-      return b;
-    }
-    return br === "then" ? { ...b, then: patched } : { ...b, else: patched };
-  });
+  if (typeof idx !== "number") return null;
   const target = blocks[idx];
-  if (!target || target.op !== "if" || !ok) return null;
-  return next;
+  const child = childOf(target, br);
+  if (!child) return null;
+  const patched = writeBlocksAt([...child], rest, fn);
+  if (!patched) return null;
+  return blocks.map((b, i) => {
+    if (i !== idx) return b;
+    if (b.op === "if") return br === "then" ? { ...b, then: patched } : { ...b, else: patched };
+    if (b.op === "repeat") return { ...b, body: patched };
+    return b;
+  });
 }
 
-/** Append (or insert) a block. The op and required fields are
-    checked; value ranges are validation's job (same gate as export).
-    `path` addresses a nested if branch (default top level). */
-export function addBlockAt(owner: EventOwner, eventId: string, block: Block, index: number | undefined, path: BlockPath = []): boolean {
-  if (!block || !BLOCK_OPS.includes(block.op)) return false;
+function editEventBlocks(owner: EventOwner, eventId: string, path: BlockPath, fn: (arr: Block[]) => Block[] | null): boolean {
   const p = projectStore.get();
-  const cur = readOwnerEvents(p, owner);
-  const ev = cur?.find((e) => e.id === eventId);
-  if (!ev) return false;
-  if (path.length > 0 && !readBlocksAt(ev.blocks, path)) return false;
-  const at = (n: number): number => (index === undefined ? n : Math.min(Math.max(0, index), n));
-  return writeOwnerEvents(owner, (events) =>
+  const ev = readOwnerEvents(p, owner)?.find((e) => e.id === eventId);
+  if (!ev || !readBlocksAt(ev.blocks, path)) return false;
+  let ok = true;
+  const done = writeOwnerEvents(owner, (events) =>
     events.map((e) => {
       if (e.id !== eventId) return e;
       const next = writeBlocksAt(e.blocks, path, (arr) => {
-        const copy = [...arr];
-        copy.splice(at(arr.length), 0, block);
-        return copy;
+        const r = fn(arr);
+        if (!r) {
+          ok = false;
+          return arr;
+        }
+        return r;
       });
       return next ? { ...e, blocks: next } : e;
     }),
   );
+  return done && ok;
 }
 
-/** Append (or insert) a block. The op and required fields are
-    checked; value ranges are validation's job (same gate as export). */
+/** Insert (default: append) an action. `path` addresses a nested
+    if branch or repeat body (default top level). */
+export function addBlockAt(owner: EventOwner, eventId: string, block: Block, index: number | undefined, path: BlockPath = []): boolean {
+  if (!block || !BLOCK_OPS.includes(block.op)) return false;
+  return editEventBlocks(owner, eventId, path, (arr) => {
+    const copy = [...arr];
+    copy.splice(index === undefined ? arr.length : Math.min(Math.max(0, index), arr.length), 0, block);
+    return copy;
+  });
+}
+
 export function addBlock(owner: EventOwner, eventId: string, block: Block, index?: number): boolean {
   return addBlockAt(owner, eventId, block, index, []);
 }
 
-/** Merge fields into one block (same op shape assumed; ranges are
-    validation's job). `undefined` values clear the field. Powers the
-    per-op editors. `path` addresses a nested if branch. Values may be
-    objects (conditions), which replace wholesale. */
+/** Merge fields into one action. `undefined` clears a field. */
 export function patchBlockAt(owner: EventOwner, eventId: string, index: number, patch: Record<string, unknown>, path: BlockPath = []): boolean {
-  const p = projectStore.get();
-  const cur = readOwnerEvents(p, owner);
-  const ev = cur?.find((e) => e.id === eventId);
-  if (!ev) return false;
-  const arr = path.length === 0 ? ev.blocks : readBlocksAt(ev.blocks, path);
-  if (!arr || index < 0 || index >= arr.length) return false;
-  return writeOwnerEvents(owner, (events) =>
-    events.map((e) => {
-      if (e.id !== eventId) return e;
-      const next = writeBlocksAt(e.blocks, path, (list) =>
-        list.map((b, i) => {
-          if (i !== index) return b;
-          const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
-          const nextB = { ...b } as Record<string, unknown>;
-          for (const k of Object.keys(b)) if (patch[k] === undefined) delete nextB[k];
-          return { ...nextB, ...clean } as unknown as Block;
-        }),
-      );
-      return next ? { ...e, blocks: next } : e;
-    }),
-  );
+  return editEventBlocks(owner, eventId, path, (list) => {
+    if (index < 0 || index >= list.length) return null;
+    return list.map((b, i) => {
+      if (i !== index) return b;
+      const nextB = { ...b, ...patch } as Record<string, unknown>;
+      for (const [k, v] of Object.entries(patch)) if (v === undefined) delete nextB[k];
+      return nextB as unknown as Block;
+    });
+  });
 }
 
-/** Merge fields into one block (same op shape assumed; ranges are
-    validation's job). `undefined` values clear the field. Powers the
-    per-op editors. */
 export function patchBlock(owner: EventOwner, eventId: string, index: number, patch: Record<string, unknown>): boolean {
   return patchBlockAt(owner, eventId, index, patch, []);
 }
 
 export function deleteBlockAt(owner: EventOwner, eventId: string, index: number, path: BlockPath = []): boolean {
-  const p = projectStore.get();
-  const cur = readOwnerEvents(p, owner);
-  const ev = cur?.find((e) => e.id === eventId);
-  if (!ev) return false;
-  const arr = path.length === 0 ? ev.blocks : readBlocksAt(ev.blocks, path);
-  if (!arr || index < 0 || index >= arr.length) return false;
-  return writeOwnerEvents(owner, (events) =>
-    events.map((e) => {
-      if (e.id !== eventId) return e;
-      const next = writeBlocksAt(e.blocks, path, (list) => list.filter((_, i) => i !== index));
-      return next ? { ...e, blocks: next } : e;
-    }),
-  );
+  return editEventBlocks(owner, eventId, path, (list) => (index < 0 || index >= list.length ? null : list.filter((_, i) => i !== index)));
 }
 
 export function deleteBlock(owner: EventOwner, eventId: string, index: number): boolean {
@@ -692,24 +750,13 @@ export function deleteBlock(owner: EventOwner, eventId: string, index: number): 
 }
 
 export function moveBlockAt(owner: EventOwner, eventId: string, from: number, to: number, path: BlockPath = []): boolean {
-  const p = projectStore.get();
-  const cur = readOwnerEvents(p, owner);
-  const ev = cur?.find((e) => e.id === eventId);
-  if (!ev) return false;
-  const arr = path.length === 0 ? ev.blocks : readBlocksAt(ev.blocks, path);
-  if (!arr || from < 0 || from >= arr.length || to < 0 || to >= arr.length) return false;
-  return writeOwnerEvents(owner, (events) =>
-    events.map((e) => {
-      if (e.id !== eventId) return e;
-      const next = writeBlocksAt(e.blocks, path, (list) => {
-        const copy = [...list];
-        const [b] = copy.splice(from, 1);
-        copy.splice(to, 0, b);
-        return copy;
-      });
-      return next ? { ...e, blocks: next } : e;
-    }),
-  );
+  return editEventBlocks(owner, eventId, path, (list) => {
+    if (from < 0 || from >= list.length || to < 0 || to >= list.length) return null;
+    const copy = [...list];
+    const [b] = copy.splice(from, 1);
+    copy.splice(to, 0, b);
+    return copy;
+  });
 }
 
 export function moveBlock(owner: EventOwner, eventId: string, from: number, to: number): boolean {
@@ -823,9 +870,27 @@ export function setSpriteSize(spriteId: string, w: number, h: number): void {
           }
         }
       }
-      return { ...s, w: tw, h: th, pixels: next };
+      // A sheet grid that no longer divides the sprite is dropped.
+      const cell = s.cell && tw % s.cell.w === 0 && th % s.cell.h === 0 ? s.cell : undefined;
+      return { ...s, w: tw, h: th, pixels: next, cell };
     }),
   }));
+}
+
+/** Make a sprite a sheet of cw×ch-tile cells (null = whole sprite).
+    Refused unless the cell evenly divides the sprite. */
+export function setSpriteCell(spriteId: string, cell: { w: number; h: number } | null): string | null {
+  const p = projectStore.get();
+  const s = p.sprites.find((x) => x.id === spriteId);
+  if (!s) return `unknown sprite '${spriteId}'`;
+  const [w, h] = spriteTiles(s);
+  if (cell && (w % cell.w !== 0 || h % cell.h !== 0)) return `a ${cell.w}×${cell.h} cell must divide the ${w}×${h} sprite`;
+  const whole = !cell || (cell.w === w && cell.h === h);
+  updateCurrent((prev) => ({
+    ...prev,
+    sprites: prev.sprites.map((x) => (x.id === spriteId ? { ...x, cell: whole ? undefined : cell! } : x)),
+  }));
+  return null;
 }
 
 /** Patch rate/loop/pingpong (frames have dedicated fns below). */
@@ -930,17 +995,12 @@ export function deleteScene(id: string): void {
   const p = projectStore.get();
   if (p.scenes.length <= 1) return;
   updateCurrent((prev) => {
-    const scenes = prev.scenes.filter((s) => s.id !== id);
+    // Scene changes into the deleted scene go too (validation would
+    // otherwise flag every one of them).
+    const cleaned = mapBehaviour(prev, { block: (b) => ((b.op === "goto" || b.op === "overlay") && b.scene === id ? null : b) });
+    const scenes = cleaned.scenes.filter((s) => s.id !== id);
     const start = prev.start === id ? scenes[0].id : prev.start;
-    return {
-      ...prev,
-      start,
-      scenes: scenes.map((s) => ({
-        ...s,
-        clicks: s.clicks.filter((c) => c.goto !== id),
-        keys: s.keys.filter((k) => k.goto !== id),
-      })),
-    };
+    return { ...cleaned, start, scenes };
   });
   if (sceneIdStore.get() === id) {
     const rest = projectStore.get().scenes;
@@ -1001,7 +1061,6 @@ export function renameObject(oldId: string, newId: string): string | null {
         : {
             ...s,
             nodes: s.nodes.map((o) => (o.id === oldId ? { ...o, id: clean } : o)),
-            clicks: s.clicks.map((c) => (c.object === oldId ? { ...c, object: clean } : c)),
           },
     ),
   }));
@@ -1037,9 +1096,9 @@ export function renameDef(oldId: string, newId: string): string | null {
   const p = projectStore.get();
   if (oldId !== clean && projectDefs(p).some((d) => d.id === clean)) return "duplicate id";
   updateCurrent((prev) => ({
-    ...prev,
-    objectDefs: projectDefs(prev).map((d) => (d.id === oldId ? { ...d, id: clean } : d)),
-    scenes: prev.scenes.map((s) => ({
+    ...renameRef(prev, "def", oldId, clean),
+    objectDefs: projectDefs(renameRef(prev, "def", oldId, clean)).map((d) => (d.id === oldId ? { ...d, id: clean } : d)),
+    scenes: renameRef(prev, "def", oldId, clean).scenes.map((s) => ({
       ...s,
       nodes: s.nodes.map((o) => (o.def === oldId ? { ...o, def: clean } : o)),
     })),
@@ -1066,7 +1125,16 @@ export function deleteDef(defId: string): void {
       solid: o.solid ?? def.solid,
       controls: o.controls ?? def.controls,
       anim: o.anim ?? def.anim,
-      tick: o.tick ?? def.tick,
+      mask: o.mask ?? def.mask,
+      label: o.label ?? def.label,
+      cell: o.cell ?? def.cell,
+      flipX: o.flipX ?? def.flipX,
+      flipY: o.flipY ?? def.flipY,
+      blend: o.blend ?? def.blend,
+      // An inline object owns events again; per-instance variable
+      // values have no template left to belong to.
+      events: (def.events ?? []).map((e) => structuredClone(e)),
+      vars: undefined,
     };
   };
   updateCurrent((prev) => ({
@@ -1118,7 +1186,13 @@ export function extractObject(objectId: string): string | null {
     solid: node.solid,
     controls: node.controls,
     anim: node.anim,
-    tick: node.tick,
+    mask: node.mask,
+    label: node.label,
+    cell: node.cell,
+    flipX: node.flipX,
+    flipY: node.flipY,
+    blend: node.blend,
+    events: node.events ?? [],
   };
   updateCurrent((prev) => ({
     ...prev,
@@ -1214,13 +1288,7 @@ export function deleteNode(ref: ListRef, index: number): void {
     const next = updateListAt(prev, ref.sceneId, ref.parent, (nodes) =>
       nodes.filter((_, i) => i !== index),
     );
-    if (ref.parent.length > 0) return next;
-    return {
-      ...next,
-      scenes: next.scenes.map((s) =>
-        s.id !== ref.sceneId ? s : { ...s, clicks: s.clicks.filter((c) => c.object !== node.id) },
-      ),
-    };
+    return next;
   });
   const sel = selectionStore.get();
   if (sel === node.id || sel?.endsWith(`/${node.id}`)) selectionStore.set(null);
@@ -1259,47 +1327,41 @@ export function addInput(key: number, name = ""): string {
   return id;
 }
 
-export function addBinding(
-  kind: "click" | "key",
-  objectId: string | null,
-  goto: string,
-  key?: number,
-  inputId?: string,
-): void {
-  const p = projectStore.get();
-  const scene = currentScene(p, sceneIdStore.get());
+/** Spare object slots for spawn actions in a scene (undefined = auto). */
+export function setScenePool(sceneId: string, pool: number | undefined): void {
   updateCurrent((prev) => ({
     ...prev,
-    scenes: prev.scenes.map((s) => {
-      if (s.id !== scene.id) return s;
-      if (kind === "click" && objectId) return { ...s, clicks: [...s.clicks, { object: objectId, goto }] };
-      const code = key ?? (prev.inputs ?? []).find((i) => i.id === inputId)?.key ?? 32;
-      return { ...s, keys: [...s.keys, { input: inputId, key: code, goto }] };
-    }),
+    scenes: prev.scenes.map((s) => (s.id !== sceneId ? s : { ...s, pool: pool === undefined ? undefined : Math.max(0, Math.min(64, Math.round(pool))) })),
   }));
 }
 
-export function removeBinding(kind: "click" | "key", index: number): void {
-  const p = projectStore.get();
-  const scene = currentScene(p, sceneIdStore.get());
+/** Camera: follow the first live instance of a template ("" = fixed). */
+export function setSceneCamera(sceneId: string, follow: string): void {
   updateCurrent((prev) => ({
     ...prev,
-    scenes: prev.scenes.map((s) => {
-      if (s.id !== scene.id) return s;
-      if (kind === "click") return { ...s, clicks: s.clicks.filter((_, i) => i !== index) };
-      return { ...s, keys: s.keys.filter((_, i) => i !== index) };
-    }),
+    scenes: prev.scenes.map((s) => (s.id !== sceneId ? s : { ...s, camera: follow ? { follow } : undefined })),
   }));
 }
 
-export function setSceneFrameCode(code: string): void {
-  const p = projectStore.get();
-  const scene = currentScene(p, sceneIdStore.get());
+/** Replace (or remove) a scene's tile layer. */
+export function setSceneTilemap(sceneId: string, tilemap: Tilemap | undefined): void {
   updateCurrent((prev) => ({
     ...prev,
-    scenes: prev.scenes.map((s) =>
-      s.id !== scene.id ? s : { ...s, frameCode: code || undefined },
-    ),
+    scenes: prev.scenes.map((s) => (s.id !== sceneId ? s : { ...s, tilemap })),
+  }));
+}
+
+/** Paint one cell of a scene's tile layer (0 = empty, n = sheet cell n-1). */
+export function paintTile(sceneId: string, col: number, row: number, value: number): void {
+  updateCurrent((prev) => ({
+    ...prev,
+    scenes: prev.scenes.map((s) => {
+      const tm = s.tilemap;
+      if (s.id !== sceneId || !tm || col < 0 || row < 0 || col >= tm.cols || row >= tm.rows) return s;
+      const tiles = [...tm.tiles];
+      tiles[row * tm.cols + col] = value;
+      return { ...s, tilemap: { ...tm, tiles } };
+    }),
   }));
 }
 
@@ -1378,21 +1440,9 @@ export function renameSound(oldId: string, newId: string): string | null {
   if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(clean)) return "bad id";
   const p = projectStore.get();
   if (oldId !== clean && (p.sounds ?? []).some((s) => s.id === clean)) return "duplicate id";
-  const retarget = (blocks: Block[]): Block[] =>
-    blocks.map((b) => (b.op === "play" && b.sound === oldId ? { ...b, sound: clean } : b));
   updateCurrent((prev) => ({
-    ...prev,
+    ...renameRef(prev, "sound", oldId, clean),
     sounds: (prev.sounds ?? []).map((s) => (s.id === oldId ? { ...s, id: clean } : s)),
-    objectDefs: projectDefs(prev).map((d) => ({
-      ...d,
-      events: (d.events ?? []).map((e) => ({ ...e, blocks: retarget(e.blocks) })),
-    })),
-    scenes: prev.scenes.map((s) => ({
-      ...s,
-      nodes: s.nodes.map((o) =>
-        !o.scene && !o.def && o.events ? { ...o, events: o.events.map((e) => ({ ...e, blocks: retarget(e.blocks) })) } : o,
-      ),
-    })),
   }));
   if (soundSelStore.get() === oldId) soundSelStore.set(clean);
   return null;
@@ -1403,95 +1453,9 @@ export function renameSound(oldId: string, newId: string): string | null {
 export function deleteSound(soundId: string): string | null {
   const p = projectStore.get();
   if (!(p.sounds ?? []).some((s) => s.id === soundId)) return `unknown sound '${soundId}'`;
-  const used =
-    projectDefs(p).some((d) => (d.events ?? []).some((e) => e.blocks.some((b) => b.op === "play" && b.sound === soundId))) ||
-    p.scenes.some((s) =>
-      s.nodes.some(
-        (o) => !o.scene && (o.events ?? []).some((e) => e.blocks.some((b) => b.op === "play" && b.sound === soundId)),
-      ),
-    );
-  if (used) return `sound '${soundId}' is used by a play block`;
+  if (usesRef(p, "sound", soundId)) return `sound '${soundId}' is still played by an action`;
   updateCurrent((prev) => ({ ...prev, sounds: (prev.sounds ?? []).filter((s) => s.id !== soundId) }));
   if (soundSelStore.get() === soundId) soundSelStore.set(null);
-  return null;
-}
-
-/* Named ETAL snippets: the Code-page library behind run blocks.
-   Same contract as sounds (unique ids, refcounted delete) — run
-   blocks are connections from object events to these. */
-
-function cleanSnippetId(name: string): string {
-  let base = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24) || "snippet";
-  if (!/^[A-Za-z]/.test(base)) base = `s_${base}`;
-  return base;
-}
-
-/** Add a snippet (validates immediately) and select it. */
-export function addSnippet(name: string, code = "ox[slot] = ox[slot];"): string {
-  const p = projectStore.get();
-  let id = cleanSnippetId(name);
-  let n = 2;
-  const snippets = p.snippets ?? [];
-  while (snippets.some((s) => s.id === id)) id = `${cleanSnippetId(name)}_${n++}`;
-  updateCurrent((prev) => ({
-    ...prev,
-    snippets: [...(prev.snippets ?? []), { id, code }],
-  }));
-  snippetSelStore.set(id);
-  return id;
-}
-
-/** Rename a snippet id everywhere run blocks reference it. */
-export function renameSnippet(oldId: string, newId: string): string | null {
-  const clean = newId.trim().slice(0, 24);
-  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(clean)) return "bad id";
-  const p = projectStore.get();
-  if (oldId !== clean && (p.snippets ?? []).some((s) => s.id === clean)) return "duplicate id";
-  const retarget = (blocks: Block[]): Block[] =>
-    blocks.map((b) => (b.op === "run" && b.snippet === oldId ? { ...b, snippet: clean } : b));
-  updateCurrent((prev) => ({
-    ...prev,
-    snippets: (prev.snippets ?? []).map((s) => (s.id === oldId ? { ...s, id: clean } : s)),
-    objectDefs: projectDefs(prev).map((d) => ({
-      ...d,
-      events: (d.events ?? []).map((e) => ({ ...e, blocks: retarget(e.blocks) })),
-    })),
-    scenes: prev.scenes.map((s) => ({
-      ...s,
-      nodes: s.nodes.map((o) =>
-        !o.scene && !o.def && o.events ? { ...o, events: o.events.map((e) => ({ ...e, blocks: retarget(e.blocks) })) } : o,
-      ),
-    })),
-  }));
-  if (snippetSelStore.get() === oldId) snippetSelStore.set(clean);
-  return null;
-}
-
-/** Set a snippet's code (validated at export like all ETAL). */
-export function setSnippetCode(snippetId: string, code: string): string | null {
-  const p = projectStore.get();
-  if (!(p.snippets ?? []).some((s) => s.id === snippetId)) return `unknown snippet '${snippetId}'`;
-  updateCurrent((prev) => ({
-    ...prev,
-    snippets: (prev.snippets ?? []).map((s) => (s.id === snippetId ? { ...s, code } : s)),
-  }));
-  return null;
-}
-
-/** Delete a named snippet. Refused while a run block names it. */
-export function deleteSnippet(snippetId: string): string | null {
-  const p = projectStore.get();
-  if (!(p.snippets ?? []).some((s) => s.id === snippetId)) return `unknown snippet '${snippetId}'`;
-  const used =
-    projectDefs(p).some((d) => (d.events ?? []).some((e) => e.blocks.some((b) => b.op === "run" && b.snippet === snippetId))) ||
-    p.scenes.some((s) =>
-      s.nodes.some(
-        (o) => !o.scene && (o.events ?? []).some((e) => e.blocks.some((b) => b.op === "run" && b.snippet === snippetId)),
-      ),
-    );
-  if (used) return `snippet '${snippetId}' is used by a run block`;
-  updateCurrent((prev) => ({ ...prev, snippets: (prev.snippets ?? []).filter((s) => s.id !== snippetId) }));
-  if (snippetSelStore.get() === snippetId) snippetSelStore.set(null);
   return null;
 }
 
@@ -1520,53 +1484,15 @@ export function addVariable(name: string, init = 0): string {
   return id;
 }
 
-function varUsed(p: Project, id: string): boolean {
-  const hitsEvents = (events: ObjectEvent[]): boolean =>
-    eachBlock(events).some(
-      (b) =>
-        (b.op === "set" && b.name === id) ||
-        (b.op === "if" &&
-          !!b.cond &&
-          ((b.cond.left as { name?: string }).name === id || (b.cond.right as { name?: string }).name === id)),
-    );
-  if (projectDefs(p).some((d) => hitsEvents(d.events ?? []))) return true;
-  return p.scenes.some((s) => s.nodes.some((o) => !o.scene && hitsEvents(o.events ?? [])));
-}
-
 /** Rename a variable id everywhere set/if blocks reference it. */
 export function renameVariable(oldId: string, newId: string): string | null {
   const clean = newId.trim().slice(0, 24);
   if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(clean)) return "bad id";
   const p = projectStore.get();
   if (oldId !== clean && (p.vars ?? []).some((v) => v.id === clean)) return "duplicate id";
-  const retarget = (blocks: Block[]): Block[] =>
-    blocks.map((b) => {
-      if (b.op === "set" && b.name === oldId) return { ...b, name: clean };
-      if (b.op === "if") {
-        const fix = (o: ValueOperand): ValueOperand =>
-          o && o.kind === "var" && o.name === oldId ? { ...o, name: clean } : o;
-        return {
-          ...b,
-          ...(b.cond ? { cond: { ...b.cond, left: fix(b.cond.left), right: fix(b.cond.right) } } : {}),
-          then: retarget(b.then ?? []),
-          ...(b.else ? { else: retarget(b.else) } : {}),
-        };
-      }
-      return b;
-    });
   updateCurrent((prev) => ({
-    ...prev,
+    ...renameRef(prev, "var", oldId, clean),
     vars: (prev.vars ?? []).map((v) => (v.id === oldId ? { ...v, id: clean } : v)),
-    objectDefs: projectDefs(prev).map((d) => ({
-      ...d,
-      events: (d.events ?? []).map((e) => ({ ...e, blocks: retarget(e.blocks) })),
-    })),
-    scenes: prev.scenes.map((s) => ({
-      ...s,
-      nodes: s.nodes.map((o) =>
-        !o.scene && !o.def && o.events ? { ...o, events: o.events.map((e) => ({ ...e, blocks: retarget(e.blocks) })) } : o,
-      ),
-    })),
   }));
   return null;
 }
@@ -1587,7 +1513,7 @@ export function setVariableInit(variableId: string, init: number): string | null
 export function deleteVariable(variableId: string): string | null {
   const p = projectStore.get();
   if (!(p.vars ?? []).some((v) => v.id === variableId)) return `unknown variable '${variableId}'`;
-  if (varUsed(p, variableId)) return `variable '${variableId}' is used by a set/if block`;
+  if (usesRef(p, "var", variableId)) return `variable '${variableId}' is still used by an action`;
   updateCurrent((prev) => ({ ...prev, vars: (prev.vars ?? []).filter((v) => v.id !== variableId) }));
   return null;
 }
@@ -1632,21 +1558,9 @@ export function renameSong(oldId: string, newId: string): string | null {
   if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(clean)) return "bad id";
   const p = projectStore.get();
   if (oldId !== clean && (p.songs ?? []).some((s) => s.id === clean)) return "duplicate id";
-  const retarget = (blocks: Block[]): Block[] =>
-    blocks.map((b) => (b.op === "song" && b.song === oldId ? { ...b, song: clean } : b));
   updateCurrent((prev) => ({
-    ...prev,
+    ...renameRef(prev, "song", oldId, clean),
     songs: (prev.songs ?? []).map((s) => (s.id === oldId ? { ...s, id: clean } : s)),
-    objectDefs: projectDefs(prev).map((d) => ({
-      ...d,
-      events: (d.events ?? []).map((e) => ({ ...e, blocks: retarget(e.blocks) })),
-    })),
-    scenes: prev.scenes.map((s) => ({
-      ...s,
-      nodes: s.nodes.map((o) =>
-        !o.scene && !o.def && o.events ? { ...o, events: o.events.map((e) => ({ ...e, blocks: retarget(e.blocks) })) } : o,
-      ),
-    })),
   }));
   if (songSelStore.get() === oldId) songSelStore.set(clean);
   return null;
@@ -1703,31 +1617,220 @@ export function setSongVol(songId: string, voice: number, vol: number): string |
 export function deleteSong(songId: string): string | null {
   const p = projectStore.get();
   if (!(p.songs ?? []).some((s) => s.id === songId)) return `unknown song '${songId}'`;
-  const used =
-    projectDefs(p).some((d) => (d.events ?? []).some((e) => e.blocks.some((b) => b.op === "song" && b.song === songId))) ||
-    p.scenes.some((s) =>
-      s.nodes.some(
-        (o) => !o.scene && (o.events ?? []).some((e) => e.blocks.some((b) => b.op === "song" && b.song === songId)),
-      ),
-    );
-  if (used) return `song '${songId}' is used by a song block`;
+  if (usesRef(p, "song", songId)) return `song '${songId}' is still started by an action`;
   updateCurrent((prev) => ({ ...prev, songs: (prev.songs ?? []).filter((s) => s.id !== songId) }));
   if (songSelStore.get() === songId) songSelStore.set(null);
   return null;
 }
 
-/** Convert a legacy inline code block into a snippet + run block
-    (same bytes out — the splice just moves to the library). */
-export function convertBlockToSnippet(owner: EventOwner, eventId: string, index: number): string | null {
+const SCRIPT_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+function cleanScriptPath(name: string): string {
+  let base = name.trim().replace(/\.ux$/i, "").replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 28) || "script";
+  if (!/^[A-Za-z]/.test(base)) base = `s_${base}`;
+  return `${base}.ux`;
+}
+
+function takenPaths(p: Project): Set<string> {
+  return new Set<string>([...GENERATED_FILES, ...(p.scripts ?? []).map((s) => s.path)]);
+}
+
+export function setCustomCode(code: string): void {
+  updateCurrent((prev) => (prev.kind === "visual" ? { ...prev, customCode: code } : prev));
+}
+
+export function setLoopMode(loop: LoopMode): void {
+  updateCurrent((prev) => {
+    if (prev.kind !== "visual") return prev;
+    const next: Project = { ...prev, loop };
+    // Switching an empty project to the script loop seeds a working
+    // custom_frame, so the first Playtest already shows something.
+    if (loop === "script" && !(prev.customCode ?? "").trim()) next.customCode = SCRIPT_STARTER;
+    return next;
+  });
+}
+
+/** Toggle "the game draws its own mouse cursor" (web builds then
+    hide the browser pointer over the game). */
+export function setGameCursor(on: boolean): void {
+  updateCurrent((prev) => ({ ...prev, gameCursor: on || undefined }));
+}
+
+/** Add a script module (unique .ux name) and open it. */
+export function addScript(name: string, code?: string): string | null {
   const p = projectStore.get();
-  const ev = readOwnerEvents(p, owner)?.find((e) => e.id === eventId);
-  const b = ev?.blocks[index];
-  if (!b || b.op !== "code") return "not a code block";
-  const id = addSnippet("snippet", b.code);
-  const ok = writeOwnerEvents(owner, (events) =>
-    events.map((e) =>
-      e.id === eventId ? { ...e, blocks: e.blocks.map((x, i) => (i === index ? { op: "run", snippet: id } : x)) } : e,
-    ),
+  if (p.locked || p.kind !== "visual") return "locked";
+  if ((p.scripts ?? []).length >= MAX_SCRIPTS) return `at most ${MAX_SCRIPTS} scripts`;
+  const taken = takenPaths(p);
+  let path = cleanScriptPath(name);
+  let n = 2;
+  while (taken.has(path) || path in STDLIB_SET) path = `${cleanScriptPath(name).replace(/\.ux$/, "")}_${n++}.ux`;
+  updateCurrent((prev) => ({ ...prev, scripts: [...(prev.scripts ?? []), { path, code: code ?? scriptTemplate(path) }] }));
+  codeFileStore.set(path);
+  snippetSelStore.set(null);
+  return null;
+}
+
+export function setScriptCode(path: string, code: string): string | null {
+  const p = projectStore.get();
+  if (!(p.scripts ?? []).some((s) => s.path === path)) return `unknown script '${path}'`;
+  updateCurrent((prev) => ({ ...prev, scripts: (prev.scripts ?? []).map((s) => (s.path === path ? { ...s, code } : s)) }));
+  return null;
+}
+
+/** Rename a script and rewrite `import "old"` lines everywhere. */
+export function renameScript(oldPath: string, newName: string): string | null {
+  const p = projectStore.get();
+  if (!(p.scripts ?? []).some((s) => s.path === oldPath)) return `unknown script '${oldPath}'`;
+  const base = newName.trim().replace(/\.ux$/i, "");
+  if (!SCRIPT_NAME.test(base)) return "bad name";
+  const path = `${base}.ux`;
+  if (path === oldPath) return null;
+  if (takenPaths(p).has(path) || path in STDLIB_SET) return "name taken";
+  const fix = (code: string) => code.split(`import "${oldPath}"`).join(`import "${path}"`);
+  updateCurrent((prev) => ({
+    ...prev,
+    customCode: prev.customCode === undefined ? undefined : fix(prev.customCode),
+    scripts: (prev.scripts ?? []).map((s) => ({ path: s.path === oldPath ? path : s.path, code: fix(s.code) })),
+  }));
+  if (codeFileStore.get() === oldPath) codeFileStore.set(path);
+  return null;
+}
+
+/** Delete a script. Refused while another file imports it. */
+export function deleteScript(path: string): string | null {
+  const p = projectStore.get();
+  if (!(p.scripts ?? []).some((s) => s.path === path)) return `unknown script '${path}'`;
+  const importer = [{ path: "custom.ux", code: p.customCode ?? "" }, ...(p.scripts ?? [])].find(
+    (s) => s.path !== path && s.code.includes(`import "${path}"`),
   );
-  return ok ? id : null;
+  if (importer) return `${importer.path} imports ${path}`;
+  updateCurrent((prev) => ({ ...prev, scripts: (prev.scripts ?? []).filter((s) => s.path !== path) }));
+  if (codeFileStore.get() === path) codeFileStore.set("custom.ux");
+  return null;
+}
+
+/** Move a script one step up/down the import order. */
+export function moveScript(path: string, dir: -1 | 1): void {
+  updateCurrent((prev) => {
+    const list = [...(prev.scripts ?? [])];
+    const i = list.findIndex((s) => s.path === path);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= list.length) return prev;
+    [list[i], list[j]] = [list[j], list[i]];
+    return { ...prev, scripts: list };
+  });
+}
+
+/* Template variables: each instance gets its own copy ("my hp"). */
+
+function myVarUsed(p: Project, name: string): boolean {
+  let used = false;
+  mapBehaviour(p, {
+    value: (v) => {
+      if (typeof v === "object" && v.k === "my" && v.name === name) used = true;
+      return v;
+    },
+    block: (b) => {
+      if (b.op === "set" && (b.scope ?? "global") !== "global" && b.name === name) used = true;
+      return b;
+    },
+  });
+  return used;
+}
+
+export function addDefVar(defId: string, name = "value", init = 0): string | null {
+  const p = projectStore.get();
+  const def = projectDefs(p).find((d) => d.id === defId);
+  if (!def || p.locked) return null;
+  let base = name.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 20) || "value";
+  if (!/^[a-z]/.test(base)) base = `v_${base}`;
+  let id = base;
+  let n = 2;
+  while ((def.vars ?? []).some((v) => v.id === id)) id = `${base}_${n++}`;
+  updateCurrent((prev) => ({
+    ...prev,
+    objectDefs: projectDefs(prev).map((d) => (d.id === defId ? { ...d, vars: [...(d.vars ?? []), { id, init: Math.max(0, Math.min(65535, Math.round(init) || 0)) }] } : d)),
+  }));
+  return id;
+}
+
+/** Rename and/or change the start value of a template variable.
+    Renames follow every action and value that names it. */
+export function setDefVar(defId: string, varId: string, patch: { id?: string; init?: number }): string | null {
+  const p = projectStore.get();
+  const def = projectDefs(p).find((d) => d.id === defId);
+  if (!def?.vars?.some((v) => v.id === varId)) return `unknown variable '${varId}'`;
+  const nextId = patch.id?.trim();
+  if (nextId !== undefined && nextId !== varId) {
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(nextId)) return "bad name";
+    if (def.vars.some((v) => v.id === nextId)) return "duplicate name";
+  }
+  updateCurrent((prev) => {
+    let next = prev;
+    if (nextId && nextId !== varId) {
+      next = mapBehaviour(prev, {
+        value: (v) => (typeof v === "object" && v.k === "my" && v.name === varId ? { ...v, name: nextId } : v),
+        block: (b) => (b.op === "set" && (b.scope ?? "global") !== "global" && b.name === varId ? { ...b, name: nextId } : b),
+      });
+      next = {
+        ...next,
+        scenes: next.scenes.map((s) => ({
+          ...s,
+          nodes: s.nodes.map((o) => {
+            if (o.def !== defId || !o.vars || !(varId in o.vars)) return o;
+            const { [varId]: val, ...rest } = o.vars;
+            return { ...o, vars: { ...rest, [nextId]: val } };
+          }),
+        })),
+      };
+    }
+    return {
+      ...next,
+      objectDefs: projectDefs(next).map((d) =>
+        d.id !== defId
+          ? d
+          : {
+              ...d,
+              vars: (d.vars ?? []).map((v) =>
+                v.id !== varId ? v : { id: nextId || v.id, init: patch.init === undefined ? v.init : Math.max(0, Math.min(65535, Math.round(patch.init) || 0)) },
+              ),
+            },
+      ),
+    };
+  });
+  return null;
+}
+
+export function deleteDefVar(defId: string, varId: string): string | null {
+  const p = projectStore.get();
+  if (myVarUsed(p, varId) && !projectDefs(p).some((d) => d.id !== defId && d.vars?.some((v) => v.id === varId)))
+    return `'${varId}' is still used by an action`;
+  updateCurrent((prev) => ({
+    ...prev,
+    objectDefs: projectDefs(prev).map((d) => (d.id === defId ? { ...d, vars: (d.vars ?? []).filter((v) => v.id !== varId) } : d)),
+    scenes: prev.scenes.map((s) => ({
+      ...s,
+      nodes: s.nodes.map((o) => {
+        if (o.def !== defId || !o.vars || !(varId in o.vars)) return o;
+        const { [varId]: _drop, ...rest } = o.vars;
+        void _drop;
+        return { ...o, vars: Object.keys(rest).length ? rest : undefined };
+      }),
+    })),
+  }));
+  return null;
+}
+
+/** Per-instance start value for a template variable (undefined = the
+    template's default). Top-level leaf of the current scene. */
+export function setInstanceVar(leafId: string, name: string, value: number | undefined): void {
+  const p = projectStore.get();
+  const scene = currentScene(p, sceneIdStore.get());
+  const node = scene.nodes.find((o) => o.id === leafId);
+  if (!node?.def) return;
+  const vars = { ...(node.vars ?? {}) };
+  if (value === undefined) delete vars[name];
+  else vars[name] = Math.max(0, Math.min(65535, Math.round(value) || 0));
+  patchObject(leafId, { vars: Object.keys(vars).length ? vars : undefined });
 }
