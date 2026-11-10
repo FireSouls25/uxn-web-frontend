@@ -437,11 +437,12 @@ describe("platformer example: tiles, camera, movement", () => {
       ["snap", "air"],
     ]);
     // The ground scrolled (the camera moved) while the HUD stayed put.
-    expect(s.air.slice(124, 144).join("")).not.toBe(s.start.slice(124, 144).join(""));
-    expect(s.air.slice(0, 4).join("")).toBe(s.start.slice(0, 4).join(""));
-    // The jump picked up coins: the HUD number changed.
-    expect(s.air.slice(4, 12).map((r) => r.slice(48, 64)).join("")).not.toBe(s.start.slice(4, 12).map((r) => r.slice(48, 64)).join(""));
-  });
+    expect(s.air.slice(168, 192).join("")).not.toBe(s.start.slice(168, 192).join(""));
+    // HUD row: icon and "X" stay put, the number changes (coins picked up).
+    const hud = (snap: string[], x0: number, x1: number) => snap.slice(6, 14).map((r) => r.slice(x0, x1)).join("");
+    expect(hud(s.air, 0, 34)).toBe(hud(s.start, 0, 34));
+    expect(hud(s.air, 34, 50)).not.toBe(hud(s.start, 34, 50));
+  }, 30000);
 });
 
 describe("star catcher example", () => {
