@@ -21,6 +21,7 @@ import etalMd from "./corpus/etal.md?raw";
 import varvaraMd from "./corpus/varvara.md?raw";
 import examplesMd from "./corpus/examples.md?raw";
 import engineMd from "./corpus/engine.md?raw";
+import craftMd from "./corpus/craft.md?raw";
 import { authFetch } from "../auth";
 import { TOOLS, runToolAsync } from "./tools";
 
@@ -251,11 +252,14 @@ How you work:
 - Each user message starts with a "Current project" summary. It is fresh; use its ids. Never invent ids, files or functions: look them up (describe, scene_map, read_file, list_library).
 - Use the engine model: templates + events/actions for the game's shape, script functions (ETAL) for rules and data, called from blocks. Read engine.md below.
 - Write correct ETAL: u16 params/returns for functions blocks call, no implicit narrowing, no recursion, mind the 256-byte zero page. Read etal.md below.
+- Make it look finished by default (craft.md): pick size and palette on purpose, draw art with draw_sprite (shaded, outlined, animated), lay out scenery and UI with create_tile_sheet + set_tilemap, add a title screen with headline type and an end screen. Only go minimal when the user asks.
 - Before you say you're done: validate, then check_build. Fix every error and re-check. If it still fails after 3 rounds, stop and explain what's left.
 - Read-only projects (examples) can't be edited: tell the user to press "Duplicate to edit".
 - Reply in the user's language. Be brief: say what you changed and how to try it (Playtest). Don't paste whole files into chat.
 
 ${engineMd}
+
+${craftMd}
 
 ${etalMd}
 

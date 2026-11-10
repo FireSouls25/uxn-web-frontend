@@ -1,7 +1,49 @@
 {
   "version": 1,
-  "count": 30,
+  "count": 39,
   "chunks": [
+    {
+      "id": "craft.md#top",
+      "source": "craft.md",
+      "title": "craft",
+      "text": "# Craft: make it look finished (the default style)\n\nUnless the user asks for something rough or minimal, build things the\nway the examples are built (Life Lab, Sprout Run, Star Catcher): a\nreal title screen, art with shading and outlines, scenery from tiles,\nbig headline type, and a HUD that uses icons. A plain sprite on a blank\nscreen is a placeholder, not a result."
+    },
+    {
+      "id": "craft.md#1-canvas-and-palette-first",
+      "source": "craft.md",
+      "title": "1. Canvas and palette first",
+      "text": "## 1. Canvas and palette first\n* **Size**: 256×192 for games, 320×240 for page-like apps (more room\n  for detail and text). 160×144 only when the user wants a tiny,\n  handheld look. Set it before placing anything.\n* **Four colors with roles** (`set_theme`; r/g/b are 4 nibbles, one per\n  color c0..c3):\n  * c0 is the background, and transparent under blends 0/5/10/15.\n  * c1 is the outline/ink color (darkest on light themes, lightest on\n    dark ones). Text objects draw in c1.\n  * c2 and c3 are the two accents: one cool, one warm.\n\n  Proven sets:\n  * Day sky: `r 0x926e, g 0xc2a9, b 0xd343` (sky, ink, green, orange).\n  * Night: `r 0x1ffe, g 0x2fd6, b 0x5fa9` (navy, moonlight, yellow,\n    pink).\n  * Paper: `r 0xe22f, g 0xe2b7, b 0xf495` (paper, ink, teal, coral).\n* Text objects draw in c1, so pick a background that c1 reads on."
+    },
+    {
+      "id": "craft.md#2-art-use-draw-sprite-not-raw-pixels",
+      "source": "craft.md",
+      "title": "2. Art: use `draw_sprite`, not raw pixels",
+      "text": "## 2. Art: use `draw_sprite`, not raw pixels\nRecipe for a character or item (16×16 or 32×32):\n1. Fill the big shapes: `ellipse` or `disc` for bodies, `rect` for\n   boxes, `line` for stems and poles.\n2. Shade one side: `dither` the main color to a darker one over the\n   lower-right part (`x`/`y`/`w`/`h` box).\n3. Add a 1–3 pixel highlight on the upper left (`pixel`, color 0 or the\n   light color).\n4. `outline` in the ink color. It traces only the outside, so shines\n   and eye glints stay.\n5. Details last: eyes (2×3 ink with a glint pixel), mouths, seams,\n   legs, sparkles.\n\nAnimate whatever should feel alive: a second frame plus `add_anim_frame`\n/ `set_anim`. Examples: a spinning coin (4 frames), a twinkling star,\na fizzing fuse (2 frames, rate 5–12).\n\nBig pictures (dishes, moons, logos) go in a 32×32 sprite, or are split\nacross 2–4 sprites placed side by side."
+    },
+    {
+      "id": "craft.md#3-scenery-and-layout-tile-layers",
+      "source": "craft.md",
+      "title": "3. Scenery and layout: tile layers",
+      "text": "## 3. Scenery and layout: tile layers\n`create_tile_sheet` (16 cells) then `set_tilemap` with text rows. Tiles\ncost no object slots, so be generous:\n* **Games**: ground (top edge, fill, deep fill), edge caps at pits,\n  platforms, and decor (bushes, flowers, fences, clouds, dithered\n  far-away hills, starfields, skylines with lit windows).\n* **Apps and pages**: a nav bar fill, rounded card borders (8 pieces)\n  with a header strip, pill buttons (6 pieces, 16px tall) and patterned\n  panels (dotted grids).\n* Use a different `solid` list per sheet: only the cells that block\n  movement.\n* Fill every scene, the title and game-over screens included. They\n  reuse the same backdrop."
+    },
+    {
+      "id": "craft.md#4-type-and-screens",
+      "source": "craft.md",
+      "title": "4. Type and screens",
+      "text": "## 4. Type and screens\n* `headline` for titles, two letters per 32×24 sprite: ink plus a\n  shadow in an accent color. Give every game a title screen (headline,\n  a one-line how-to, a blinking \"PRESS SPACE\") and an end screen\n  (headline, score, retry prompt).\n* Blinking text: a create event `wait 40`; alarm 0 → `hide`, `wait 20`\n  on timer 1; alarm 1 → `show`, `wait 40`.\n* Buttons in apps: a text object over a pill (label padded with a\n  space on each side), with a `mask` covering the pill and a click\n  event.\n* HUD: an icon sprite plus a number (`X 3`), or a row of hearts. Hearts\n  are a template with a var `n` (1, 2, 3) that hides on the `hud`\n  message when `lives < my n`. Mark HUD objects `hud` when the scene\n  scrolls."
+    },
+    {
+      "id": "craft.md#5-structure-same-as-engine-md-",
+      "source": "craft.md",
+      "title": "5. Structure (same as engine.md)",
+      "text": "## 5. Structure (same as engine.md)\nPages and levels are scenes; links and buttons are click events that\n`goto`; rules and data live in a script that blocks `call`. The script\ncan draw its own layer in `custom_draw`, guarded by `scene != SC_X`."
+    },
+    {
+      "id": "craft.md#checklist-before-saying-done",
+      "source": "craft.md",
+      "title": "Checklist before saying done",
+      "text": "## Checklist before saying done\n- [ ] Size and theme chosen on purpose.\n- [ ] Every sprite is shaded and outlined; at least one animation.\n- [ ] Every scene has a tile backdrop; title and end screens exist.\n- [ ] Headline type on the title; HUD with icons.\n- [ ] `validate` and `check_build` are clean (no warnings either)."
+    },
     {
       "id": "engine.md#top",
       "source": "engine.md",
@@ -114,7 +156,19 @@
       "id": "examples.md#example-sprout-run-platformer-no-scripts-",
       "source": "examples.md",
       "title": "Example: Sprout Run (platformer, no scripts)",
-      "text": "## Example: Sprout Run (platformer, no scripts)\n* Scenes `title`, `level`, `win`, `lose`. `level` has a 160×18 tile\n  layer (sheet `tiles`: grass, dirt, brick, stone are solid; bush,\n  flower and fence are decor), `camera: follow hero`, and a HUD text\n  object `hud`.\n* Templates: `hero` (platformer, speed 2, jump 5, mask 2,3,12×13,\n  blend 5), `beetle` (walker, speed 1), `coin`, `flag`.\n* Hero events: collide coin → destroy other, coins +1, play coin, send\n  `score` (the HUD redraws `COINS ` + var coins on that message).\n  Collide beetle → if `my y + 12 < other y` (falling onto it):\n  destroy other, jump 3, play stomp; else play hurt and goto lose.\n  Collide flag → goto win. Step: if y > 144 (fell in a pit) → lose.\n* Level scene create: set coins 0."
+      "text": "## Example: Sprout Run (platformer, no scripts)\n* 256×192. Scenes `title`, `level`, `win`, `lose`, each with a tile\n  layer. The level layer is 160×24 from sheet `tiles` (16 cells:\n  grass, grass edges at pits, dirt, deep dirt, brick, stone, ledge are\n  solid; bush, flower, fence, cloud pieces and dithered hills are\n  decor). The other scenes share a one-screen backdrop. The level has\n  `camera: follow hero`.\n* Art is drawn from shapes (see craft.md): a shaded, outlined hero\n  with eyes and leaves, a beetle with a shell shine, a waving flag, and\n  a 4-frame `spin` animation on the coin template.\n* Templates: `hero` (platformer, speed 2, jump 5, mask 2,4,12×12,\n  blend 5), `beetle` (walker, speed 1), `coin` (anim spin), `flag`.\n* Hero events:\n  * collide coin → destroy other, coins +1, play coin, send `score`\n    (the HUD text redraws `X ` + var coins).\n  * collide beetle → if `my y + 12 < other y` (falling onto it):\n    destroy other, jump 3, play stomp; else play hurt and goto lose.\n  * collide flag → goto win.\n  * step: if y > 192 (fell in a pit) → lose.\n* HUD: a coin sprite with the spin anim plus that text, both `hud`.\n  Title and end screens: `headline` type, a walking beetle,"
+    },
+    {
+      "id": "examples.md#example-star-catcher-arcade-no-scripts-",
+      "source": "examples.md",
+      "title": "Example: Star Catcher (arcade, no scripts)",
+      "text": "## Example: Star Catcher (arcade, no scripts)\n* 256×192 night city: one tile layer shared by all scenes (starfield,\n  horizon glow, buildings with roofs, lit or dark windows and antennas,\n  dithered ground). A cratered moon sprite with a dithered terminator.\n* Templates:\n  * `basket` (player; mask covers only the rim; held left/right\n    moves it).\n  * `star` (anim twinkle; picks a random speed on create).\n  * `bomb` (anim fizz).\n  * `life`: a heart with var `n` that hides on `hud` when\n    `lives < my n`; three instances with n = 1, 2, 3.\n* Play scene: create resets score/lives, sends `hud`, waits 30;\n  alarm spawns a bomb 1 time in 5, else a star, at x = random 224 + 8,\n  then waits 30."
+    },
+    {
+      "id": "examples.md#example-life-lab-a-website-blocks-one-script-",
+      "source": "examples.md",
+      "title": "Example: Life Lab (a website, blocks + one script)",
+      "text": "## Example: Life Lab (a website, blocks + one script)\n* 320×240, theme paper/ink/teal/coral. Scenes `home`, `lab`, `about`\n  are pages; every page repeats the nav nodes (logo, site name, link\n  text objects whose click event is `goto <page>`; the current link\n  gets an underline instead of an event).\n* Layout is a **tile layer** per page (sheet `layout`, 16 1×1 cells:\n  nav fill, rounded card edges, dish dots, 6 pill-button pieces) with\n  no solid cells, so it costs no object slots.\n* Buttons are text objects over a pill (label padded with spaces, a\n  `mask` that covers the pill) with a click event.\n* `life.ux` keeps the 48×32 grid in `buffer cells[1536]: u8` and\n  exports `life_step`, `life_random`, `life_clear`, `life_paint(mx,\n  my)`, `life_gen() -> u16`, `life_pop() -> u16`. It draws the cells in\n  `custom_draw` (guarded by `scene != SC_LAB`) after the engine pass.\n* Lab scene events: create → `life_random`, running = 1, wait 4;\n  alarm → if running, `life_step`; send `stats`; wait 4; step → if\n  mouse down, `life_paint(mouse x, mouse y)`. GEN/POP text objects\n  redraw on `stats` with a function value."
     },
     {
       "id": "examples.md#small-patterns",
@@ -138,7 +192,7 @@
       "id": "tools.md#building",
       "source": "tools.md",
       "title": "Building",
-      "text": "## Building\n* Art: `create_sprite` (pixels 0–3), `set_sheet`, `set_look`,\n  `add_anim_frame` / `set_anim`, `set_theme` (the 4 colors).\n* Things: `create_object_def` (template), `add_template_var`,\n  `place_instance`, `put_on_scene` (one-off object), `extract_object`,\n  `set_label` (text objects), `move_object`, `rename_object`,\n  `delete_node`, `reorder_nodes`, `move_node`, `nest_scene`.\n* Scenes: `create_scene`, `add_transition` (click/key → goto).\n* Behaviour: `add_event {def|object|scene, trigger, …}` returns the\n  event id; `add_action {…, event, action: JSON}` appends an action.\n  Nested bodies go inline (`then`, `else`, `body`) or via `path`\n  (`\"2.then\"`). Use `delete_event`, `delete_action` and\n  `preview_event` to iterate.\n* State: `add_variable` / `set_variable` / `rename_variable` /\n  `delete_variable` (game vars), `add_template_var` (per instance).\n* Sound: `create_sound` + `set_sound_voice`, `create_song` +\n  `set_song_note` / `set_song_vol`; `play` / `song` actions use them.\n* Code: `write_script {path, code}` (whole module, created or\n  replaced), `delete_script`, `set_custom_code` (hooks),\n  `set_loop` (engine | script)."
+      "text": "## Building\n* Art: `draw_sprite` (shapes, dithering, outline: the way to make\n  detailed art, see craft.md), `create_tile_sheet` (16 8×8 cells for\n  `set_tilemap`), `headline` (2× title type), `create_sprite` (raw\n  pixels 0–3, for tiny things), `set_sheet`, `set_look`,\n  `add_anim_frame` / `set_anim`, `set_theme` (the 4 colors).\n* Things: `create_object_def` (template), `add_template_var`,\n  `place_instance`, `put_on_scene` (one-off object), `extract_object`,\n  `set_label` (text objects), `move_object`, `rename_object`,\n  `delete_node`, `reorder_nodes`, `move_node`, `nest_scene`.\n* Scenes: `create_scene`, `add_transition` (click/key → goto).\n* Behaviour: `add_event {def|object|scene, trigger, …}` returns the\n  event id; `add_action {…, event, action: JSON}` appends an action.\n  Nested bodies go inline (`then`, `else`, `body`) or via `path`\n  (`\"2.then\"`). Use `delete_event`, `delete_action` and\n  `preview_event` to iterate.\n* State: `add_variable` / `set_variable` / `rename_variable` /\n  `delete_variable` (game vars), `add_template_var` (per instance).\n* Sound: `create_sound` + `set_sound_voice`, `create_song` +\n  `set_song_note` / `set_song_vol`; `play` / `song` actions use them."
     },
     {
       "id": "tools.md#checking-always-before-saying-done-",
