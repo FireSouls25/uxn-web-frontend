@@ -10,12 +10,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # The corpus lives in the backend repo (backend/rag): check it out
+      # beside the sources so sync:rag can compare against it.
+      - uses: actions/checkout@v5
+        with:
+          repository: FireSouls25/uxn-web-backend
+          path: _backend
+          sparse-checkout: rag
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
       - run: npm ci
       - name: RAG corpus in sync with backend
+        env:
+          RAG_SRC: _backend/rag
         run: |
           npm run sync:rag
           git diff --exit-code -- src/lib/agent/corpus/*.md || (echo "corpus stale: run npm run sync:rag and commit" >&2; exit 1)
