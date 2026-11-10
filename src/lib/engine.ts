@@ -1078,7 +1078,9 @@ export function emitEngineProject(
       const n = spr ? cellCount(spr) : 1;
       for (let c = 0; c < n; c++) sol.push(tm.solid.includes(c) ? 1 : 0);
     }
-    push(`data e_tmap = [${map.join(", ")}];`, `data e_tsol = [${sol.join(", ")}];`);
+    push(`data e_tmap = [${map.join(", ")}];`);
+    // Solid flags only matter to movement; a pure layout layer has none.
+    if (F.phys) push(`data e_tsol = [${sol.join(", ")}];`);
   }
   push(``);
 
