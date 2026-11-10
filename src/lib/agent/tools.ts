@@ -74,6 +74,7 @@ import { STDLIB, STDLIB_NAMES, moduleExports, moduleSummary } from "../stdlib";
 import type { Block, BlockPath, ButtonName, EventTrigger, ObjectKind } from "../project";
 import type { EventOwner } from "../store";
 import { compileProject } from "../export";
+import { Canvas, bigText, tileSheet } from "../examples/pixel";
 import { tilesFromRows, type Movement, type ObjectEvent, type Project } from "../project";
 
 export interface ToolResult {
@@ -271,6 +272,113 @@ export const TOOLS: ToolDef[] = [
         setSpritePixels(id, (args["pixels"] as unknown[]).map((v) => num(v)));
       }
       return { ok: true, message: `sprite ${id}`, data: { id } };
+    },
+  },
+  {
+    name: "draw_sprite",
+    description:
+      "Draw detailed pixel art with shapes instead of raw pixels, and save it as a sprite (created, or replaced when {name} is an existing sprite of the same size). Canvas is w*8 × h*8 px (1-4 tiles each way), colors 0-3, 0 = transparent under blends 0/5/10/15. ops run in order; each is an object with op and: rect {x,y,w,h,c} · ellipse {cx,cy,rx,ry,c} · disc {cx,cy,r,c} · line {x0,y0,x1,y1,c} · pixel {x,y,c} · rows {x,y,rows:[\"0120\",…]} (stamp, 0 skipped) · dither {from,to,x?,y?,w?,h?} (checkerboard recolor = shading) · recolor {from,to,x?,y?,w?,h?} · outline {c} (traces the outside of every shape: always do this last-but-details). Centers use pixel centers, so a 16px-wide circle is cx 8 r 7.5. Good recipe: fill shapes, dither a shadow side, add 1-2 highlight pixels, outline in ink, then eyes/details.",
+    params: {
+      name: { type: "string", required: true, description: "Sprite id (existing to redraw, or new)" },
+      w: { type: "number", description: "Tiles wide 1-4, default 2" },
+      h: { type: "number", description: "Tiles tall 1-4, default 2" },
+      ops: { type: "array", required: true, description: "Drawing operations, see description" },
+    },
+    run: (args) => {
+      const w = Math.min(4, Math.max(1, num(args["w"], 2)));
+      const h = Math.min(4, Math.max(1, num(args["h"], 2)));
+      const ops = Array.isArray(args["ops"]) ? (args["ops"] as Array<Record<string, unknown>>) : [];
+      const c = new Canvas(w * 8, h * 8);
+      const n = (o: Record<string, unknown>, k: string, d = 0) => num(o[k], d);
+      const col = (o: Record<string, unknown>, k = "c") => Math.min(3, Math.max(0, Math.round(n(o, k))));
+      const box = (o: Record<string, unknown>) => {
+        const x = n(o, "x", 0), y = n(o, "y", 0), bw = n(o, "w", w * 8), bh = n(o, "h", h * 8);
+        return (px: number, py: number) => px >= x && py >= y && px < x + bw && py < y + bh;
+      };
+      for (const [i, o] of ops.entries()) {
+        switch (o?.["op"]) {
+          case "rect": c.rect(n(o, "x"), n(o, "y"), n(o, "w", 1), n(o, "h", 1), col(o)); break;
+          case "ellipse": c.ellipse(n(o, "cx"), n(o, "cy"), n(o, "rx", 1), n(o, "ry", 1), col(o)); break;
+          case "disc": c.disc(n(o, "cx"), n(o, "cy"), n(o, "r", 1), col(o)); break;
+          case "line": c.line(n(o, "x0"), n(o, "y0"), n(o, "x1"), n(o, "y1"), col(o)); break;
+          case "pixel": c.set(n(o, "x"), n(o, "y"), col(o)); break;
+          case "rows": c.stamp(n(o, "x"), n(o, "y"), Array.isArray(o["rows"]) ? (o["rows"] as unknown[]).map(String) : []); break;
+          case "dither": c.dither(col(o, "from"), col(o, "to"), box(o)); break;
+          case "recolor": c.paint(col(o, "from"), col(o, "to"), box(o)); break;
+          case "outline": c.outline(col(o)); break;
+          default: return { ok: false, message: `op ${i}: unknown op '${String(o?.["op"])}'` };
+        }
+      }
+      const name = str(args["name"], "art");
+      const existing = projectStore.get().sprites.find((x) => x.id === name);
+      const same = existing && (existing.w ?? 1) === w && (existing.h ?? 1) === h;
+      const id = same ? name : addSprite(name, w, h);
+      setSpritePixels(id, c.sprite(id).pixels);
+      return { ok: true, message: `${same ? "redrew" : "drew"} ${id} (${w * 8}×${h * 8}, ${ops.length} ops)`, data: { id } };
+    },
+  },
+  {
+    name: "create_tile_sheet",
+    description:
+      "Make a tile sheet for set_tilemap: up to 16 cells of 8×8, each 8 strings of 8 digits 0-3 (rows top to bottom). Cell i is legend value i in set_tilemap. Use it for ground, walls, page layout (nav bars, card borders, pill buttons), skylines and scenery: tiles cost no object slots.",
+    params: {
+      name: { type: "string", required: true, description: "Sheet sprite id" },
+      cells: { type: "array", required: true, description: "Array of cells; each cell is an array of 8 row strings like \"01111110\"" },
+    },
+    run: (args) => {
+      const cells = Array.isArray(args["cells"]) ? (args["cells"] as unknown[]) : [];
+      if (cells.length === 0 || cells.length > 16) return { ok: false, message: "1–16 cells" };
+      const clean: string[][] = [];
+      for (const [i, cell] of cells.entries()) {
+        const rows = Array.isArray(cell) ? cell.map(String) : [];
+        if (rows.length !== 8 || rows.some((r) => !/^[0-3]{8}$/.test(r))) return { ok: false, message: `cell ${i}: needs 8 rows of 8 digits 0-3` };
+        clean.push(rows);
+      }
+      const sheet = tileSheet("sheet", clean);
+      const id = addSprite(str(args["name"], "tiles"), sheet.w, sheet.h);
+      setSpritePixels(id, sheet.pixels);
+      const err = setSpriteCell(id, { w: 1, h: 1 });
+      if (err) return { ok: false, message: err };
+      return { ok: true, message: `tile sheet ${id}: ${clean.length} cells`, data: { id } };
+    },
+  },
+  {
+    name: "headline",
+    description:
+      "Big title type: renders {text} with the built-in font at 2× (16px letters) in {ink} with a 2px drop {shadow}, as 32×24 sprites of two letters each, and (with {scene}) places them in a row at {x},{y} with blend 5. Use it for title screens, page headers and game-over screens; regular text objects stay 8px.",
+    params: {
+      name: { type: "string", required: true, description: "Prefix for the sprite ids" },
+      text: { type: "string", required: true, description: "Up to 16 printable ASCII characters" },
+      ink: { type: "number", description: "Letter color 1-3, default 1" },
+      shadow: { type: "number", description: "Shadow color 0-3, default 3 (0 = none)" },
+      scene: { type: "string", description: "Scene to place it on (omit to only create the sprites)" },
+      x: { type: "number", description: "Left edge, default 8" },
+      y: { type: "number", description: "Top edge, default 8" },
+    },
+    run: (args) => {
+      const text = str(args["text"]).toUpperCase();
+      if (!text || text.length > 16 || /[^\x20-\x7e]/.test(text)) return { ok: false, message: "text must be 1–16 printable ASCII characters" };
+      const prefix = str(args["name"], "title").toLowerCase().replace(/[^a-z0-9_]/g, "_");
+      const parts = bigText(prefix, text, num(args["ink"], 1) & 3, num(args["shadow"], 3) & 3);
+      const ids = parts.map((sp) => {
+        const id = addSprite(sp.id, 4, 3);
+        setSpritePixels(id, sp.pixels);
+        return id;
+      });
+      const scene = str(args["scene"]);
+      if (scene) {
+        const p = projectStore.get();
+        if (!p.scenes.some((s) => s.id === scene)) return { ok: false, message: `unknown scene '${scene}'` };
+        const prev = sceneIdStore.get();
+        sceneIdStore.set(scene);
+        ids.forEach((id, i) => {
+          const node = addObject("static", `${prefix}${i}`, id);
+          setObjectPos(node, num(args["x"], 8) + i * 32, num(args["y"], 8));
+          setLeafLook(node, { blend: 5 });
+        });
+        sceneIdStore.set(prev);
+      }
+      return { ok: true, message: `headline ${ids.length} sprites${scene ? ` on ${scene}` : ""}`, data: { ids } };
     },
   },
   {

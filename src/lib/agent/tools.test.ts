@@ -250,4 +250,40 @@ describe("agent tools", () => {
     expect(main).toContain("e_camera();");
     expect(runTool("set_tilemap", { scene: "play", sprite: "ground", rows: "GG", legend: '{"G":5}' }).ok).toBe(false);
   });
+
+  it("draws art with shapes, tile sheets and headline type", () => {
+    const r = runTool("draw_sprite", {
+      name: "orb",
+      w: 2,
+      h: 2,
+      ops: [
+        { op: "disc", cx: 8, cy: 8, r: 6, c: 3 },
+        { op: "dither", from: 3, to: 2, x: 8, y: 8 },
+        { op: "pixel", x: 5, y: 5, c: 0 },
+        { op: "outline", c: 1 },
+      ],
+    });
+    expect(r).toMatchObject({ ok: true, data: { id: "orb" } });
+    const orb = projectStore.get().sprites.find((x) => x.id === "orb")!;
+    const at = (x: number, y: number) => orb.pixels[(Math.floor(x / 8) + Math.floor(y / 8) * 2) * 64 + (y % 8) * 8 + (x % 8)];
+    expect(at(8, 8)).toBe(2); // dithered shade
+    expect(at(5, 5)).toBe(0); // the shine survives the outline
+    expect(at(8, 1)).toBe(1); // ink rim
+    // Redrawing the same size keeps the id.
+    expect(runTool("draw_sprite", { name: "orb", w: 2, h: 2, ops: [{ op: "rect", x: 0, y: 0, w: 4, h: 4, c: 1 }] }).data).toMatchObject({ id: "orb" });
+    expect(runTool("draw_sprite", { name: "bad", ops: [{ op: "spray" }] }).ok).toBe(false);
+
+    const cell = ["11111111", "10000001", "10000001", "10000001", "10000001", "10000001", "10000001", "11111111"];
+    expect(runTool("create_tile_sheet", { name: "ui", cells: [cell, cell.map((x) => x.replace(/0/g, "2"))] })).toMatchObject({ ok: true });
+    expect(projectStore.get().sprites.find((x) => x.id === "ui")?.cell).toEqual({ w: 1, h: 1 });
+    expect(runTool("create_tile_sheet", { name: "ui2", cells: [["0123"]] }).ok).toBe(false);
+
+    const h = runTool("headline", { name: "logo", text: "Hi there", scene: "title", x: 0, y: 20 });
+    expect(h).toMatchObject({ ok: true });
+    expect((h.data as { ids: string[] }).ids).toHaveLength(4);
+    const nodes = projectStore.get().scenes.find((x) => x.id === "title")!.nodes.filter((n) => n.id.startsWith("logo"));
+    expect(nodes.map((n) => n.x)).toEqual([0, 32, 64, 96]);
+    expect(nodes.every((n) => n.blend === 5)).toBe(true);
+    expect(runTool("validate", {})).toMatchObject({ ok: true });
+  });
 });
