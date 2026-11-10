@@ -71,10 +71,22 @@ export class Canvas {
   /** Trace an outline of color `c` around every non-zero shape (on the
       empty pixels next to it, 4-neighbour). */
   outline(c: number): this {
+    // Only the outside counts: empty pixels reachable from the border.
+    // Holes inside a shape (shines, eye glints) stay as they are.
+    const out = this.px.map((r) => r.map(() => false));
+    const stack: Array<[number, number]> = [];
+    for (let x = 0; x < this.w; x++) stack.push([x, 0], [x, this.h - 1]);
+    for (let y = 0; y < this.h; y++) stack.push([0, y], [this.w - 1, y]);
+    while (stack.length) {
+      const [x, y] = stack.pop()!;
+      if (x < 0 || y < 0 || x >= this.w || y >= this.h || out[y][x] || this.px[y][x] !== 0) continue;
+      out[y][x] = true;
+      stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+    }
     const hit: Array<[number, number]> = [];
     for (let y = 0; y < this.h; y++)
       for (let x = 0; x < this.w; x++)
-        if (this.px[y][x] === 0 && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => { const v = this.get(x + dx, y + dy); return v !== 0 && v !== c; }))
+        if (out[y][x] && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => { const v = this.get(x + dx, y + dy); return v !== 0 && v !== c; }))
           hit.push([x, y]);
     for (const [x, y] of hit) this.px[y][x] = c;
     return this;
