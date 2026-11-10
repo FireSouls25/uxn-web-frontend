@@ -1,22 +1,26 @@
-/* Uxn 4-color palette, computed exactly like the emulator
-   (`uxn2/src/uxn2.c:198-209 system_deo_colorize`): each System r/g/b
-   port holds four 4-bit nibbles; color i takes nibble (i==0||i==2 ? 4:0)
-   of byte (i<2 ? low : high); 4-bit channels expand by duplication
-   (0xB → 0xBB). Sprite pixels are 2-bit indices into these four.
-   With blit mode 129 (2bpp, blend 1) the mapping is identity, so
-   index 0 paints palette 0 — opaque background, not transparency. */
+/* Uxn 4-color palette, decoded exactly like both emulators: each
+   System r/g/b short holds four 4-bit channels, color 0 in the top
+   nibble (uxn2.c system_deo_colorize reads dev[0x8] — the HIGH byte,
+   ports are big-endian — high nibble first; uxn5 screen.js shifts
+   12, 8, 4, 0). 4-bit channels expand by duplication (0xB → 0xBB).
+   Sprite pixels are 2-bit indices into these four. With blit mode
+   129 (2bpp, blend 1) the mapping is identity, so index 0 paints
+   palette 0 — opaque background, not transparency.
+   (This used to read the low byte first, which rotated every editor
+   color against the real game: c0 showed what the VM paints as c2.) */
 
-// Demo theme, same constants the emitter writes (System.r/g/b).
-export const THEME_R = 45163; // 0xB06B
-export const THEME_G = 32876; // 0x806C
-export const THEME_B = 16508; // 0x407C
+// Demo theme, same constants the emitter writes (System.r/g/b):
+// grey-blue #667, pale #BCC, brown #B84, black #000 — the colors the
+// editor always showed for theme-less projects. (Before the decode
+// fix these were 0xB06B/0x806C/0x407C, which the VM actually painted
+// brown/black/grey/pale; re-encoded so game and editor agree on the
+// look people designed against.)
+export const THEME_R = 0x6bb0;
+export const THEME_G = 0x6c80;
+export const THEME_B = 0x7c40;
 
 function nibble(word: number, i: number): number {
-  const low = word & 0xff;
-  const high = (word >> 8) & 0xff;
-  const byte = i < 2 ? low : high;
-  const shift = i === 0 || i === 2 ? 4 : 0;
-  return (byte >> shift) & 0xf;
+  return (word >> (12 - 4 * i)) & 0xf;
 }
 
 /** Palette index 0–3 → "#rrggbb". */
@@ -55,7 +59,7 @@ export function setPaletteIndex(theme: Theme | undefined, index: number, hex: st
   if (!m) return t;
   const rgb = parseInt(m[1], 16);
   const nibbles = [(rgb >> 20) & 0xf, (rgb >> 12) & 0xf, (rgb >> 4) & 0xf];
-  const shift = (index === 0 || index === 2 ? 4 : 0) + (index < 2 ? 0 : 8);
+  const shift = 12 - 4 * index;
   const put = (word: number, n: number) => (word & (~(0xf << shift) & 0xffff)) | ((n & 0xf) << shift);
   return { r: put(t.r, nibbles[0]), g: put(t.g, nibbles[1]), b: put(t.b, nibbles[2]) };
 }
