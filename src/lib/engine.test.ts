@@ -7,6 +7,7 @@ import { SAMPLE_PROJECT, buildSceneMap, emitProject, flattenScene, migrateProjec
 import { allEvents, eachBlock, previewEvent, renameRef, sceneFlow, templatesOf, usesRef } from "./engine";
 import { platformerProject } from "./examples/platformer";
 import { catcherProject } from "./examples/catcher";
+import { lifeLabProject } from "./examples/lifelab";
 
 const ROOT = join(__dirname, "../../../uxn-dsl");
 const ETAL = process.env.ETAL_BIN ?? join(ROOT, "build/linux-x86/etal");
@@ -452,5 +453,35 @@ describe("star catcher example", () => {
     const s = run(b.rom, [["key", 32], ["frames", 5], ["snap", "start"], ["frames", 90], ["snap", "later"]]);
     // More yellow (stars are color 2) once the first drops fall.
     expect(count(s.later, "2")).toBeGreaterThan(count(s.start, "2"));
+  });
+});
+
+describe("life lab example", () => {
+  it.skipIf(!haveVm)("links pages, runs Life in the dish and stops on RUN/STOP", () => {
+    const p = lifeLabProject();
+    expect(validateProject(p)).toEqual([]);
+    const b = build(p)!;
+    expect(b.stderr).not.toMatch(/warning/i);
+    // Dish interior: x 16..208, y 56..184. Live cells are coral (3).
+    const dish = (snap: string[]) => snap.slice(56, 184).map((r) => r.slice(16, 208)).join("");
+    const s = run(b.rom, [
+      ["frames", 3],
+      ["snap", "home"],
+      ["click", 244, 14], // LAB link
+      ["frames", 20],
+      ["snap", "a"],
+      ["frames", 12],
+      ["snap", "b"],
+      ["click", 240, 70], // STOP
+      ["frames", 4],
+      ["snap", "c"],
+      ["frames", 16],
+      ["snap", "d"],
+    ]);
+    expect(count(s.home.slice(56, 184), "3")).toBeLessThan(count(s.a.slice(56, 184), "3"));
+    expect(count([dish(s.a)], "3")).toBeGreaterThan(50);
+    // Running: the soup changes; stopped: it holds still.
+    expect(dish(s.b)).not.toBe(dish(s.a));
+    expect(dish(s.d)).toBe(dish(s.c));
   });
 });

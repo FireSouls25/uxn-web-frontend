@@ -1,0 +1,127 @@
+( life.ux - Conway's Game of Life for the Life Lab page.
+
+  A 48x32 grid on a torus (edges wrap), drawn as 4px cells inside the
+  lab's dish panel. Blocks drive it: the scene timer calls life_step
+  while running, the buttons call life_random / life_clear, dragging
+  calls life_paint, and the stats text reads life_gen / life_pop.
+  State lives in RAM buffers so the zero page stays free. )
+
+LW :: 48;
+LH :: 32;
+LCOUNT :: 1536;
+LX :: 16;
+LY :: 56;
+
+buffer cells[1536]: u8;
+buffer nxt[1536]: u8;
+( generation, population )
+buffer lstat[2]: u16;
+buffer lrng[1]: u16;
+
+( One live cell: a 3x3 block, the 4th row/column left as the gap. )
+data lcell = [ 0xe0, 0xe0, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00 ];
+
+( xorshift16 )
+life_rand :: fn() -> u16 {
+    s: u16 = lrng[0];
+    if s == 0 { s = 1; }
+    s = s ^ (s << 7);
+    s = s ^ (s >> 9);
+    s = s ^ (s << 8);
+    lrng[0] = s;
+    return s;
+}
+
+life_gen :: fn() -> u16 {
+    return lstat[0];
+}
+
+life_pop :: fn() -> u16 {
+    return lstat[1];
+}
+
+life_clear :: fn() {
+    for i in 0..LCOUNT {
+        cells[i] = 0;
+    }
+    lstat[0] = 0;
+    lstat[1] = 0;
+}
+
+( A random soup, about one cell in four alive. The mouse position
+  stirs the seed so every press gives a new soup. )
+life_random :: fn() {
+    lrng[0] = lrng[0] + Mouse.x * 251 + Mouse.y * 13 + 4093;
+    alive: u16 = 0;
+    for i in 0..LCOUNT {
+        cells[i] = 0;
+        if (life_rand() & 7) < 2 {
+            cells[i] = 1;
+            alive = alive + 1;
+        }
+    }
+    lstat[0] = 0;
+    lstat[1] = alive;
+}
+
+( Mouse held over the dish: bring that cell to life. )
+life_paint :: fn(mx: u16, my: u16) {
+    if mx < LX || my < LY { return; }
+    gx: u16 = (mx - LX) / 4;
+    gy: u16 = (my - LY) / 4;
+    if gx >= LW || gy >= LH { return; }
+    k: u16 = gy * LW + gx;
+    if cells[k] == 0 {
+        cells[k] = 1;
+        lstat[1] = lstat[1] + 1;
+    }
+}
+
+( One generation: B3/S23. Counts go to nxt, then copy back. )
+life_step :: fn() {
+    pop: u16 = 0;
+    up: u16 = 0;
+    mid: u16 = 0;
+    dn: u16 = 0;
+    xl: u16 = 0;
+    xr: u16 = 0;
+    nb: u8 = 0;
+    alive: u8 = 0;
+    for y in 0..LH {
+        mid = y * LW;
+        if y == 0 { up = (LH - 1) * LW; } else { up = mid - LW; }
+        if y == LH - 1 { dn = 0; } else { dn = mid + LW; }
+        for x in 0..LW {
+            if x == 0 { xl = LW - 1; } else { xl = x - 1; }
+            if x == LW - 1 { xr = 0; } else { xr = x + 1; }
+            nb = cells[up + xl] + cells[up + x] + cells[up + xr] + cells[mid + xl] + cells[mid + xr] + cells[dn + xl] + cells[dn + x] + cells[dn + xr];
+            alive = 0;
+            if nb == 3 { alive = 1; }
+            if nb == 2 { alive = cells[mid + x]; }
+            nxt[mid + x] = alive;
+            pop = pop + alive;
+        }
+    }
+    for i in 0..LCOUNT {
+        cells[i] = nxt[i];
+    }
+    lstat[0] = lstat[0] + 1;
+    lstat[1] = pop;
+}
+
+( Drawn after the engine's own pass, on the lab page only. )
+custom_draw :: fn() {
+    if scene != SC_LAB { return; }
+    Screen.addr = &lcell;
+    k: u16 = 0;
+    for y in 0..LH {
+        for x in 0..LW {
+            if cells[k] != 0 {
+                Screen.x = LX + x * 4;
+                Screen.y = LY + y * 4;
+                Screen.sprite = 15;
+            }
+            k = k + 1;
+        }
+    }
+}

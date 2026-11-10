@@ -14,10 +14,12 @@ import {
 import { chessProject } from "../lib/examples";
 import { platformerProject } from "../lib/examples/platformer";
 import { catcherProject } from "../lib/examples/catcher";
+import { lifeLabProject } from "../lib/examples/lifelab";
 import type { Project } from "../lib/project";
 
 /** Read-only examples, always offered (Duplicate to edit). */
 const EXAMPLES: Array<{ make: () => Project; desc: string }> = [
+  { make: lifeLabProject, desc: "proj.lifelab_desc" },
   { make: platformerProject, desc: "proj.platformer_desc" },
   { make: catcherProject, desc: "proj.catcher_desc" },
   { make: chessProject, desc: "proj.chess_desc" },
