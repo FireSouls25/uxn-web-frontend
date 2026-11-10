@@ -14,7 +14,7 @@ import {
 import { themeColors, setPaletteIndex } from "../lib/palette";
 import { flattenScene, spriteTiles } from "../lib/project";
 import { t, useLang } from "../lib/i18n";
-import { paintColorStore, paintToolStore, projectStore, setSpritePixels, setSpriteSize, setTheme, spriteSelStore } from "../lib/store";
+import { paintColorStore, paintToolStore, projectStore, setSpriteCell, setSpritePixels, setSpriteSize, setTheme, spriteSelStore } from "../lib/store";
 
 /* Right column of the sprites view: palette, brush and transforms
    for the selected sprite. Nothing about scenes or objects here. */
@@ -213,6 +213,35 @@ export default function SpriteTools() {
           );
         })()}
       </div>
+      {sprite && (() => {
+        const [w, h] = spriteTiles(sprite);
+        // Every cell size that tiles the sprite evenly (whole = off).
+        const opts: Array<[number, number]> = [];
+        for (let ch = 1; ch <= h; ch++) for (let cw = 1; cw <= w; cw++) if (w % cw === 0 && h % ch === 0) opts.push([cw, ch]);
+        if (opts.length < 2) return null;
+        const cur = sprite.cell ? `${sprite.cell.w}x${sprite.cell.h}` : `${w}x${h}`;
+        return (
+          <label className="mt-3 block rounded-xl border border-surface0 p-2" title={t(lang, "sprite.sheet_hint")}>
+            <span className="font-mono text-[11px] text-subtext0">{t(lang, "sprite.sheet")}</span>
+            <select
+              value={cur}
+              disabled={!!project.locked}
+              onChange={(e) => {
+                const [cw, ch] = e.target.value.split("x").map(Number);
+                setSpriteCell(sprite.id, cw === w && ch === h ? null : { w: cw, h: ch });
+              }}
+              className="mt-1.5 w-full rounded-md border border-surface1 bg-base px-2 py-1 font-mono text-xs outline-none focus:border-mauve"
+            >
+              {opts.map(([cw, ch]) => (
+                <option key={`${cw}x${ch}`} value={`${cw}x${ch}`}>
+                  {cw === w && ch === h ? t(lang, "sprite.sheet_off") : `${cw}×${ch} · ${(w / cw) * (h / ch)}`}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[10px] leading-snug text-overlay0">{t(lang, "sprite.sheet_hint")}</p>
+          </label>
+        );
+      })()}
       <p className="mt-2 font-mono text-[11px] text-subtext0">
         {t(lang, "sprite.used_by")}: {usedByAll.length > 0 ? usedByAll.join(", ") : "—"}
       </p>
