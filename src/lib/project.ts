@@ -11,6 +11,8 @@
 
 import { pixelsToPlanar, monoToPixels, THEME_R, THEME_G, THEME_B } from "./palette";
 import { glyphRows } from "./font";
+import { STDLIB, importsOf, moduleExports, stdlibClosure } from "./stdlib";
+import { emitEngineProject, sceneFlow, validateBehaviour } from "./engine";
 
 /** One sprite → ROM blob: each 8×8 tile becomes 16 planar bytes
     (channel one, then two), tiles concatenated in row-major order so
@@ -38,6 +40,94 @@ export interface Sprite {
   /** 64*w*h color indices 0–3, row-major; tile (tx + ty*w) lives at
       offset (tx + ty*w)*64, matching blob order for auto-addr draws. */
   pixels: number[];
+  /** Sprite sheet: cell size in tiles (must divide w/h). A node shows
+      one cell (SceneNode.cell, row-major over the grid) and measures
+      as one cell; code still has the whole sheet at &spr_<id>, cell
+      tiles at cellTileOffset(). Absent = the sprite is one cell. */
+  cell?: { w: number; h: number };
+}
+
+/** Sheet cell size in tiles (the whole sprite when not a sheet). */
+export function cellTiles(s: Sprite): [number, number] {
+  return s.cell ? [s.cell.w, s.cell.h] : spriteTiles(s);
+}
+
+/** Number of cells in a sheet (1 when not a sheet). */
+export function cellCount(s: Sprite): number {
+  const [w, h] = spriteTiles(s);
+  const [cw, ch] = cellTiles(s);
+  return Math.max(1, Math.floor(w / cw) * Math.floor(h / ch));
+}
+
+/** Blob byte offset of tile (tx, ty) inside cell `cell`: cells run
+    row-major over the sheet grid, tiles stay row-major over the whole
+    sheet (16 bytes each), so a cell's rows are a sheet-width apart. */
+export function cellTileOffset(s: Sprite, cell: number, tx = 0, ty = 0): number {
+  const [w] = spriteTiles(s);
+  const [cw, ch] = cellTiles(s);
+  const perRow = Math.max(1, Math.floor(w / cw));
+  const cx = cell % perRow;
+  const cy = Math.floor(cell / perRow);
+  return ((cy * ch + ty) * w + cx * cw + tx) * 16;
+}
+
+/** Varvara blending table (screen.c): pixel value 0–3 × blend 0–15
+    → palette color. Blends 0, 5, 10 and 15 leave pixel 0 transparent
+    (`opaque = blend % 5`); every other blend paints it. */
+export const BLENDING: number[][] = [
+  [0, 0, 0, 0, 1, 0, 1, 1, 2, 2, 0, 2, 3, 3, 3, 0],
+  [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
+  [1, 2, 3, 1, 1, 2, 3, 1, 1, 2, 3, 1, 1, 2, 3, 1],
+  [2, 3, 1, 2, 2, 3, 1, 2, 2, 3, 1, 2, 2, 3, 1, 2],
+];
+
+/** Palette color a pixel paints under a blend, or null (transparent). */
+export function blendColor(pixel: number, blend: number): number | null {
+  const b = blend & 15;
+  if (pixel === 0 && b % 5 === 0) return null;
+  return BLENDING[pixel & 3][b];
+}
+
+/** How a node is drawn: Varvara's Screen.sprite byte bits. */
+export interface DrawLook {
+  flipX?: boolean;
+  flipY?: boolean;
+  /** Varvara blend 0–15 (palette remap + transparency). Absent = 1:
+      identity, opaque — the engine's historic mode 129. */
+  blend?: number;
+}
+
+/** What a node paints, pixel by pixel, exactly as the VM's tile
+    writes do: the chosen cell, flips, then the blend remap (null =
+    transparent, left out). Coordinates are footprint-relative. */
+export function leafPaint(s: Sprite, look: DrawLook & { cell?: number }): Array<[number, number, number]> {
+  const [tw, th] = cellTiles(s);
+  const out: Array<[number, number, number]> = [];
+  const cell = look.cell ?? 0;
+  const blend = look.blend ?? 1;
+  for (let ty = 0; ty < th; ty++) {
+    for (let tx = 0; tx < tw; tx++) {
+      // Sheet tile index → pixel base (pixels are tile-major too).
+      const tile = cellTileOffset(s, cell, tx, ty) / 16;
+      const dx = look.flipX ? tw - 1 - tx : tx;
+      const dy = look.flipY ? th - 1 - ty : ty;
+      for (let y = 0; y < 8; y++) {
+        for (let x = 0; x < 8; x++) {
+          const c = blendColor((s.pixels[tile * 64 + y * 8 + x] ?? 0) & 3, blend);
+          if (c === null) continue;
+          const px = look.flipX ? 7 - x : x;
+          const py = look.flipY ? 7 - y : y;
+          out.push([dx * 8 + px, dy * 8 + py, c]);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** Screen.sprite byte for a look: 2bpp, flips, blend. */
+export function lookMode(l: DrawLook): number {
+  return 0x80 | (l.flipY ? 0x20 : 0) | (l.flipX ? 0x10 : 0) | ((l.blend ?? 1) & 15);
 }
 
 /** Sprite dimensions in tiles, legacy-safe. */
@@ -45,9 +135,9 @@ export function spriteTiles(s: Sprite): [number, number] {
   return [s.w ?? 1, s.h ?? 1];
 }
 
-/** Sprite dimensions in pixels. */
+/** Node footprint in pixels: one cell for sheets, else the sprite. */
 export function spritePx(s: Sprite): [number, number] {
-  const [w, h] = spriteTiles(s);
+  const [w, h] = cellTiles(s);
   return [w * TILE_PX, h * TILE_PX];
 }
 
@@ -56,6 +146,13 @@ export function spritePx(s: Sprite): [number, number] {
 export function spritePxOf(p: Project, id: string): [number, number] {
   const s = p.sprites.find((x) => x.id === id);
   return s ? spritePx(s) : [TILE_PX, TILE_PX];
+}
+
+/** A placed object's footprint in pixels: its sprite cell, or its
+    text (8px per char) when it's a text-only object. */
+export function leafPxOf(p: Project, leaf: { sprite?: string; label?: string }): [number, number] {
+  if (leaf.sprite) return spritePxOf(p, leaf.sprite);
+  return [Math.max(1, (leaf.label ?? "").length) * TILE_PX, TILE_PX];
 }
 
 export interface Animation {
@@ -81,92 +178,101 @@ export interface HitBox {
 
 export type ObjectKind = "player" | "static" | "movable";
 
-/** Loop moments an object can react to (GameMaker events, Uxn-sized).
-    create runs on scene enter; step every frame; key/click/collide on
-    input and overlap; alarm when the slot countdown hits 0; destroy
-    runs its statements when a destroy block fires. */
-export type EventTrigger = "create" | "step" | "destroy" | "key" | "collide" | "click" | "alarm";
+/* ---------------------------------------------------------------
+   Behaviour model (v2). Objects react to EVENTS with lists of
+   ACTIONS; every number an action takes is a VALUE (a literal, a
+   variable, a property, the mouse, a random number, arithmetic or a
+   script function), and every test is a CONDITION. Scenes carry the
+   same events (scene start, every frame, keys, mouse, messages), so
+   there is one place for behaviour, not seven.
+   --------------------------------------------------------------- */
 
-export interface BlockMove {
-  op: "move";
-  dx: number;
-  dy: number;
-}
-export interface BlockPos {
-  op: "set_pos";
-  x: number;
-  y: number;
-}
-export interface BlockPlay {
-  op: "play";
-  /** Named sound id (Phase 3: one-shot SFX from the library). */
-  sound: string;
-}
-export interface BlockGoto {
-  op: "goto";
-  scene: string;
-}
-export interface BlockDestroy {
-  op: "destroy";
-  /** Who goes quiet: undefined/self = this leaf (runs its destroy
-      event first); otherwise a collide-style target resolved
-      statically like collide pairs (victim destroy fns run first,
-      guarded by the alive bit). */
-  target?: string;
-}
-export interface BlockSprite {
-  op: "sprite";
-  /** Swap art at runtime: tile address + ow/oh dims. Must share the
-      leaf's tile dims (the draw loop unrolls the declared size). */
-  sprite: string;
-}
-export interface BlockSong {
-  op: "song";
-  /** Named song id: start its loop (copies tracks to the live
-      buffers, shared sequencer ticks it every frame). */
-  song: string;
-}
-export interface BlockSongStop {
-  op: "song_stop";
-}
-export interface BlockOverlay {
-  op: "overlay";
-  /** Push the current scene and enter a fresh instance (menu
-      navigation stack — NOT freeze-pause: setup re-runs). */
-  scene: string;
-}
-export interface BlockBack {
-  op: "back";
-}
-export interface BlockShow {
-  op: "show";
-}
-export interface BlockHide {
-  op: "hide";
-}
-export interface BlockWait {
-  op: "wait";
-  ticks: number;
-  /** Alarm slot 0–3 (default 0). Slots 1–3 need an alarm event with
-      the same slot on the same owner; slot 0 keeps the legacy
-      single-timer lowering byte-identical. */
-  slot?: number;
-}
-export interface BlockCode {
-  op: "code";
-  /** Legacy inline ETAL (the old Execute-ETAL hatch). Kept lowering
-      so old projects emit byte-identical bytes; the UI no longer
-      authors it — convert to a snippet + run block instead. */
-  code: string;
-}
-/** Address of a block inside an event: descent segments through if
-    branches (`[1, "then", 0]` = blocks[1].then[0]); a lone `[i]`
+/** When an object (or scene) reacts.
+    create   — scene start (scenes run theirs before their objects')
+    step     — every frame
+    destroy  — just before a destroy action removes it
+    key      — a named key or a controller button was pressed
+    click    — mouse pressed on this object (scenes: anywhere)
+    release  — mouse button released (anywhere)
+    collide  — overlapping a target (other = the object hit)
+    alarm    — timer 0–3 ran out (armed by "start timer")
+    message  — someone sent this message */
+export type EventTrigger = "create" | "step" | "destroy" | "key" | "click" | "release" | "collide" | "alarm" | "message";
+
+/** Controller buttons (Controller.button bits). Arrows are buttons on
+    Varvara — keyboard keys have no held state, buttons do. */
+export const BUTTONS = { a: 1, b: 2, select: 4, start: 8, up: 16, down: 32, left: 64, right: 128 } as const;
+export type ButtonName = keyof typeof BUTTONS;
+
+export type MathOp = "+" | "-" | "*" | "/" | "%";
+/** Object properties a value can read. */
+export type PropName = "x" | "y" | "cell" | "w" | "h";
+/** Whose variable/property: this object, or the one it collided with. */
+export type Who = "self" | "other";
+
+/** A number. Plain numbers are literals (negative ones only in move
+    deltas); everything else is computed at runtime, all u16. */
+export type Value = number | ValueExpr;
+export type ValueExpr =
+  | { k: "var"; name: string }
+  | { k: "my"; name: string; of?: Who }
+  | { k: "prop"; prop: PropName; of?: Who }
+  | { k: "mouse"; axis: "x" | "y" }
+  | { k: "random"; max: Value }
+  | { k: "math"; op: MathOp; a: Value; b: Value }
+  | { k: "call"; fn: string; args: Value[] };
+
+export type CmpOp = "eq" | "neq" | "lt" | "lte" | "gt" | "gte";
+
+/** A test for if-actions. */
+export type Cond =
+  | { k: "cmp"; a: Value; op: CmpOp; b: Value }
+  | { k: "held"; button: ButtonName }
+  | { k: "touching"; target: string }
+  | { k: "mouse_over" }
+  | { k: "mouse_down" }
+  | { k: "all"; of: Cond[] }
+  | { k: "any"; of: Cond[] }
+  | { k: "not"; c: Cond };
+
+/** One action. Grouped in the editor as Motion, Looks, Sound,
+    Scenes, Objects, Data, Flow and Code. */
+export type Block =
+  | { op: "move"; dx: Value; dy: Value }
+  | { op: "set_pos"; x: Value; y: Value }
+  | { op: "glide"; x: Value; y: Value; frames: number }
+  | { op: "sprite"; sprite: string; cell?: Value }
+  | { op: "cell"; cell: Value }
+  | { op: "look"; blend?: number; flipX?: boolean; flipY?: boolean }
+  | { op: "show" }
+  | { op: "hide" }
+  | { op: "text"; text: string; value?: Value }
+  | { op: "play"; sound: string }
+  | { op: "song"; song: string }
+  | { op: "song_stop" }
+  | { op: "goto"; scene: string }
+  | { op: "overlay"; scene: string }
+  | { op: "back" }
+  | { op: "wait"; ticks: Value; slot?: number }
+  | { op: "destroy"; target?: string }
+  | { op: "spawn"; def: string; x: Value; y: Value }
+  | { op: "send"; message: string }
+  | { op: "set"; name: string; scope?: "global" | Who; mode: "set" | "add" | "sub"; value: Value }
+  | { op: "if"; cond: Cond; then: Block[]; else?: Block[] }
+  | { op: "repeat"; times: Value; index?: string; body: Block[] }
+  | { op: "call"; fn: string; args: Value[] }
+  | { op: "jump"; power: Value }
+  | { op: "code"; code: string };
+export type BlockOp = Block["op"];
+
+/** Address of a block inside an event: descent segments through if/
+    repeat bodies (`[1, "then", 0]` = blocks[1].then[0]); a lone `[i]`
     addresses top level. Empty paths are never valid. */
-export type BlockPath = (number | "then" | "else")[];
+export type BlockPath = (number | "then" | "else" | "body")[];
 
 /** A named u16 game variable (score, health, flags): one `var_<id>`
-    buffer slot, initialized once in `start()`. Snippets address the
-    same `var_<id>[0]` cells, so visual and hand code share state. */
+    buffer slot, initialized once in `start()`. Template variables use
+    the same shape (`init` = default for every instance). */
 export interface GameVar {
   id: string;
   /** Boot value, 0–65535. */
@@ -192,101 +298,42 @@ export interface SongDef {
   tracks: SongTrack[];
 }
 
-export interface BlockRun {
-  op: "run";
-  /** Named snippet id (Code page library). Spliced verbatim like the
-      old code hatch, but authored once in Code and connected to any
-      number of object events. */
-  snippet: string;
-}
-
-export type CmpOp = "eq" | "neq" | "lt" | "lte" | "gt" | "gte";
-
-/** A value inside an `if` condition. `btn` reads the live dpad
-    (`Controller.button` bits — arrows are buttons on both VMs, so
-    held works); keyboard keys have no held state on either VM
-    (keyup carries no key info), so there is deliberately no
-    held-key operand — key events are press-edge. */
-export type ValueOperand =
-  | { kind: "var"; name: string }
-  | { kind: "const"; value: number }
-  | { kind: "pos"; axis: "x" | "y" }
-  | { kind: "btn"; dir: "up" | "down" | "left" | "right" };
-
-export interface Cond {
-  left: ValueOperand;
-  op: CmpOp;
-  right: ValueOperand;
-}
-
-export interface BlockSet {
-  op: "set";
-  /** Named variable id. */
-  name: string;
-  /** set, or += / -= a constant. */
-  mode: "set" | "add" | "sub";
-  value: number;
-}
-export interface BlockIf {
-  op: "if";
-  cond: Cond;
-  then: Block[];
-  else?: Block[];
-}
-export interface BlockButton {
-  op: "button";
-  /** UI annotation: a labeled control firing a named action. Lowers
-      to a comment, so it never changes runtime bytes — the logic
-      graph's clickable affordance without a second language. */
-  label: string;
-  action: string;
-}
-
-/** One visual action = one ETAL lowering (see previewBlocks). `run`
-    splices a named snippet (Code page); legacy `code` splices raw
-    ETAL in place; `button` lowers to a comment. Old projects use
-    neither new form, so their emit is untouched. */
-export type Block =
-  | BlockMove
-  | BlockPos
-  | BlockPlay
-  | BlockGoto
-  | BlockDestroy
-  | BlockWait
-  | BlockCode
-  | BlockRun
-  | BlockButton
-  | BlockSprite
-  | BlockShow
-  | BlockHide
-  | BlockSet
-  | BlockIf
-  | BlockSong
-  | BlockSongStop
-  | BlockOverlay
-  | BlockBack;
-
 export interface ObjectEvent {
   /** Stable id for agent/UI targeting (ev_N). */
   id: string;
   trigger: EventTrigger;
-  /** key trigger: named input id. */
+  /** key trigger: named input id (keyboard)… */
   key?: string;
+  /** …or a controller button (arrows, A/B, start/select). */
+  button?: ButtonName;
   /** collide trigger: any|solid|player|movable|def:<id>. */
   target?: string;
-  /** alarm trigger: slot 0–3 (default 0), armed by wait blocks
-      with the same slot. Slot 0 keeps the legacy fn name. */
+  /** alarm trigger: timer 0–3 (default 0). */
   alarm?: number;
+  /** message trigger: the message name. */
+  message?: string;
   blocks: Block[];
 }
 
-/** A named ETAL snippet: authored once on the Code page, connected
-    to any number of object events via run blocks. The replacement
-    for inline Execute-ETAL — same verbatim splice, one home. */
-export interface CodeSnippet {
-  id: string;
+
+/** A user script module: a whole `.ux` file emitted beside main.ux
+    and imported by it. Scripts may import each other and any
+    standard-library module (`import "screen.ux"`). */
+export interface ScriptFile {
+  path: string;
   code: string;
 }
+
+/** Who runs the frame.
+    engine: scenes, objects and blocks run; hooks splice into the loop.
+    script: custom_frame() IS the loop — the engine only boots (theme,
+    screen, variables), wires the vectors to the hooks and exports the
+    assets the code names (spr_<id>, snd_<id>(), var_<id>, KEY_<ID>). */
+export type LoopMode = "engine" | "script";
+
+/** Hook names the engine calls when defined (custom.ux or any script). */
+export const HOOKS = ["custom_setup", "custom_frame", "custom_draw", "custom_key", "custom_mouse"] as const;
+export type HookName = (typeof HOOKS)[number];
 
 /** Canvas chrome positions: where scene/object blocks sit on the
     free-form Blocks canvas. Pure UI state — validation and emit
@@ -307,16 +354,68 @@ export interface CanvasLayout {
     Phase 2; the tick default already makes defs useful now. */
 export interface ObjectDef {
   id: string;
+  /** Default art ("" = a text-only object: it shows its text). */
   sprite: string;
+  /** Template variables: every instance gets its own copy, starting
+      at `init` (instances may override the start value). */
+  vars?: GameVar[];
+  /** Default text drawn at the object (instances may override). */
+  label?: string;
   kind: ObjectKind;
   solid?: boolean;
   controls?: boolean;
   anim?: string;
-  tick?: string;
   /** The def's events; instances inherit them whole. */
   events?: ObjectEvent[];
   /** Default hitbox; a leaf mask replaces it whole (boxes don't merge). */
   mask?: HitBox;
+  /** Default sheet cell / look for instances (local values win). */
+  cell?: number;
+  flipX?: boolean;
+  flipY?: boolean;
+  blend?: number;
+  /** Built-in movement: `platformer` = arrows run, up/A/space jumps,
+      gravity, solid tiles and solid objects block; `walker` = patrols
+      left/right with gravity, turning at walls and ledges. */
+  movement?: Movement;
+  /** Pixels per frame sideways (1–4, default 2 platformer / 1 walker). */
+  speed?: number;
+  /** Jump strength 1–8 (default 5): height ≈ 3·j·(j+1)/2 px. */
+  jump?: number;
+  /** Fixed to the screen: ignores the camera (HUD text, lives). */
+  hud?: boolean;
+}
+
+export type Movement = "platformer" | "walker";
+
+/** A scene's tile layer: a grid of cells from one sheet sprite whose
+    cells are single 8×8 tiles. Big levels cost one data byte per
+    cell instead of an object slot each, and the camera scrolls it. */
+export interface Tilemap {
+  sprite: string;
+  cols: number;
+  rows: number;
+  /** cols·rows entries, row-major: 0 = empty, n = sheet cell n-1. */
+  tiles: number[];
+  /** Sheet cells (0-based) that block movement. */
+  solid: number[];
+  /** Draw blend (default 1, opaque). */
+  blend?: number;
+}
+
+/** World size of a scene: its tilemap, else the screen. */
+export function worldSize(p: Project, s: Scene): [number, number] {
+  if (s.tilemap) return [Math.max(p.width, s.tilemap.cols * 8), Math.max(p.height, s.tilemap.rows * 8)];
+  return [p.width, p.height];
+}
+
+/** Tilemap from text rows: each char maps through `legend` to a
+    1-based tile (unknown chars and spaces are empty). */
+export function tilesFromRows(rows: string[], legend: Record<string, number>): { cols: number; rows: number; tiles: number[] } {
+  const cols = Math.max(...rows.map((r) => r.length));
+  const tiles: number[] = [];
+  for (const r of rows) for (let c = 0; c < cols; c++) tiles.push(legend[r[c] ?? " "] ?? 0);
+  return { cols, rows: rows.length, tiles };
 }
 
 /** The def library, legacy-safe: pre-def projects simply have none. */
@@ -324,32 +423,10 @@ export function projectDefs(p: Project): ObjectDef[] {
   return p.objectDefs ?? [];
 }
 
-export interface ClickBinding {
-  object: string;
-  goto: string;
-}
-
-/** A named keyboard input: the GameMaker key-picker / Godot input-map
-    equivalent. Bindings reference the id; the emitter resolves it to
-    the raw Controller.key code, so renaming never breaks wiring. */
 export interface NamedInput {
   id: string;
   /** Raw key code (32 = space, 27 = escape). */
   key: number;
-}
-
-export interface KeyBinding {
-  /** Named input id (preferred). Absent = legacy raw code below. */
-  input?: string;
-  /** Controller.key code (32 = space, 27 = escape). */
-  key: number;
-  goto: string;
-}
-
-/** Effective key code for a binding: named input wins, legacy raw
-    code is the fallback. Unknown input id → raw code (validated). */
-export function bindingKey(p: Project, k: KeyBinding): number {
-  return (p.inputs ?? []).find((i) => i.id === k.input)?.key ?? k.key;
 }
 
 export interface SceneNode {
@@ -369,19 +446,21 @@ export interface SceneNode {
   controls?: boolean;
   /** Leaves only. */
   anim?: string;
-  /** Leaves only: per-object script, wrapped as tick_<root>_<path>. */
-  tick?: string;
-  /** Leaves only: dialogue label drawn at the leaf position (1–24
-      printable ASCII chars, 8px 1bpp tiles prerendered at emit).
-      Always instance state, never inherited from a def. */
+  /** Leaves only: text drawn at the object (1–24 printable ASCII).
+      A leaf with text and no sprite is a text object. Falls back to
+      the template's label; text actions change it at runtime. */
   label?: string;
-  /** Leaves only: creation code — ETAL statements spliced after the
-      leaf's create-event blocks in its create fn (GameMaker Creation
-      Code: per-instance patch, runs on scene enter). Always instance
-      state, never inherited from a def. */
-  initCode?: string;
+  /** Leaves only: start values for template variables (by name). */
+  vars?: Record<string, number>;
   /** Leaves only: hitbox override (def leaves: default on the def). */
   mask?: HitBox;
+  /** Leaves only: which cell of a sheet sprite to show (default 0). */
+  cell?: number;
+  /** Leaves only: mirror horizontally / vertically. */
+  flipX?: boolean;
+  flipY?: boolean;
+  /** Leaves only: Varvara blend 0–15 (see DrawLook). */
+  blend?: number;
   /** Leaves only: instance of ObjectDef. Every field above (except
       id/x/y, which are always instance state) falls back to the def
       when locally absent — explicit local values always win. */
@@ -389,23 +468,34 @@ export interface SceneNode {
   /** Inline leaves only: this leaf's events (instances use their
       def's — a local list on an instance is a validation error). */
   events?: ObjectEvent[];
+  /** Leaves only: fixed to the screen, ignores the camera. */
+  hud?: boolean;
 }
 
 export interface Scene {
   id: string;
   /** Godot-like node tree: sprite leaves and subscene branches. */
   nodes: SceneNode[];
-  clicks: ClickBinding[];
-  keys: KeyBinding[];
-  /** Per-scene script: statements spliced at the end of this scene's
-      frame fn (after input/drive/ticks, before drawing). Full access
-      to generated state (ox[], ocount, scene fns). */
-  frameCode?: string;
+  /** Scene-level events (the level's "controller"): scene start,
+      every frame, keys, mouse anywhere, timers, messages. */
+  events?: ObjectEvent[];
+  /** Spare object slots for spawn actions in this scene (default:
+      16 when the project spawns anything, else 0). */
+  pool?: number;
+  /** Tile layer drawn under the objects; sets the world size. */
+  tilemap?: Tilemap;
+  /** Camera: keeps the first live instance of `follow` (a template
+      id) centered, clamped to the world. Without it the view stays
+      at the top-left. */
+  camera?: { follow?: string };
 }
 
 export interface FlatLeaf extends SceneNode {
   /** Dotted instance path (board/sq_a1), unique per flattening. */
   path: string;
+  /** Scene that defines this node (differs from the root for nodes
+      inside subscenes) — inline objects are keyed by it. */
+  home: string;
   kind: ObjectKind;
   sprite: string;
   /** Effective events: the def's for instances, the leaf's own for
@@ -420,6 +510,18 @@ const MAX_DEPTH = 8;
 
 /** Depth-first flatten with accumulated offsets. Throws on cycles,
     depth overflow, or slot overflow — validation surfaces these. */
+/** Cell/look fields of a node or object (sprite-independent part;
+    the cell range is checked on flattened leaves, where the sprite is
+    resolved). */
+function validateLook(o: DrawLook & { cell?: number }, at: string): string[] {
+  const errs: string[] = [];
+  if (o.blend !== undefined && (!Number.isInteger(o.blend) || o.blend < 0 || o.blend > 15))
+    errs.push(`${at}: blend must be 0–15`);
+  if (o.cell !== undefined && (!Number.isInteger(o.cell) || o.cell < 0 || o.cell > 255))
+    errs.push(`${at}: cell must be 0–255`);
+  return errs;
+}
+
 export function flattenScene(p: Project, sceneId: string): FlatLeaf[] {
   const scenes = new Map(p.scenes.map((s) => [s.id, s]));
   const defs = new Map(projectDefs(p).map((d) => [d.id, d]));
@@ -443,6 +545,7 @@ export function flattenScene(p: Project, sceneId: string): FlatLeaf[] {
         out.push({
           ...n,
           path,
+          home: id,
           x: n.x + ox,
           y: n.y + oy,
           kind: n.kind ?? def?.kind ?? "static",
@@ -450,8 +553,13 @@ export function flattenScene(p: Project, sceneId: string): FlatLeaf[] {
           solid: n.solid ?? def?.solid,
           controls: n.controls ?? def?.controls,
           anim: n.anim ?? def?.anim,
-          tick: n.tick ?? def?.tick,
+          label: n.label ?? def?.label,
           mask: n.mask ?? def?.mask,
+          cell: n.cell ?? def?.cell,
+          flipX: n.flipX ?? def?.flipX,
+          flipY: n.flipY ?? def?.flipY,
+          blend: n.blend ?? def?.blend,
+          hud: n.hud ?? def?.hud,
           events: def ? (def.events ?? []) : (n.events ?? []),
         });
       }
@@ -510,18 +618,24 @@ export interface Project {
   /** Named song loops (Phase 12). Absent = none yet; song blocks
       reference these by id. */
   songs?: SongDef[];
-  /** Named ETAL snippet library (Code page). Absent = none yet;
-      run blocks reference these by id. */
-  snippets?: CodeSnippet[];
   /** Free-canvas block positions (Blocks view). Absent = cascade
       defaults; ignored by validation and emit. */
   layout?: CanvasLayout;
   /** Named u16 variables (Phase B). Absent = none yet; set/if
       blocks and snippets share the `var_<id>[0]` cells. */
   vars?: GameVar[];
-  /** Visual only: raw top-level ETAL spliced into main.ux. May define
-      custom_setup() and/or custom_frame() hooks (called when present). */
+  /** Visual only: raw top-level ETAL spliced into main.ux (custom.ux).
+      May define any HOOKS fn (called when present); `import` lines are
+      hoisted to the top of main.ux. */
   customCode?: string;
+  /** Visual only: extra script modules, imported by main.ux in order. */
+  scripts?: ScriptFile[];
+  /** Visual only: frame ownership. Absent = engine. */
+  loop?: LoopMode;
+  /** The game draws its own mouse pointer, so the web build hides the
+      browser's over the game (what native uxn always does). Off by
+      default: engine-loop games don't draw one. */
+  gameCursor?: boolean;
   /** Code only: the file set, passed through untouched. */
   codeFiles?: Record<string, string>;
   /** Code only: entry file (default main.ux). */
@@ -529,18 +643,19 @@ export interface Project {
   updatedAt: number;
 }
 
-/** Generated identifiers custom code must not redeclare. Only actual
-    top-level declarations are inspected — *uses* like ox[slot] inside
-    tick bodies are the whole point and always pass. The backend
-    compiler remains the final arbiter (duplicates fail loudly). */
+/** Generated identifiers custom code must not redeclare (engine loop).
+    Public runtime state code may READ and WRITE: ox oy ot om ow oh
+    oflags odef ocell ocount scene self other, var_<id>[0], iv_<id>[slot];
+    everything private is prefixed e_. Only declarations are checked —
+    uses are the point. The compiler remains the final arbiter. */
 const RESERVED_EXACT = new Set([
-  "ox", "oy", "ot", "oflags", "ocount", "scene", "kb", "mb", "mouse_last",
-  "dpad", "draw_all", "draw_bg", "bg_tile", "pt_in_rect", "overlap88", "scene_go", "start", "main", "sq32",
+  "ox", "oy", "ot", "om", "ow", "oh", "otw", "oth", "osw", "oflags", "odef", "osp", "ocell",
+  "omx", "omy", "omw", "omh", "otx", "onv", "onf", "ogx", "ogy", "ogn", "oan", "oaf", "oak", "oad",
+  "ocount", "scene", "self", "other", "scene_go", "start", "main", "on_frame", "on_key", "on_mouse", "sq32", "sg_on",
   "custom_setup", "custom_frame",
-  // Phase C runtime: sequencer state, scene stack, prerendered labels.
-  "sg_on", "ovst", "ovsp", "song_tick", "overlay_back",
 ]);
-const RESERVED_PREFIX = ["atick_", "afr_", "adir_", "spr_", "tick_", "sglp", "sgll", "sg_len", "sg_vol", "sg_pos", "sg_wait", "song_", "lbl_"];
+const RESERVED_PREFIX = ["e_", "spr_", "var_", "iv_", "SC_"];
+const RESERVED_RE = [/^oa[0-3]$/, /^st[0-3]$/, /^sg_(pos|wait|len|vol)\d$/, /^sgl[pl]\d$/];
 
 function declaredNames(code: string): string[] {
   const names: string[] = [];
@@ -563,13 +678,8 @@ export function validateCustomCode(code: string): string[] {
   const errs: string[] = [];
   if (code.length > 32 * 1024) errs.push("custom code exceeds 32KB");
   for (const name of declaredNames(code)) {
-    if (name === "custom_setup" || name === "custom_frame") continue;
-    if (
-      RESERVED_EXACT.has(name) ||
-      name.startsWith("SC_") ||
-      RESERVED_PREFIX.some((p) => name.startsWith(p)) ||
-      name.endsWith("_frame")
-    ) {
+    if ((HOOKS as readonly string[]).includes(name)) continue;
+    if (RESERVED_EXACT.has(name) || RESERVED_PREFIX.some((p) => name.startsWith(p)) || RESERVED_RE.some((r) => r.test(name))) {
       errs.push(`custom code collides with generated name '${name}'`);
     }
   }
@@ -606,6 +716,7 @@ export function migrateProject(raw: Record<string, unknown>): Project {
     base["inputs"] = migrateInputs(modernScenes, base["inputs"]);
     const modernDefs = (base["objectDefs"] ?? []) as ObjectDef[];
     base["sounds"] = migrateSounds(modernScenes, modernDefs, base["sounds"]);
+    migrateBehaviour(base);
     return base as unknown as Project;
   }
   const sprites: Sprite[] = [];
@@ -652,6 +763,134 @@ export function migrateProject(raw: Record<string, unknown>): Project {
     updatedAt: 0,
   };
 }
+
+type Raw = Record<string, unknown>;
+const OLD_CMP_BTN: Record<string, ButtonName> = { up: "up", down: "down", left: "left", right: "right" };
+
+/** v2 behaviour model: one home for behaviour (events), values instead
+    of constants. Folds every older mechanism into events, in place:
+    - scene click bindings → the object's click event (or a scene click
+      event for nested/template objects), key bindings → scene key events
+    - per-object tick scripts → step events, creation code → create
+      events, scene frame code → a scene step event (all as Code
+      actions; `slot` became `self`)
+    - snippets + run blocks → Code actions with the snippet's text
+    - button note blocks (they never did anything) are dropped
+    - old if conditions {left, op, right} → {k: "cmp"} / {k: "held"}
+    Idempotent: already-converted projects pass through unchanged. */
+export function migrateBehaviour(base: Raw): void {
+  const snippets = new Map(((base["snippets"] ?? []) as Raw[]).map((x) => [String(x["id"]), String(x["code"] ?? "")]));
+  const code = (text: string): Block => ({ op: "code", code: text.replace(/\bslot\b/g, "self") });
+  const operand = (o: Raw | undefined): Value => {
+    if (!o) return 0;
+    if (o["kind"] === "var") return { k: "var", name: String(o["name"]) };
+    if (o["kind"] === "pos") return { k: "prop", prop: o["axis"] === "y" ? "y" : "x" };
+    if (o["kind"] === "const") return Number(o["value"]) || 0;
+    return 0;
+  };
+  const fixBlocks = (blocks: unknown): Block[] => {
+    if (!Array.isArray(blocks)) return [];
+    const out: Block[] = [];
+    for (const raw of blocks as Raw[]) {
+      if (!raw || typeof raw !== "object") continue;
+      const op = raw["op"];
+      if (op === "button") continue;
+      if (op === "run") {
+        out.push(code(snippets.get(String(raw["snippet"])) ?? ""));
+        continue;
+      }
+      if (op === "code") {
+        out.push(code(String(raw["code"] ?? "")));
+        continue;
+      }
+      if (op === "if") {
+        let cond = raw["cond"] as Raw | undefined;
+        if (cond && !("k" in cond)) {
+          const l = cond["left"] as Raw | undefined;
+          const r = cond["right"] as Raw | undefined;
+          if (l?.["kind"] === "btn" || r?.["kind"] === "btn") {
+            const btn = (l?.["kind"] === "btn" ? l : r) as Raw;
+            const other = (l?.["kind"] === "btn" ? r : l) as Raw | undefined;
+            const held: Cond = { k: "held", button: OLD_CMP_BTN[String(btn["dir"])] ?? "up" };
+            const wantDown = (cond["op"] === "eq") === (Number(other?.["value"] ?? 1) !== 0);
+            cond = (wantDown ? held : { k: "not", c: held }) as unknown as Raw;
+          } else cond = { k: "cmp", a: operand(l), op: cond["op"] ?? "eq", b: operand(r) } as unknown as Raw;
+        }
+        out.push({ op: "if", cond: cond as unknown as Cond, then: fixBlocks(raw["then"]), ...(raw["else"] ? { else: fixBlocks(raw["else"]) } : {}) });
+        continue;
+      }
+      if (op === "repeat") {
+        out.push({ ...(raw as unknown as Block), body: fixBlocks(raw["body"]) } as Block);
+        continue;
+      }
+      if (op === "destroy") {
+        const t = raw["target"];
+        out.push(t === undefined || t === "self" ? { op: "destroy" } : typeof t === "string" && t.startsWith("def:") ? { op: "destroy", target: t } : { op: "destroy", target: "other" });
+        continue;
+      }
+      out.push(raw as unknown as Block);
+    }
+    return out;
+  };
+  const fixEvents = (events: unknown): ObjectEvent[] => {
+    if (!Array.isArray(events)) return [];
+    return (events as Raw[]).map((e) => ({ ...(e as object), blocks: fixBlocks(e["blocks"]) }) as ObjectEvent);
+  };
+  let n = 0;
+  const evId = (taken: ObjectEvent[]): string => {
+    let id = `ev_m${n++}`;
+    while (taken.some((e) => e.id === id)) id = `ev_m${n++}`;
+    return id;
+  };
+  const addTo = (events: ObjectEvent[], trigger: EventTrigger, blocks: Block[], extra: Partial<ObjectEvent> = {}): void => {
+    const same = events.find((e) => e.trigger === trigger && e.key === extra.key && e.button === extra.button && e.message === extra.message);
+    if (same && trigger !== "key" && trigger !== "click") same.blocks.push(...blocks);
+    else events.push({ id: evId(events), trigger, blocks, ...extra });
+  };
+  for (const d of (base["objectDefs"] ?? []) as Raw[]) {
+    d["events"] = fixEvents(d["events"]);
+    if (typeof d["tick"] === "string" && d["tick"].trim()) addTo(d["events"] as ObjectEvent[], "step", [code(d["tick"])]);
+    delete d["tick"];
+  }
+  for (const sc of (base["scenes"] ?? []) as Raw[]) {
+    const sEvents = fixEvents(sc["events"]);
+    const nodes = (sc["nodes"] ?? []) as Raw[];
+    for (const nd of nodes) {
+      if (nd["scene"]) continue;
+      nd["events"] = fixEvents(nd["events"]);
+      if (typeof nd["tick"] === "string" && nd["tick"].trim()) {
+        if (nd["def"]) addTo(sEvents, "step", [code(`( was ${String(nd["id"])}'s tick script )\n${nd["tick"]}`)]);
+        else addTo(nd["events"] as ObjectEvent[], "step", [code(nd["tick"])]);
+      }
+      if (typeof nd["initCode"] === "string" && nd["initCode"].trim() && !nd["def"]) addTo(nd["events"] as ObjectEvent[], "create", [code(nd["initCode"])]);
+      delete nd["tick"];
+      delete nd["initCode"];
+    }
+    for (const c of (sc["clicks"] ?? []) as Raw[]) {
+      const target = nodes.find((x) => x["id"] === c["object"] && !x["scene"] && !x["def"]);
+      const go: Block = { op: "goto", scene: String(c["goto"]) };
+      if (target) {
+        const evs = (target["events"] ?? []) as ObjectEvent[];
+        target["events"] = evs;
+        evs.push({ id: evId(evs), trigger: "click", blocks: [go] });
+      } else addTo(sEvents, "click", [go]);
+    }
+    for (const k of (sc["keys"] ?? []) as Raw[]) {
+      addTo(sEvents, "key", [{ op: "goto", scene: String(k["goto"]) }], { key: String(k["input"] ?? "") });
+    }
+    if (typeof sc["frameCode"] === "string" && sc["frameCode"].trim()) addTo(sEvents, "step", [code(sc["frameCode"])]);
+    for (const nd of nodes) {
+      if (!nd["scene"] && !nd["def"] && Array.isArray(nd["events"]) && (nd["events"] as unknown[]).length === 0) delete nd["events"];
+    }
+    delete sc["clicks"];
+    delete sc["keys"];
+    delete sc["frameCode"];
+    if (sEvents.length > 0) sc["events"] = sEvents;
+    else delete sc["events"];
+  }
+  delete base["snippets"];
+}
+
 
 /** Phase 0 migration: every raw-code key binding gets a named input
     (`key_<code>`, shared per code), so the UI can store input ids
@@ -710,7 +949,7 @@ function migrateInputs(scenes: Scene[], existing: unknown): NamedInput[] {
   const byKey = new Map<number, NamedInput>();
   for (const i of inputs) if (!byKey.has(i.key)) byKey.set(i.key, i);
   for (const s of scenes) {
-    for (const k of s.keys ?? []) {
+    for (const k of ((s as unknown as Raw)["keys"] ?? []) as Array<{ input?: string; key: number }>) {
       if (k.input) continue;
       let found = byKey.get(k.key);
       if (!found) {
@@ -739,21 +978,6 @@ function maskFits(m: HitBox, dims: [number, number]): boolean {
   return m.x >= 0 && m.y >= 0 && m.w >= 1 && m.h >= 1 && m.x + m.w <= w && m.y + m.h <= h;
 }
 
-/** Max static collide pairs per scene (see the pair counting below).
-    Keeps generated frame fns far under the assembler reference
-    budget (~1200) no matter how the statements stack. */
-export const MAX_COLLIDE_PAIRS = 48;
-
-/** Max static destroy victims per block (same unroll-budget reason
-    as collide pairs, but tighter: victims cost ~3 lines each). */
-export const MAX_DESTROY_TARGETS = 12;
-
-const TRIGGERS: EventTrigger[] = ["create", "step", "destroy", "key", "collide", "click", "alarm"];
-
-/** Max `if` nesting inside one branch (each level unrolls inline —
-    deeper belongs in a snippet). */
-export const MAX_IF_DEPTH = 3;
-
 /** Max steps per song voice. The live track buffers are 16 bytes per
     voice, so this is a RAM cap as much as a UI one: 4 voices x 16
     steps x 2 buffers = 128 bytes of main RAM. */
@@ -762,156 +986,6 @@ export const MAX_SONG_STEPS = 16;
 /** A step is MIDI pitch 0–107; this is the rest marker lib/song.ux
     uses and what the emitter skips firing. */
 export const SONG_REST = 127;
-
-function validOperand(o: ValueOperand, varIds: Set<string>): string | null {
-  if (o.kind === "var" && !varIds.has(o.name)) return `unknown variable '${o.name}'`;
-  if (o.kind === "const" && !u16(o.value)) return `const must be 0–65535`;
-  return null;
-}
-
-function validateBlocks(
-  blocks: Block[],
-  label: string,
-  sceneIds: Set<string>,
-  soundIds: Set<string>,
-  snippetIds: Set<string>,
-  spriteIds: Set<string>,
-  defIds: Set<string>,
-  varIds: Set<string>,
-  songIds: Set<string>,
-  depth = 0,
-): string[] {
-  const errs: string[] = [];
-  (blocks ?? []).forEach((b, i) => {
-    const at = `${label} block ${i}`;
-    if (b.op === "move") {
-      if (!Number.isInteger(b.dx) || !Number.isInteger(b.dy)) errs.push(`${at}: dx/dy must be integers`);
-    } else if (b.op === "set_pos") {
-      if (!u16(b.x) || !u16(b.y)) errs.push(`${at}: x/y must be 0–65535`);
-    } else if (b.op === "play") {
-      if (typeof b.sound !== "string" || !soundIds.has(b.sound))
-        errs.push(`${at}: play needs a known sound`);
-    } else if (b.op === "goto") {
-      if (!sceneIds.has(b.scene)) errs.push(`${at}: goto unknown scene '${b.scene}'`);
-    } else if (b.op === "destroy") {
-      if (b.target !== undefined && b.target !== "self" && !validTarget(b.target, defIds))
-        errs.push(`${at}: destroy target must be self|any|solid|player|movable|def:<id>`);
-    } else if (b.op === "wait") {
-      if (!Number.isInteger(b.ticks) || b.ticks < 1 || b.ticks > 255)
-        errs.push(`${at}: ticks must be 1–255`);
-      if (b.slot !== undefined && (!Number.isInteger(b.slot) || b.slot < 0 || b.slot > 3))
-        errs.push(`${at}: wait slot must be 0–3`);
-    } else if (b.op === "set") {
-      if (typeof b.name !== "string" || !varIds.has(b.name))
-        errs.push(`${at}: set needs a known variable`);
-      if (b.mode !== "set" && b.mode !== "add" && b.mode !== "sub")
-        errs.push(`${at}: set mode must be set|add|sub`);
-      if (!u16(b.value)) errs.push(`${at}: set value must be 0–65535`);
-    } else if (b.op === "if") {
-      if (depth + 1 > MAX_IF_DEPTH) errs.push(`${at}: if nests past ${MAX_IF_DEPTH} — move it to a snippet`);
-      else {
-        const c = (b as { cond?: Cond }).cond;
-        const cmp = ["eq", "neq", "lt", "lte", "gt", "gte"] as const;
-        if (!c || !c.left || !c.right || !cmp.includes((c.op ?? "") as (typeof cmp)[number]))
-          errs.push(`${at}: bad condition`);
-        else {
-          for (const side of [c.left, c.right] as ValueOperand[]) {
-            const bad = validOperand(side, varIds);
-            if (bad) errs.push(`${at}: ${bad}`);
-          }
-        }
-        errs.push(...validateBlocks(b.then ?? [], `${at} then`, sceneIds, soundIds, snippetIds, spriteIds, defIds, varIds, songIds, depth + 1));
-        if (b.else) errs.push(...validateBlocks(b.else, `${at} else`, sceneIds, soundIds, snippetIds, spriteIds, defIds, varIds, songIds, depth + 1));
-      }
-    } else if (b.op === "sprite") {
-      if (typeof b.sprite !== "string" || !spriteIds.has(b.sprite))
-        errs.push(`${at}: sprite needs a known sprite`);
-    } else if (b.op === "song") {
-      if (typeof b.song !== "string" || !songIds.has(b.song))
-        errs.push(`${at}: song needs a known song`);
-    } else if (b.op === "song_stop" || b.op === "back") {
-      void b;
-    } else if (b.op === "overlay") {
-      if (!sceneIds.has(b.scene)) errs.push(`${at}: overlay unknown scene '${b.scene}'`);
-    } else if (b.op === "show" || b.op === "hide") {
-      void b;
-    } else if (b.op === "code") {
-      if (typeof b.code !== "string" || b.code.trim().length === 0)
-        errs.push(`${at}: code needs ETAL statements`);
-      else if (b.code.length > 4096) errs.push(`${at}: code exceeds 4KB`);
-      else errs.push(...validateCustomCode(b.code).map((e) => `${at}: ${e}`));
-    } else if (b.op === "run") {
-      if (typeof b.snippet !== "string" || !snippetIds.has(b.snippet))
-        errs.push(`${at}: run needs a known snippet`);
-    } else if (b.op === "button") {
-      if (typeof b.label !== "string" || b.label.trim().length === 0 || b.label.length > 32)
-        errs.push(`${at}: label must be 1–32 characters`);
-      else if (/["\\\n]/.test(b.label)) errs.push(`${at}: label must not contain quotes, backslashes or newlines`);
-      if (typeof b.action !== "string" || b.action.length > 64)
-        errs.push(`${at}: action must be at most 64 characters`);
-      else if (/["\\\n]/.test(b.action)) errs.push(`${at}: action must not contain quotes, backslashes or newlines`);
-    } else {
-      errs.push(`${label} block ${i}: unknown op '${(b as { op: unknown }).op}'`);
-    }
-  });
-  return errs;
-}
-
-function validTarget(target: string, defIds: Set<string>): boolean {
-  if (target === "any" || target === "solid" || target === "player" || target === "movable") return true;
-  return target.startsWith("def:") && defIds.has(target.slice(4));
-}
-
-function validateEvents(
-  events: ObjectEvent[],
-  label: string,
-  sceneIds: Set<string>,
-  inputIds: Set<string>,
-  defIds: Set<string>,
-  soundIds: Set<string>,
-  snippetIds: Set<string>,
-  spriteIds: Set<string>,
-  varIds: Set<string>,
-  songIds: Set<string>,
-): string[] {
-  const errs: string[] = [];
-  const ids = new Set((events ?? []).map((e) => e.id));
-  if (ids.size !== (events ?? []).length) errs.push(`${label}: duplicate event id`);
-  const seen = new Set<string>();
-  for (const e of events ?? []) {
-    if (!IDENT.test(e.id)) errs.push(`${label}: bad event id '${e.id}'`);
-    if (!TRIGGERS.includes(e.trigger)) errs.push(`${label} '${e.id}': bad trigger '${(e as { trigger: unknown }).trigger}'`);
-    if (e.trigger === "key" && (e.key === undefined || !inputIds.has(e.key)))
-      errs.push(`${label} '${e.id}': key event needs a known input`);
-    if (e.trigger === "collide" && (e.target === undefined || !validTarget(e.target, defIds)))
-      errs.push(`${label} '${e.id}': collide target must be any|solid|player|movable|def:<id>`);
-    if (e.trigger === "alarm" && e.alarm !== undefined && (!Number.isInteger(e.alarm) || e.alarm < 0 || e.alarm > 3))
-      errs.push(`${label} '${e.id}': alarm slot must be 0–3`);
-    const sig = `${e.trigger}|${e.key ?? ""}|${e.target ?? ""}|${e.trigger === "alarm" ? (e.alarm ?? 0) : ""}`;
-    if (seen.has(sig)) errs.push(`${label}: duplicate ${e.trigger} event`);
-    seen.add(sig);
-    errs.push(...validateBlocks(e.blocks ?? [], `${label} '${e.id}'`, sceneIds, soundIds, snippetIds, spriteIds, defIds, varIds, songIds));
-    // Every waited slot needs its alarm event on the same owner.
-    const waited = new Set<number>();
-    const collectWaits = (blocks: Block[]): void => {
-      for (const b of blocks ?? []) {
-        if (b.op === "wait") waited.add(b.slot ?? 0);
-        else if (b.op === "if") {
-          collectWaits(b.then ?? []);
-          if (b.else) collectWaits(b.else);
-        }
-      }
-    };
-    collectWaits(e.blocks ?? []);
-    for (const slot of waited) {
-      const has = (events ?? []).some(
-        (x) => x.trigger === "alarm" && (x.alarm ?? 0) === slot && x.blocks.length > 0,
-      );
-      if (!has) errs.push(`${label} '${e.id}': waits on slot ${slot} with no alarm event for it`);
-    }
-  }
-  return errs;
-}
 
 export interface SceneMapEdge {
   from: string;
@@ -931,12 +1005,10 @@ export interface SceneMap {
   edges: SceneMapEdge[];
 }
 
-/** Scene overview data: every scene as a node, every transition as a
-    labeled edge — bindings AND goto blocks in leaf events (defs
-    included, via resolved flat leaves). Broken scenes still list
-    (with their bindings, no event edges); unknown gotos are skipped.
-    Nodes come out BFS-ordered from the start scene. Pure: the map
-    canvas renders this without touching the store. */
+/** Scene overview data: every scene as a node, every scene change
+    (go to / overlay actions in object and scene events) as a labeled
+    edge. Broken scenes still list. Nodes come out BFS-ordered from
+    the start scene. Pure: the map canvas renders this directly. */
 export function buildSceneMap(p: Project): SceneMap {
   const sceneIds = new Set(p.scenes.map((s) => s.id));
   const nodes: SceneMapNode[] = p.scenes.map((s) => {
@@ -950,32 +1022,14 @@ export function buildSceneMap(p: Project): SceneMap {
   });
   const edges: SceneMapEdge[] = [];
   const seen = new Set<string>();
-  const push = (from: string, to: string, label: string): void => {
-    if (!sceneIds.has(to)) return;
-    const key = `${from}→${to}|${label}`;
-    if (seen.has(key)) return;
+  for (const e of sceneFlow(p)) {
+    if (!sceneIds.has(e.to)) continue;
+    const label = `${e.kind === "overlay" ? "⧉ " : ""}${e.trigger} ${e.via}`;
+    const key = `${e.from}→${e.to}|${label}`;
+    if (seen.has(key)) continue;
     seen.add(key);
-    edges.push({ from, to, label });
-  };
-  for (const s of p.scenes) {
-    for (const c of s.clicks) push(s.id, c.goto, `click ${c.object}`);
-    for (const k of s.keys) push(s.id, k.goto, `key ${k.input ?? k.key}`);
-    let flat: FlatLeaf[];
-    try {
-      flat = flattenScene(p, s.id);
-    } catch {
-      continue;
-    }
-    for (const o of flat) {
-      for (const e of o.events) {
-        for (const b of e.blocks) {
-          if (b.op !== "goto") continue;
-          push(s.id, b.scene, `${e.trigger} ${o.def ?? o.id}`);
-        }
-      }
-    }
+    edges.push({ from: e.from, to: e.to, label });
   }
-  // BFS depths from the start scene for column layout.
   const depth = new Map<string, number>([[p.start, 0]]);
   const queue = [p.start];
   while (queue.length > 0) {
@@ -993,111 +1047,186 @@ export function buildSceneMap(p: Project): SceneMap {
   return { nodes, edges };
 }
 
-/** Masked rect args for overlap/click sites: the full sprite rect by
-    default, mask offsets when set. Drive deliberately keeps full
-    bounds (generous world, precise hitbox — see the plan). Zero
-    offsets collapse so output stays identical for unmasked leaves. */
-function hitArgs(
-  xBase: string,
-  yBase: string,
-  wBase: string | number,
-  hBase: string | number,
-  mask: HitBox | undefined,
-): [string, string, string | number, string | number] {
-  if (!mask) return [xBase, yBase, wBase, hBase];
-  const x = mask.x === 0 ? xBase : `${xBase} + ${mask.x}`;
-  const y = mask.y === 0 ? yBase : `${yBase} + ${mask.y}`;
-  return [x, y, mask.w, mask.h];
-}
+/* ---- Scripts, hooks, standard library (the scripting surface) ---- */
 
-/** Static collide matching: kinds and def identity are all known at
-    emit time (leaves carry resolved kind + raw def ref), so pairs
-    unroll without any runtime tags. */
-export function matchTarget(t: FlatLeaf, index: number, self: number, target: string): boolean {
-  if (index === self) return false;
-  if (target === "any") return true;
-  if (target === "solid") return !!t.solid;
-  if (target === "player" || target === "movable") return t.kind === target;
-  return target.startsWith("def:") && t.def === target.slice(4);
-}
+/** File names the emitter owns; scripts can't take them. */
+export const GENERATED_FILES = ["main.ux", "devices.ux", "custom.ux", "assets.ux"] as const;
+const SCRIPT_PATH = /^[A-Za-z][A-Za-z0-9_]*\.ux$/;
+export const MAX_SCRIPTS = 32;
+const MAX_SCRIPT_BYTES = 64 * 1024;
+/** Script loop: the only names the engine emits besides assets. */
+const SCRIPT_RESERVED_EXACT = new Set(["start", "main", "on_frame", "on_key", "on_mouse", "snd_wave"]);
+const SCRIPT_RESERVED_PREFIX = ["spr_", "snd_", "var_", "KEY_", "SPR_", "scn_", "SCN_", "draw_scene_"];
 
-/** Every block in an event list, descending into if then/else
-    branches. Buffer/device detection must see nested blocks too —
-    otherwise a nested play/move/wait assembles against missing
-    declarations on a VALID project. */
-export function eachBlock(events: ObjectEvent[]): Block[] {
-  const out: Block[] = [];
-  const walk = (blocks: Block[]): void => {
-    for (const b of blocks ?? []) {
-      out.push(b);
-      if (b.op === "if") {
-        walk(b.then ?? []);
-        if (b.else) walk(b.else);
+/** Bytes per scn_<scene> row (script loop): x hi, x lo, y hi, y lo,
+    sprite index (SPR_<ID>), cell, Screen.sprite mode, draw kind. */
+export const SCN_ROW = 8;
+
+/** Script-loop scene module: a layout table code can read and a
+    draw fn, for one scene. Rows are the flattened leaves (subscenes
+    included, offsets applied) in hierarchy order. The draw fn walks
+    the table and dispatches on a per-scene "kind" (sprite + cell +
+    mode), so the ROM holds one tile-write block per kind instead of
+    one per node — a 64-square board costs two blocks. */
+function emitSceneModule(p: Project, sceneId: string): { code: string[]; sprites: Set<string> } {
+  const leaves = flattenScene(p, sceneId);
+  const spriteIdx = new Map(p.sprites.map((x, i) => [x.id, i] as const));
+  const spriteById = new Map(p.sprites.map((x) => [x.id, x] as const));
+  const kinds: Array<{ sprite: Sprite; cell: number; mode: number; flipX: boolean; flipY: boolean }> = [];
+  const kindOf = new Map<string, number>();
+  const rows: number[] = [];
+  for (const o of leaves) {
+    const spr = spriteById.get(o.sprite);
+    if (!spr) continue;
+    const cell = o.cell ?? 0;
+    const mode = lookMode(o);
+    const key = `${o.sprite}|${cell}|${mode}`;
+    if (!kindOf.has(key)) {
+      kindOf.set(key, kinds.length);
+      kinds.push({ sprite: spr, cell, mode, flipX: !!o.flipX, flipY: !!o.flipY });
+    }
+    rows.push(o.x >> 8, o.x & 255, o.y >> 8, o.y & 255, spriteIdx.get(o.sprite) ?? 0, cell, mode, kindOf.get(key) as number);
+  }
+  const id = sceneId;
+  const n = rows.length / SCN_ROW;
+  const code: string[] = [];
+  code.push(`( scene '${id}': ${n} nodes from the Scene editor. scn_${id} rows are SCN_ROW bytes: x hi, x lo, y hi, y lo, sprite (SPR_*), cell, Screen.sprite mode, draw kind. draw_scene_${id}() paints them all. )`);
+  code.push(`SCN_${id.toUpperCase()}_COUNT :: ${n};`);
+  if (n === 0) {
+    code.push(`draw_scene_${id} :: fn() {`, `}`, ``);
+    return { code, sprites: new Set() };
+  }
+  code.push(`data scn_${id} = [${rows.join(", ")}];`);
+  code.push(`draw_scene_${id} :: fn() {`);
+  code.push(`    r: u16 = 0;`);
+  code.push(`    x: u16 = 0;`);
+  code.push(`    y: u16 = 0;`);
+  code.push(`    while r < ${rows.length} {`);
+  code.push(`        x = scn_${id}[r];`);
+  code.push(`        x = (x << 8) | scn_${id}[r + 1];`);
+  code.push(`        y = scn_${id}[r + 2];`);
+  code.push(`        y = (y << 8) | scn_${id}[r + 3];`);
+  kinds.forEach((kd, ki) => {
+    // Kind read in place (no local): every fn local is a zero-page
+    // byte for the whole program, and games run near the 256 cap.
+    code.push(`        ${ki === 0 ? "if" : "} elif"} scn_${id}[r + 7] == ${ki} {`);
+    const [tw, th] = cellTiles(kd.sprite);
+    for (let ty = 0; ty < th; ty++) {
+      for (let tx = 0; tx < tw; tx++) {
+        const dx = kd.flipX ? tw - 1 - tx : tx;
+        const dy = kd.flipY ? th - 1 - ty : ty;
+        const off = cellTileOffset(kd.sprite, kd.cell, tx, ty);
+        code.push(`            Screen.x = x${dx ? ` + ${dx * TILE_PX}` : ""};`);
+        code.push(`            Screen.y = y${dy ? ` + ${dy * TILE_PX}` : ""};`);
+        code.push(`            Screen.addr = &spr_${kd.sprite.id}${off ? ` + ${off}` : ""};`);
+        code.push(`            Screen.sprite = ${kd.mode};`);
       }
     }
-  };
-  for (const e of events ?? []) walk(e.blocks ?? []);
+  });
+  code.push(`        }`);
+  code.push(`        r = r + ${SCN_ROW};`);
+  code.push(`    }`);
+  code.push(`}`);
+  code.push(``);
+  return { code, sprites: new Set(kinds.map((k) => k.sprite.id)) };
+}
+
+export function loopOf(p: Project): LoopMode {
+  return p.loop === "script" ? "script" : "engine";
+}
+
+/** custom.ux + every script, as (file, code) pairs in import order. */
+export function userSources(p: Project): Array<{ file: string; code: string }> {
+  return [{ file: "custom.ux", code: p.customCode ?? "" }, ...(p.scripts ?? []).map((s) => ({ file: s.path, code: s.code }))];
+}
+
+/** Hooks defined anywhere in the user's code (top-level `name ::`). */
+export function definedHooks(p: Project): Set<HookName> {
+  const all = userSources(p)
+    .map((x) => x.code)
+    .join("\n");
+  return new Set(HOOKS.filter((h) => new RegExp(`^\\s*${h}\\s*::`, "m").test(all)));
+}
+
+/** Standard-library modules this project ships (transitive closure
+    of every user import that names one). */
+export function usedStdlib(p: Project): string[] {
+  const own = new Set((p.scripts ?? []).map((s) => s.path));
+  const roots = userSources(p).flatMap((x) => importsOf(x.code));
+  return stdlibClosure(roots, own);
+}
+
+/** Unindented top-level declarations only (locals don't collide). */
+function topLevelNames(code: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  for (const raw of code.split("\n")) {
+    const line = raw.split("( ")[0];
+    if (depth === 0) {
+      const m =
+        line.match(/^(?:buffer|data|device|group|struct|macro)\s+([A-Za-z][A-Za-z0-9_]*)/) ??
+        line.match(/^([A-Za-z][A-Za-z0-9_]*)\s*:/);
+      if (m) out.push(m[1]);
+    }
+    for (const ch of line) {
+      if (ch === "{") depth++;
+      else if (ch === "}") depth = Math.max(0, depth - 1);
+    }
+  }
   return out;
 }
 
-/** Songs referenced by any song block (defs + all scenes, nested
-    branches included), sorted for deterministic emission. */
-export function referencedSongs(p: Project): SongDef[] {
-  const ids = new Set<string>();
-  const scan = (events: ObjectEvent[]): void => {
-    for (const b of eachBlock(events)) if (b.op === "song") ids.add(b.song);
-  };
-  for (const d of projectDefs(p)) scan(d.events ?? []);
-  const seenScenes = new Set<string>();
-  for (const s of p.scenes) {
-    const walk = (nodes: SceneNode[]): void => {
-      for (const o of nodes) {
-        if (o.scene) {
-          if (seenScenes.has(o.scene)) continue;
-          seenScenes.add(o.scene);
-          const sub = p.scenes.find((x) => x.id === o.scene);
-          if (sub) walk(sub.nodes);
-        } else scan(o.events ?? []);
+function scriptLoopCollisions(file: string, code: string): string[] {
+  const errs: string[] = [];
+  for (const name of topLevelNames(code)) {
+    if (SCRIPT_RESERVED_EXACT.has(name) || SCRIPT_RESERVED_PREFIX.some((x) => name.startsWith(x)))
+      errs.push(`${file}: '${name}' is generated by the script loop — rename it`);
+  }
+  return errs;
+}
+
+export function validateScripts(p: Project): string[] {
+  const errs: string[] = [];
+  if (p.loop !== undefined && p.loop !== "engine" && p.loop !== "script") errs.push(`bad loop '${String(p.loop)}'`);
+  const scripts = p.scripts ?? [];
+  if (scripts.length > MAX_SCRIPTS) errs.push(`at most ${MAX_SCRIPTS} scripts`);
+  const paths = new Set<string>();
+  for (const sc of scripts) {
+    if (!SCRIPT_PATH.test(sc.path)) errs.push(`bad script name '${sc.path}' (letters, digits, _ and .ux)`);
+    else if ((GENERATED_FILES as readonly string[]).includes(sc.path))
+      errs.push(`script '${sc.path}' would replace a generated file`);
+    else if (sc.path in STDLIB) errs.push(`script '${sc.path}' shadows the library module of that name`);
+    if (paths.has(sc.path)) errs.push(`duplicate script '${sc.path}'`);
+    paths.add(sc.path);
+    if (typeof sc.code !== "string") errs.push(`script '${sc.path}' has no code`);
+    else if (sc.code.length > MAX_SCRIPT_BYTES) errs.push(`script '${sc.path}' exceeds 64KB`);
+  }
+  for (const { file, code } of userSources(p)) {
+    for (const imp of importsOf(code)) {
+      if (imp === "devices.ux" || paths.has(imp) || imp in STDLIB) continue;
+      if (imp === "assets.ux" && loopOf(p) === "script") continue;
+      errs.push(`${file}: import "${imp}" not found (add a script or pick a library module)`);
+    }
+  }
+  const loop = loopOf(p);
+  const hooks = definedHooks(p);
+  if (loop === "script") {
+    if (!hooks.has("custom_frame")) errs.push("script loop needs a custom_frame() hook — it runs every frame");
+    if (hooks.has("custom_draw")) errs.push("custom_draw() is engine-loop only — draw from custom_frame() in the script loop");
+    for (const { file, code } of userSources(p)) errs.push(...scriptLoopCollisions(file, code));
+  } else {
+    for (const sc of scripts) {
+      for (const e of validateCustomCode(sc.code)) errs.push(`${sc.path}: ${e}`);
+    }
+    for (const mod of usedStdlib(p)) {
+      const names = new Set(moduleExports(STDLIB[mod]).map((x) => x.name));
+      for (const name of names) {
+        if (validateCustomCode(`${name}: u8 = 0;`).length > 0)
+          errs.push(`library ${mod} declares '${name}', which the engine loop owns — switch to the script loop to import it`);
       }
-    };
-    walk(s.nodes);
+    }
   }
-  return [...ids]
-    .map((id) => (p.songs ?? []).find((x) => x.id === id))
-    .filter((x): x is SongDef => !!x)
-    .sort((a, b) => (a.id < b.id ? -1 : 1));
-}
-
-/** Voices any referenced song actually fires (non-empty track,
-    audible vol): the song_tick body and the Audio device decls must
-    agree exactly, or valid projects fail assembly on undeclared
-    ports. Sorted for determinism. */
-export function songVoices(p: Project): number[] {
-  const out = new Set<number>();
-  for (const s of referencedSongs(p)) {
-    s.tracks.forEach((tr, vi) => {
-      if (tr.notes.length > 0 && tr.vol > 0) out.add(vi);
-    });
-  }
-  return [...out].sort((a, b) => a - b);
-}
-
-/** Any song/song_stop block anywhere (buffers + tick follow). */
-function usesSong(p: Project): boolean {
-  const scan = (events: ObjectEvent[]): boolean =>
-    eachBlock(events).some((b) => b.op === "song" || b.op === "song_stop");
-  if (projectDefs(p).some((d) => scan(d.events ?? []))) return true;
-  return p.scenes.some((s) => s.nodes.some((o) => !o.scene && scan(o.events ?? [])));
-}
-
-/** Any overlay/back block anywhere (stack buffers + helper follow).
-    Nested subscene nodes share the owner's events, so top-level
-    nodes suffice. */
-function usesOverlay(p: Project): boolean {
-  const scan = (events: ObjectEvent[]): boolean =>
-    eachBlock(events).some((b) => b.op === "overlay" || b.op === "back");
-  if (projectDefs(p).some((d) => scan(d.events ?? []))) return true;
-  return p.scenes.some((s) => s.nodes.some((o) => !o.scene && scan(o.events ?? [])));
+  return errs;
 }
 
 export function validateProject(p: Project): string[] {
@@ -1123,7 +1252,8 @@ export function validateProject(p: Project): string[] {
     }
     return errs;
   }
-  if (p.customCode) errs.push(...validateCustomCode(p.customCode));
+  if (p.customCode && (p.loop ?? "engine") === "engine") errs.push(...validateCustomCode(p.customCode));
+  errs.push(...validateScripts(p));
   if (!u16(p.width) || !u16(p.height) || p.width === 0 || p.height === 0)
     errs.push("width/height must be 1–65535");
   const sceneIds = new Set(p.scenes.map((s) => s.id));
@@ -1138,7 +1268,14 @@ export function validateProject(p: Project): string[] {
       errs.push(`sprite '${s.id}': width must be 1–${MAX_SPRITE_TILES} tiles`);
     if (!Number.isInteger(h) || h < 1 || h > MAX_SPRITE_TILES)
       errs.push(`sprite '${s.id}': height must be 1–${MAX_SPRITE_TILES} tiles`);
-    spriteDims.set(s.id, [w, h]);
+    // Node footprint (one cell for sheets): masks, swaps and frames
+    // all compare what a node actually shows.
+    spriteDims.set(s.id, s.cell ? [s.cell.w, s.cell.h] : [w, h]);
+    if (s.cell !== undefined) {
+      const { w: cw, h: ch } = s.cell;
+      if (!Number.isInteger(cw) || !Number.isInteger(ch) || cw < 1 || ch < 1 || w % cw !== 0 || h % ch !== 0)
+        errs.push(`sprite '${s.id}': sheet cell ${cw}×${ch} must evenly divide the ${w}×${h} sprite`);
+    }
     if (s.pixels.length !== 64 * w * h || s.pixels.some((v) => v !== 0 && v !== 1 && v !== 2 && v !== 3))
       errs.push(`sprite '${s.id}': needs ${64 * w * h} pixels of 0–3`);
   }
@@ -1188,16 +1325,6 @@ export function validateProject(p: Project): string[] {
     // VALID project). Reject the hole instead of working around it.
     if (s.voices.every((v) => v.vol === 0)) errs.push(`sound '${s.id}' is silent (all voices vol 0)`);
   }
-  const snippets = p.snippets ?? [];
-  const snippetIds = new Set(snippets.map((s) => s.id));
-  if (snippetIds.size !== snippets.length) errs.push("duplicate snippet id");
-  for (const s of snippets) {
-    if (!IDENT.test(s.id)) errs.push(`bad snippet id '${s.id}'`);
-    if (typeof s.code !== "string" || s.code.trim().length === 0)
-      errs.push(`snippet '${s.id}' needs ETAL statements`);
-    else if (s.code.length > 4096) errs.push(`snippet '${s.id}' exceeds 4KB`);
-    else errs.push(...validateCustomCode(s.code).map((e) => `snippet '${s.id}': ${e}`));
-  }
   const vars = p.vars ?? [];
   const varIds = new Set(vars.map((v) => v.id));
   if (varIds.size !== vars.length) errs.push("duplicate variable id");
@@ -1235,20 +1362,21 @@ export function validateProject(p: Project): string[] {
   if (defIds.size !== defs.length) errs.push("duplicate object id");
   for (const d of defs) {
     if (!IDENT.test(d.id)) errs.push(`bad object id '${d.id}'`);
-    if (!spriteIds.has(d.sprite)) errs.push(`object '${d.id}': unknown sprite '${d.sprite}'`);
+    if (d.sprite ? !spriteIds.has(d.sprite) : !d.label) errs.push(d.sprite ? `object '${d.id}': unknown sprite '${d.sprite}'` : `object '${d.id}': needs a sprite or text`);
+    if (d.label !== undefined && (d.label.length === 0 || d.label.length > 24 || /[^\x20-\x7e]/.test(d.label)))
+      errs.push(`object '${d.id}': text must be 1–24 printable ASCII chars`);
     if (d.kind !== "player" && d.kind !== "static" && d.kind !== "movable")
       errs.push(`object '${d.id}': bad kind '${(d as { kind: unknown }).kind}'`);
     if (d.kind === "movable" && !d.solid) errs.push(`object '${d.id}': movable requires solid`);
     if (d.controls && d.kind !== "player") errs.push(`object '${d.id}': controls require player kind`);
     if (d.anim && !animIds.has(d.anim)) errs.push(`object '${d.id}': unknown animation '${d.anim}'`);
-    if (d.tick) errs.push(...validateCustomCode(d.tick).map((e) => `object '${d.id}' tick: ${e}`));
+    errs.push(...validateLook(d, `object '${d.id}'`));
     if (d.mask) {
       const tiles = spriteDims.get(d.sprite);
       const dims: [number, number] | undefined = tiles && [tiles[0] * TILE_PX, tiles[1] * TILE_PX];
       if (dims && !maskFits(d.mask, dims))
         errs.push(`object '${d.id}': mask must fit inside its ${dims[0]}×${dims[1]}px sprite`);
     }
-    errs.push(...validateEvents(d.events ?? [], `object '${d.id}'`, sceneIds, inputIds, defIds, soundIds, snippetIds, spriteIds, varIds, songIds));
   }
   if (sceneIds.size !== p.scenes.length) errs.push("duplicate scene id");
   if (!sceneIds.has(p.start)) errs.push(`start scene '${p.start}' missing`);
@@ -1277,112 +1405,57 @@ export function validateProject(p: Project): string[] {
       if (isBranch && o.events?.length) errs.push(`node '${o.id}': events are leaves only, not branches`);
       if (!isBranch && o.def && (o.events?.length ?? 0) > 0)
         errs.push(`node '${o.id}': instances carry no events — edit object '${o.def}'`);
-      if (!isBranch && !o.def)
-        errs.push(...validateEvents(o.events ?? [], `node '${o.id}'`, sceneIds, inputIds, defIds, soundIds, snippetIds, spriteIds, varIds, songIds));
-      if (!isBranch && !o.sprite && !o.def) errs.push(`node '${o.id}': leaf needs a sprite or an object`);
+      if (!isBranch && !o.sprite && !o.def && !o.label) errs.push(`node '${o.id}': needs a sprite, text or an object template`);
       if (!isBranch) {
         if (o.sprite && !spriteIds.has(o.sprite)) errs.push(`node '${o.id}': unknown sprite '${o.sprite}'`);
         if (o.def && !defIds.has(o.def)) errs.push(`node '${o.id}': unknown object '${o.def}'`);
         if (o.anim && !animIds.has(o.anim)) errs.push(`node '${o.id}': unknown animation '${o.anim}'`);
       }
-      if (o.tick) errs.push(...validateCustomCode(o.tick).map((e) => `node '${o.id}' tick: ${e}`));
       if (o.label !== undefined && (typeof o.label !== "string" || o.label.length === 0 || o.label.length > 24 || /[^\x20-\x7e]/.test(o.label)))
         errs.push(`node '${o.id}': label must be 1–24 printable ASCII chars`);
-      if (o.initCode)
-        errs.push(...validateCustomCode(o.initCode).map((e) => `node '${o.id}' creation code: ${e}`));
       if (o.kind !== undefined && o.kind !== "player" && o.kind !== "static" && o.kind !== "movable")
         errs.push(`node '${o.id}': bad kind '${(o as { kind: unknown }).kind}'`);
+      errs.push(...validateLook(o, `node '${o.id}'`));
     }
     // Flattened view: defs resolved, so physics rules, size matches
     // and caps all check effective values (a def can supply any of
     // them). Paths pinpoint nested leaves.
     try {
       const flat = flattenScene(p, s.id);
-      const players = flat.filter((o) => o.kind === "player");
-      if (players.length > 1) errs.push(`scene '${s.id}': at most one player (0 allowed)`);
-      const drivers = flat.filter((o) => o.controls);
-      if (drivers.length > 1) errs.push(`scene '${s.id}': at most one keyboard driver`);
-      let pairs = 0;
+      const spriteById = new Map(p.sprites.map((x) => [x.id, x]));
       for (const o of flat) {
-        if (o.kind === "movable" && !o.solid)
-          errs.push(`scene '${s.id}': '${o.path}' movable requires solid`);
-        if (o.controls && o.kind !== "player")
-          errs.push(`scene '${s.id}': '${o.path}' controls require player kind`);
+        const spr = spriteById.get(o.sprite);
+        if (spr && (o.cell ?? 0) >= cellCount(spr))
+          errs.push(`scene '${s.id}': '${o.path}' shows cell ${o.cell} but sprite '${spr.id}' has ${cellCount(spr)}`);
+        if (spr?.cell && o.anim) errs.push(`scene '${s.id}': '${o.path}' animates a sheet sprite — animations swap whole sprites`);
+      }
+      for (const o of flat) {
         if (o.mask) {
           const tiles = spriteDims.get(o.sprite);
           const dims: [number, number] | undefined = tiles && [tiles[0] * TILE_PX, tiles[1] * TILE_PX];
           if (dims && !maskFits(o.mask, dims))
-            errs.push(`scene '${s.id}': '${o.path}' mask must fit inside its ${dims[0]}×${dims[1]}px sprite`);
+            errs.push(`scene '${s.id}': '${o.path}' hitbox must fit inside its ${dims[0]}×${dims[1]}px sprite`);
         }
-        // Wait/alarm slot pairing is checked per owner inside
-        // validateEvents (defs and leaves both flow through it).
-        for (const e of o.events) {
-          if (e.trigger !== "collide" || e.blocks.length === 0) continue;
-          const hits = flat.filter((t, j) => matchTarget(t, j, flat.indexOf(o), e.target ?? ""));
-          if (hits.length === 0)
-            errs.push(`scene '${s.id}': '${o.path}' collide '${e.target}' matches nothing`);
-          pairs += hits.length;
+        if (o.sprite && !spriteIds.has(o.sprite)) errs.push(`scene '${s.id}': '${o.path}' unknown sprite '${o.sprite}'`);
+        if (!o.sprite && !o.label) errs.push(`scene '${s.id}': '${o.path}' needs a sprite or text`);
+        if (o.anim && !animIds.has(o.anim)) errs.push(`scene '${s.id}': '${o.path}' unknown animation '${o.anim}'`);
+        for (const [name, val] of Object.entries(o.vars ?? {})) {
+          if (!u16(val)) errs.push(`scene '${s.id}': '${o.path}' variable '${name}' must be 0–65535`);
+          const def = o.def ? defs.find((d) => d.id === o.def) : undefined;
+          if (!def?.vars?.some((v) => v.id === name)) errs.push(`scene '${s.id}': '${o.path}' has no variable '${name}'`);
         }
-        if (!spriteIds.has(o.sprite))
-          errs.push(`scene '${s.id}': '${o.path}' unknown sprite '${o.sprite}'`);
-        if (o.anim && !animIds.has(o.anim))
-          errs.push(`scene '${s.id}': '${o.path}' unknown animation '${o.anim}'`);
-        // The emitter draws with the leaf sprite's tile width; an
-        // animation of other-sized frames would tear at the seams.
-        if (o.anim && o.sprite) {
-          const leaf = spriteDims.get(o.sprite);
-          const frames = animDims.get(o.anim);
-          if (leaf && frames && (leaf[0] !== frames[0] || leaf[1] !== frames[1]))
-            errs.push(`scene '${s.id}': '${o.path}' sprite must match animation '${o.anim}' size`);
-        }
-        // Same rule for sprite-swap blocks: the draw loop unrolls
-        // the declared tile size, so swapped art must share it.
-        // Destroy-with-target unrolls per victim like collide pairs.
-        for (const e of o.events) {
-          for (const b of e.blocks) {
-            if (b.op === "sprite") {
-              const leaf = spriteDims.get(o.sprite);
-              const swap = spriteDims.get(b.sprite);
-              if (leaf && swap && (leaf[0] !== swap[0] || leaf[1] !== swap[1]))
-                errs.push(`scene '${s.id}': '${o.path}' sprite block must match ${leaf[0]}×${leaf[1]} tiles`);
-            }
-            if (b.op === "destroy" && b.target !== undefined && b.target !== "self") {
-              const hits = flat.filter((t, j) => matchTarget(t, j, flat.indexOf(o), b.target as string));
-              if (hits.length === 0)
-                errs.push(`scene '${s.id}': '${o.path}' destroy '${b.target}' matches nothing`);
-              else if (hits.length > MAX_DESTROY_TARGETS)
-                errs.push(
-                  `scene '${s.id}': '${o.path}' destroy '${b.target}' hits ${hits.length} (max ${MAX_DESTROY_TARGETS}) — narrow the target`,
-                );
-            }
-          }
-        }
-      }
-      if (pairs > MAX_COLLIDE_PAIRS)
-        errs.push(
-          `scene '${s.id}': ${pairs} collide pairs (max ${MAX_COLLIDE_PAIRS}) — narrow targets or split the scene`,
-        );
-      const paths = new Set(flat.map((o) => o.path));
-      for (const c of s.clicks) {
-        if (!paths.has(c.object)) errs.push(`scene '${s.id}': click on unknown node '${c.object}'`);
-        if (!sceneIds.has(c.goto)) errs.push(`scene '${s.id}': goto unknown scene '${c.goto}'`);
       }
     } catch (e) {
       errs.push(`scene '${s.id}': ${(e as Error).message}`);
     }
-    for (const k of s.keys) {
-      if (!Number.isInteger(k.key) || k.key < 0 || k.key > 255)
-        errs.push(`scene '${s.id}': key must be 0–255`);
-      if (k.input !== undefined && !inputIds.has(k.input))
-        errs.push(`scene '${s.id}': key binding on unknown input '${k.input}'`);
-      if (!sceneIds.has(k.goto)) errs.push(`scene '${s.id}': key goto unknown scene '${k.goto}'`);
-    }
-    if (s.frameCode) errs.push(...validateCustomCode(s.frameCode).map((e) => `scene '${s.id}' code: ${e}`));
+    if (s.pool !== undefined && (!Number.isInteger(s.pool) || s.pool < 0 || s.pool > MAX_OBJECTS))
+      errs.push(`scene '${s.id}': spawn slots must be 0–${MAX_OBJECTS}`);
   }
+  errs.push(...validateBehaviour(p));
   return errs;
 }
 
-const DEVICES = `( generated devices: System + Screen + Controller + Mouse. )
+export const DEVICES_ENGINE = `( generated devices: System + Screen + Controller + Mouse. )
 device System 0 {
     vector: 2
     expansion: 2
@@ -1423,7 +1496,7 @@ device Mouse 144 {
 }
 `;
 
-function audioBlock(name: string, page: number): string {
+export function audioBlock(name: string, page: number): string {
   return `device ${name} ${page} {
     vector: 2
     position: 2
@@ -1438,1008 +1511,168 @@ function audioBlock(name: string, page: number): string {
 `;
 }
 
-const SQ32 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+export const SQ32 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255];
-
-function emitDevices(p: Project): string {
-  let s = DEVICES;
-  usedVoices(p).forEach((v) => {
-    s += audioBlock(`Audio${v}`, 48 + v * 16);
-  });
-  return s;
-}
-
-/** Voice indices with vol > 0 (max 4, validated), plus every voice
-    a play block names: one-shot SFX reuse the boot sample. Runs after
-    validation, so flattening never throws here. */
-function usedVoices(p: Project): number[] {
-  const out = new Set<number>();
-  (p.sound?.voices ?? []).forEach((v, i) => {
-    if (i < 4 && v.vol > 0) out.add(i);
-  });
-  const snds = soundMap(p);
-  for (const s of p.scenes) {
-    for (const o of flattenScene(p, s.id)) {
-      for (const b of eachBlock(o.events)) {
-        if (b.op !== "play") continue;
-        snds.get(b.sound)?.voices.forEach((v, i) => {
-          if (i < 4 && v.vol > 0) out.add(i);
-        });
-      }
-    }
-  }
-  for (const s of referencedSongs(p)) {
-    s.tracks.forEach((tr, vi) => {
-      if (tr.notes.length > 0 && tr.vol > 0) out.add(vi);
-    });
-  }
-  return [...out].sort((a, b) => a - b);
-}
-
-function flagsOf(o: SceneObject): number {
-  // bit0 present, bit1 solid, bit2 movable, bit3 alive (destroy clears
-  // it; draw/drive/collide/handlers all honor it — see Phase 2).
-  return 1 | (o.solid ? 2 : 0) | (o.kind === "movable" ? 4 : 0) | 8;
-}
-
-/** Per-slot generated prefix: root scene + sanitized instance path. */
-function slotTag(rootId: string, path: string): string {
-  return `${rootId}_${path.replace(/\//g, "_")}`;
-}
-
-function emitSetup(
-  rootId: string,
-  leaves: FlatLeaf[],
-  dims: Map<string, [number, number]>,
-  withDims: boolean,
-  withAlarm: boolean,
-): string {
-  const lines = [`setup_${rootId} :: fn() {`];
-  for (let i = 0; i < leaves.length; i++) {
-    const o = leaves[i];
-    let line = `    ox[${i}] = ${o.x}; oy[${i}] = ${o.y}; ot[${i}] = &spr_${o.sprite}; oflags[${i}] = ${flagsOf(o)};`;
-    // Dims ride along for every leaf when anything reads them: move
-    // clamps and overlap address arbitrary (often non-solid) slots,
-    // so the solid-only shortcut from Phase 0 had to go. Uniform
-    // lines keep setup fns around 7 refs/leaf — under the assembler
-    // budget (~1200) with room to spare at realistic scene sizes.
-    if (withDims) {
-      const [pw, ph] = dims.get(o.sprite) ?? [TILE_PX, TILE_PX];
-      line += ` ow[${i}] = ${pw}; oh[${i}] = ${ph};`;
-    }
-    if (withAlarm && o.events.some((e) => e.trigger === "alarm" && (e.alarm ?? 0) === 0 && e.blocks.length > 0))
-      line += ` oat[${i}] = 0;`;
-    for (const sl of [1, 2, 3]) {
-      if (o.events.some((e) => e.trigger === "alarm" && e.alarm === sl && e.blocks.length > 0))
-        line += ` oat${sl}[${i}] = 0;`;
-    }
-    lines.push(line);
-  }
-  for (let i = 0; i < leaves.length; i++) {
-    const o = leaves[i];
-    // Create fn runs when it has blocks OR instance code (both run
-    // on scene enter, blocks first) — same condition as emission.
-    if (o.events.some((e) => e.trigger === "create" && e.blocks.length > 0) || o.initCode)
-      lines.push(`    create_${slotTag(rootId, o.path)}(${i});`);
-  }
-  lines.push(`    ocount = ${leaves.length};`);
-  lines.push(`}`);
-  return lines.join("\n") + "\n";
-}
-
-/** Per-scene draw: one straight-line tile write per 8×8 tile
-    (Screen.sprite = 129 each), row-major, tile (tx, ty) at
-    addr + (ty*w + tx)*16. Literals everywhere — no new ETAL
-    features, no auto-port dependency, identical bytes for 1×1
-    sprites. Animation frames share the leaf's tile width
-    (validated), so ot swaps stay aligned.
-    dims maps sprite id → [tiles wide, tiles tall] (NOT pixels). */
-function emitDrawScene(s: Scene, leaves: FlatLeaf[], dims: Map<string, [number, number]>): string {
-  const lines = [`draw_${s.id} :: fn() {`, `    draw_bg();`];
-  leaves.forEach((o, i) => {
-    const [tw, th] = dims.get(o.sprite) ?? [1, 1];
-    const px = (v: number): string => (v === 0 ? "" : ` + ${v}`);
-    // Destroyed leaves go quiet (alive bit); the guard costs one
-    // reference per leaf — nothing next to the tile writes.
-    lines.push(`    if oflags[${i}] & 8 != 0 {`);
-    for (let ty = 0; ty < th; ty++) {
-      for (let tx = 0; tx < tw; tx++) {
-        const off = (ty * tw + tx) * 16;
-        lines.push(`        Screen.x = ox[${i}]${px(tx * TILE_PX)};`);
-        lines.push(`        Screen.y = oy[${i}]${px(ty * TILE_PX)};`);
-        lines.push(`        Screen.addr = ot[${i}]${px(off)};`);
-        lines.push(`        Screen.sprite = 129;`);
-      }
-    }
-    // Label glyphs: prerendered at emit time into lbl_<tag> (one
-    // 8-byte glyph per char, so the blit base is data + char*8),
-    // 1bpp mode 1, drawn on top of the art.
-    if (o.label) {
-      const tag = slotTag(s.id, o.path);
-      for (let c = 0; c < [...o.label].length; c++) {
-        lines.push(`        Screen.x = ox[${i}]${px(c * TILE_PX)};`);
-        lines.push(`        Screen.y = oy[${i}];`);
-        lines.push(`        Screen.addr = &lbl_${tag} + ${c * 8};`);
-        lines.push(`        Screen.sprite = 1;`);
-      }
-    }
-    lines.push(`    }`);
-  });
-  lines.push(`}`);
-  return lines.join("\n") + "\n";
-}
-
-export interface BlockCtx {
-  /** Slot variable (`slot`) or literal index. */
-  slot: string;
-  /** Canvas size for move clamps. */
-  w: number;
-  h: number;
-  /** Destroy-event fn to call first, when the leaf has one. */
-  destroyFn?: string;
-  /** Named sounds for play blocks (unknown id previews as a comment;
-      emit never sees one — validation throws first). */
-  sounds: Map<string, SoundDef>;
-  /** Named snippets for run blocks (same degrade-to-comment rule). */
-  snippets: Map<string, string>;
-  /** Named songs for song blocks (unknown id previews as a comment;
-      emit never sees one — validation throws first). Absent = no
-      song library, so song blocks preview as comments. */
-  songs?: Map<string, SongDef>;
-  /** Tile dims per sprite id, for sprite-swap ow/oh writes. */
-  tiles?: Map<string, [number, number]>;
-  /** Static destroy victims for a non-self target: literal slot +
-      victim destroy fn when it has one. Empty = comment line. */
-  victimsOf?: (target: string) => Array<{ slot: string; fn?: string }>;
-}
-
-/** Tile dims per sprite id. */
-export function tileDimsOf(p: Project): Map<string, [number, number]> {
-  return new Map(p.sprites.map((x) => [x.id, spriteTiles(x)] as const));
-}
-
-/** Named sounds by id (unknown ids are a validation error; the
-    preview degrades to a comment line instead of throwing). */
-export function soundMap(p: Project): Map<string, SoundDef> {
-  return new Map((p.sounds ?? []).map((s) => [s.id, s]));
-}
-
-/** Named snippets by id (same validation/preview contract as sounds). */
-export function snippetMap(p: Project): Map<string, string> {
-  return new Map((p.snippets ?? []).map((s) => [s.id, s.code]));
-}
-
-/** Named songs by id (same validation/preview contract). */
-export function songMap(p: Project): Map<string, SongDef> {
-  return new Map((p.songs ?? []).map((s) => [s.id, s]));
-}
-
-/** Dpad bit per direction (same masks the keyboard driver reads). */
-const BTN_MASK = { up: 16, down: 32, left: 64, right: 128 } as const;
-const CMP_OP: Record<CmpOp, string> = { eq: "==", neq: "!=", lt: "<", lte: "<=", gt: ">", gte: ">=" };
-
-function lowerOperand(o: ValueOperand, slot: string): string {
-  if (o.kind === "var") return `var_${o.name}[0]`;
-  if (o.kind === "const") return String(o.value);
-  if (o.kind === "pos") return o.axis === "x" ? `ox[${slot}]` : `oy[${slot}]`;
-  return `(Controller.button & ${BTN_MASK[o.dir]})`;
-}
-
-/** One block = fixed ETAL lines. THE lowering: the UI live preview
-    and the emitter both call this, so what you see is what assembles.
-    Move clamps read ow/oh (emitted whenever blocks need them); every
-    other op is literals. No locals, no globals — leaf fns stay
-    dependency-free and far under the assembler reference budget. */
-export function previewBlocks(blocks: Block[], ctx: BlockCtx): string[] {
-  const { slot, w, h } = ctx;
-  const lines: string[] = [];
-  for (const b of blocks) {
-    if (b.op === "move") {
-      if (b.dx > 0) lines.push(`if ox[${slot}] + ow[${slot}] < ${w + 1} { ox[${slot}] = ox[${slot}] + ${b.dx}; }`);
-      else if (b.dx < 0) lines.push(`if ox[${slot}] >= ${-b.dx} { ox[${slot}] = ox[${slot}] - ${-b.dx}; }`);
-      if (b.dy > 0) lines.push(`if oy[${slot}] + oh[${slot}] < ${h + 1} { oy[${slot}] = oy[${slot}] + ${b.dy}; }`);
-      else if (b.dy < 0) lines.push(`if oy[${slot}] >= ${-b.dy} { oy[${slot}] = oy[${slot}] - ${-b.dy}; }`);
-    } else if (b.op === "set_pos") {
-      lines.push(`ox[${slot}] = ${b.x}; oy[${slot}] = ${b.y};`);
-    } else if (b.op === "play") {
-      const snd = ctx.sounds.get(b.sound);
-      if (!snd) {
-        lines.push(`( unknown sound '${b.sound}' )`);
-      } else {
-        snd.voices.forEach((v, vi) => {
-          if (vi >= 4 || v.vol <= 0) return;
-          lines.push(`Audio${vi}.addr = &sq32;`);
-          lines.push(`Audio${vi}.length = 32;`);
-          lines.push(`Audio${vi}.volume = ${v.vol};`);
-          lines.push(`Audio${vi}.adsr = 4369;`);
-          lines.push(`Audio${vi}.pitch = ${128 + v.note};`);
-        });
-      }
-    } else if (b.op === "goto") {
-      lines.push(`setup_${b.scene}();`);
-      lines.push(`scene_go(SC_${b.scene.toUpperCase()});`);
-    } else if (b.op === "destroy") {
-      if (b.target === undefined || b.target === "self") {
-        if (ctx.destroyFn) lines.push(`${ctx.destroyFn}(${slot});`);
-        lines.push(`oflags[${slot}] = oflags[${slot}] & 247;`);
-      } else {
-        const victims = ctx.victimsOf ? ctx.victimsOf(b.target) : [];
-        if (victims.length === 0) lines.push(`( destroy '${b.target}' matches nothing )`);
-        for (const v of victims) {
-          lines.push(`if oflags[${v.slot}] & 8 != 0 {`);
-          if (v.fn) lines.push(`    ${v.fn}(${v.slot});`);
-          lines.push(`    oflags[${v.slot}] = oflags[${v.slot}] & 247;`);
-          lines.push(`}`);
-        }
-      }
-    } else if (b.op === "wait") {
-      const ws = b.slot ?? 0;
-      if (ws === 0) lines.push(`oat[${slot}] = ${b.ticks};`);
-      else lines.push(`oat${ws}[${slot}] = ${b.ticks};`);
-    } else if (b.op === "set") {
-      const cell = `var_${b.name}[0]`;
-      if (b.mode === "add") lines.push(`${cell} = ${cell} + ${b.value};`);
-      else if (b.mode === "sub") lines.push(`${cell} = ${cell} - ${b.value};`);
-      else lines.push(`${cell} = ${b.value};`);
-    } else if (b.op === "if") {
-      const c = (b as { cond?: Cond }).cond;
-      if (!c || !c.left || !c.right) lines.push(`( if: bad condition )`);
-      else {
-        const ind = (ss: string[]): string[] => ss.map((l) => `    ${l}`);
-        lines.push(`if ${lowerOperand(c.left, slot)} ${CMP_OP[c.op] ?? "=="} ${lowerOperand(c.right, slot)} {`);
-        lines.push(...ind(previewBlocks(b.then ?? [], ctx)));
-        if (b.else && b.else.length > 0) {
-          lines.push(`} else {`);
-          lines.push(...ind(previewBlocks(b.else, ctx)));
-        }
-        lines.push(`}`);
-      }
-    } else if (b.op === "sprite") {
-      const dims = (ctx.tiles ?? new Map()).get(b.sprite);
-      if (!dims) lines.push(`( unknown sprite '${b.sprite}' )`);
-      else {
-        lines.push(`ot[${slot}] = &spr_${b.sprite};`);
-        lines.push(`ow[${slot}] = ${dims[0] * 8}; oh[${slot}] = ${dims[1] * 8};`);
-      }
-    } else if (b.op === "show") {
-      lines.push(`oflags[${slot}] = oflags[${slot}] | 8;`);
-    } else if (b.op === "hide") {
-      lines.push(`oflags[${slot}] = oflags[${slot}] & 247;`);
-    } else if (b.op === "code") {
-      for (const line of String(b.code).split("\n")) lines.push(line);
-    } else if (b.op === "run") {
-      const snippet = ctx.snippets.get(b.snippet);
-      if (snippet === undefined) lines.push(`( unknown snippet '${b.snippet}' )`);
-      else for (const line of snippet.split("\n")) lines.push(line);
-    } else if (b.op === "song") {
-      if (!ctx.songs?.has(b.song)) lines.push(`( unknown song '${b.song}' )`);
-      else {
-        lines.push(`song_${b.song}_start();`);
-        lines.push(`sg_on = 1;`);
-      }
-    } else if (b.op === "song_stop") {
-      lines.push(`sg_on = 0;`);
-    } else if (b.op === "overlay") {
-      lines.push(`if ovsp[0] < 8 {`);
-      lines.push(`    ovst[ovsp[0]] = scene;`);
-      lines.push(`    ovsp[0] = ovsp[0] + 1;`);
-      lines.push(`    setup_${b.scene}();`);
-      lines.push(`    scene_go(SC_${b.scene.toUpperCase()});`);
-      lines.push(`}`);
-    } else if (b.op === "back") {
-      lines.push(`overlay_back();`);
-    } else if (b.op === "button") {
-      lines.push(`( button '${b.label}' -> ${b.action} )`);
-    } else {
-      throw new Error(`unknown block '${(b as { op: unknown }).op}'`);
-    }
-  }
-  return lines;
-}
-
-/** Destroy-event fn name for a leaf: def destroy fns live per template
-    (`destroy_def_<id>`, emitted once globally), inline ones per leaf
-    (`destroy_<tag>`). Shared by the emitter, the UI preview and
-    preview_event, so all three agree on the call. */
-export function destroyFnName(
-  defs: Map<string, ObjectDef>,
-  leaf: FlatLeaf,
-  tag: string,
-): string | undefined {
-  if (leaf.def) {
-    const evs = defs.get(leaf.def)?.events ?? [];
-    return evs.some((e) => e.trigger === "destroy" && e.blocks.length > 0) ? `destroy_def_${leaf.def}` : undefined;
-  }
-  return leaf.events.some((e) => e.trigger === "destroy" && e.blocks.length > 0) ? `destroy_${tag}` : undefined;
-}
-
-/** An event owner for previews and tools: a template, or a top-level
-    leaf path of the preview scene. */
-export interface PreviewOwner {
-  def?: string;
-  leaf?: string;
-}
-
-/** Static destroy victims for a non-self target: literal slot per
-    matched leaf plus its destroy fn when it has one. Shared by the
-    UI preview and the emitter so both agree. */
-export function destroyVictims(
-  leaves: FlatLeaf[],
-  defs: Map<string, ObjectDef>,
-  rootId: string,
-  selfIdx: number,
-  target: string,
-): Array<{ slot: string; fn?: string }> {
-  const out: Array<{ slot: string; fn?: string }> = [];
-  leaves.forEach((t, j) => {
-    if (!matchTarget(t, j, selfIdx, target)) return;
-    out.push({ slot: String(j), fn: destroyFnName(defs, t, slotTag(rootId, t.path)) });
-  });
-  return out;
-}
-
-/** Exact body lines for one event, as the emitter writes them
-    (slot-relative; headers omitted). Collide shows its matched
-    targets as a comment plus the lowered blocks — the pair
-    scaffolding itself is visible in emit_files output. */
-export function previewOwnerEvent(
-  p: Project,
-  sceneId: string,
-  owner: PreviewOwner,
-  eventId: string,
-): string[] | null {
-  let leaves: FlatLeaf[];
-  try {
-    leaves = flattenScene(p, sceneId);
-  } catch {
-    return null;
-  }
-  const defs = new Map(projectDefs(p).map((d) => [d.id, d]));
-  let events: ObjectEvent[];
-  let destroyFn: string | undefined;
-  if (owner.def !== undefined) {
-    const def = defs.get(owner.def);
-    if (!def) return null;
-    events = def.events ?? [];
-    destroyFn = (def.events ?? []).some((e) => e.trigger === "destroy" && e.blocks.length > 0)
-      ? `destroy_def_${def.id}`
-      : undefined;
-  } else if (owner.leaf !== undefined) {
-    const leaf = leaves.find((l) => l.path === owner.leaf);
-    if (!leaf) return null;
-    events = leaf.events;
-    destroyFn = destroyFnName(defs, leaf, slotTag(sceneId, leaf.path));
-  } else {
-    return null;
-  }
-  const ev = events.find((e) => e.id === eventId);
-  if (!ev) return null;
-  const selfIdx = owner.leaf !== undefined ? leaves.findIndex((l) => l.path === owner.leaf) : -1;
-  const victimsOf = (target: string) => destroyVictims(leaves, defs, sceneId, selfIdx, target);
-  const lines = previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, destroyFn, sounds: soundMap(p), snippets: snippetMap(p), tiles: tileDimsOf(p), victimsOf, songs: songMap(p) });
-  if (ev.trigger === "collide") {
-    const hits = leaves.filter((t, j) => matchTarget(t, j, -1, ev.target ?? "")).map((t) => t.path);
-    return [`( collide ${ev.target} → ${hits.join(", ") || "nothing"} )`, ...lines];
-  }
-  return lines;
-}
-
-/** Per-leaf event fns for one scene. Every event becomes a small
-    `slot`-param fn — the frame only dispatches — so generated fns
-    stay far under the assembler reference budget no matter how many
-    leaves share a scene. Step blocks share the historic `tick_<tag>`
-    name with legacy tick text (blocks first); destroyed leaves never
-    reach these fns (dispatch sites guard the alive bit). Destroy fns
-    for defs emit once globally (see below), inline ones per leaf. */
-function emitLeafEvents(
-  rootId: string,
-  leaves: FlatLeaf[],
-  w: number,
-  h: number,
-  defs: Map<string, ObjectDef>,
-  sounds: Map<string, SoundDef>,
-  snippets: Map<string, string>,
-  tiles: Map<string, [number, number]>,
-  songs: Map<string, SongDef>,
-): string[] {
-  const lines: string[] = [];
-  const ind = (ss: string[]): string[] => ss.map((l) => `    ${l}`);
-  leaves.forEach((o, i) => {
-    const tag = slotTag(rootId, o.path);
-    const victimsOf = (target: string) => destroyVictims(leaves, defs, rootId, i, target);
-    const ctx: BlockCtx = { slot: "slot", w, h, destroyFn: destroyFnName(defs, o, tag), sounds, snippets, tiles, victimsOf, songs };
-    const fn = (name: string, stmts: string[]): void => {
-      if (stmts.length === 0) return;
-      lines.push(`${name} :: fn(slot: u16) {`, ...ind(stmts), `}`);
-    };
-    // Create: blocks first, instance code after — same condition as
-    // the setup call site, so the fn always exists when called.
-    const createEv = o.events.find((e) => e.trigger === "create");
-    const createBody = [
-      ...(createEv && createEv.blocks.length > 0 ? previewBlocks(createEv.blocks, ctx) : []),
-      ...(o.initCode ? String(o.initCode).split("\n") : []),
-    ];
-    if (createBody.length > 0) fn(`create_${tag}`, createBody);
-    for (const e of o.events) {
-      if (e.blocks.length === 0 || e.trigger === "create") continue;
-      if (e.trigger === "destroy" && !o.def) fn(`destroy_${tag}`, previewBlocks(e.blocks, ctx));
-      else if (e.trigger === "alarm") {
-        const slot = e.alarm ?? 0;
-        fn(slot === 0 ? `alarm_${tag}` : `alarm_${tag}_${slot}`, previewBlocks(e.blocks, ctx));
-      } else if (e.trigger === "key" && e.key) fn(`key_${tag}_${e.key}`, previewBlocks(e.blocks, ctx));
-      else if (e.trigger === "click") fn(`click_${tag}`, previewBlocks(e.blocks, ctx));
-    }
-    let ci = 0;
-    for (const e of o.events) {
-      if (e.trigger !== "collide" || e.blocks.length === 0) continue;
-      const [sx, sy, sw, sh] = hitArgs("ox[slot]", "oy[slot]", "ow[slot]", "oh[slot]", o.mask);
-      const body: string[] = [`if oflags[slot] & 8 != 0 {`];
-      leaves.forEach((t, j) => {
-        if (!matchTarget(t, j, i, e.target ?? "")) return;
-        const [jx, jy, jw, jh] = hitArgs(`ox[${j}]`, `oy[${j}]`, `ow[${j}]`, `oh[${j}]`, t.mask);
-        body.push(`    if overlapwh(${sx}, ${sy}, ${sw}, ${sh}, ${jx}, ${jy}, ${jw}, ${jh}) {`);
-        for (const s of previewBlocks(e.blocks, ctx)) body.push(`        ${s}`);
-        body.push(`    }`);
-      });
-      body.push(`}`);
-      fn(`collide_${tag}_${ci++}`, body);
-    }
-    // Step: blocks first, legacy tick text after, one historic name.
-    const stepEv = o.events.find((e) => e.trigger === "step");
-    const stepLines =
-      stepEv && stepEv.blocks.length > 0 ? previewBlocks(stepEv.blocks, ctx).map((l) => `    ${l}`) : [];
-    if (stepLines.length > 0 || o.tick) {
-      lines.push(
-        `tick_${tag} :: fn(slot: u16) {`,
-        ...stepLines,
-        ...String(o.tick ?? "")
-          .split("\n")
-          .map((line) => `    ${line}`),
-        `}`,
-      );
-    }
-  });
-  return lines;
-}
-
-/** Destroy fns for templates with destroy events: one fn per def
-    (instances share it — statements are slot-relative). Inline
-    leaves get theirs in emitLeafEvents. */
-function emitDefEvents(p: Project): string[] {
-  const lines: string[] = [];
-  for (const d of projectDefs(p)) {
-    const ev = (d.events ?? []).find((e) => e.trigger === "destroy" && e.blocks.length > 0);
-    if (!ev) continue;
-    lines.push(`destroy_def_${d.id} :: fn(slot: u16) {`);
-    for (const l of previewBlocks(ev.blocks, { slot: "slot", w: p.width, h: p.height, sounds: soundMap(p), snippets: snippetMap(p), tiles: tileDimsOf(p), songs: songMap(p) })) lines.push(`    ${l}`);
-    lines.push(`}`);
-  }
-  return lines;
-}
-
-function emitAnim(rootId: string, leaves: FlatLeaf[], anims: Map<string, Animation>): string[] {
-  const lines: string[] = [];
-  leaves.forEach((o, i) => {
-    if (!o.anim) return;
-    const a = anims.get(o.anim);
-    if (!a) return;
-    const tag = slotTag(rootId, o.path);
-    const F = a.frames.length;
-    const hold = a.loop ? `afr_${tag} = 0;` : `afr_${tag} = ${F - 1};`;
-    lines.push(`    atick_${tag} = atick_${tag} + 1;`);
-    lines.push(`    if atick_${tag} >= ${a.rate} {`);
-    lines.push(`        atick_${tag} = 0;`);
-    if (a.pingpong) {
-      // Bounce at the ends (validated: loop + 2+ frames, so F - 2 is
-      // safe and the reverse branch always has somewhere to go).
-      // One if/else: the flip must not fall through to a reverse
-      // step in the same tick.
-      lines.push(`        if adir_${tag} == 0 {`);
-      lines.push(`            afr_${tag} = afr_${tag} + 1;`);
-      lines.push(`            if afr_${tag} >= ${F} { afr_${tag} = ${F - 2}; adir_${tag} = 1; }`);
-      lines.push(`        }`);
-      lines.push(`        else {`);
-      lines.push(`            if afr_${tag} == 0 { afr_${tag} = 1; adir_${tag} = 0; }`);
-      lines.push(`            else { afr_${tag} = afr_${tag} - 1; }`);
-      lines.push(`        }`);
-    } else {
-      lines.push(`        afr_${tag} = afr_${tag} + 1;`);
-      lines.push(`        if afr_${tag} >= ${F} { ${hold} }`);
-    }
-    lines.push(`    }`);
-    a.frames.forEach((f, fi) => {
-      lines.push(`    if afr_${tag} == ${fi} { ot[${i}] = &spr_${f}; }`);
-    });
-  });
-  return lines;
-}
-
-function emitDrive(pi: number, w: number, h: number, n: number, pw: number, ph: number): string[] {
-  // Keyboard drive + collide-and-push for the player slot. The
-  // player's own bounds are literals (static slot); pushed objects
-  // read their pixel dims from ow/oh (dynamic slot).
-  const lines = [
-    `    dpad: u8 = Controller.button;`,
-    `    nx: u16 = ox[${pi}]; ny: u16 = oy[${pi}];`,
-    `    if dpad & 64 != 0 { if nx >= 1 { nx = nx - 1; } }`,
-    `    if dpad & 128 != 0 { if nx < ${Math.max(1, w - pw)} { nx = nx + 1; } }`,
-    `    if dpad & 16 != 0 { if ny >= 1 { ny = ny - 1; } }`,
-    `    if dpad & 32 != 0 { if ny < ${Math.max(1, h - ph)} { ny = ny + 1; } }`,
-    `    ox_old: u16 = ox[${pi}]; oy_old: u16 = oy[${pi}];`,
-    `    ox[${pi}] = nx; oy[${pi}] = ny;`,
-    `    blocked: u8 = 0;`,
-    `    for j in 0..${n} {`,
-    `        if j != ${pi} {`,
-    `            if oflags[j] & 10 == 10 {`,
-    `                if overlapwh(ox[${pi}], oy[${pi}], ${pw}, ${ph}, ox[j], oy[j], ow[j], oh[j]) {`,
-    `                    if oflags[j] & 4 != 0 {`,
-    `                        jx: u16 = ox[j]; jy: u16 = oy[j];`,
-    `                        if dpad & 64 != 0 { if jx >= 1 { jx = jx - 1; } }`,
-    `                        if dpad & 128 != 0 { if jx + ow[j] < ${w + 1} { jx = jx + 1; } }`,
-    `                        if dpad & 16 != 0 { if jy >= 1 { jy = jy - 1; } }`,
-    `                        if dpad & 32 != 0 { if jy + oh[j] < ${h + 1} { jy = jy + 1; } }`,
-    `                        free: u8 = 1;`,
-    `                        for k in 0..${n} {`,
-    `                            if k != ${pi} {`,
-    `                                if k != j {`,
-    `                                    if oflags[k] & 10 == 10 {`,
-    `                                        if overlapwh(jx, jy, ow[j], oh[j], ox[k], oy[k], ow[k], oh[k]) { free = 0; }`,
-    `                                    }`,
-    `                                }`,
-    `                            }`,
-    `                        }`,
-    `                        if free != 0 { ox[j] = jx; oy[j] = jy; } else { blocked = 1; }`,
-    `                    } else { blocked = 1; }`,
-    `                }`,
-    `            }`,
-    `        }`,
-    `    }`,
-    `    if blocked != 0 { ox[${pi}] = ox_old; oy[${pi}] = oy_old; }`,
-  ];
-  return lines;
-}
-
-function emitFrame(
-  s: Scene,
-  leaves: FlatLeaf[],
-  w: number,
-  h: number,
-  anims: Map<string, Animation>,
-  frameHook: boolean,
-  p: Project,
-  dims: Map<string, [number, number]>,
-): string {
-  const lines = [`${s.id}_frame :: fn() {`];
-  const live = (t: EventTrigger): FlatLeaf[] => leaves.filter((o) => o.events.some((e) => e.trigger === t && e.blocks.length > 0));
-  if (s.keys.length > 0 || live("key").length > 0) lines.push(`    k: u8 = kb[0]; kb[0] = 0;`);
-  if (s.clicks.length > 0 || live("click").length > 0) {
-    lines.push(`    mnow: u8 = Mouse.state | mb[0]; mb[0] = 0;`);
-    lines.push(`    mpressed: u8 = mnow & (mouse_last ^ 255);`);
-    lines.push(`    mouse_last = mnow;`);
-    lines.push(`    mx: u16 = Mouse.x;`);
-    lines.push(`    my: u16 = Mouse.y;`);
-  }
-  const driver = leaves.findIndex((o) => o.controls);
-  if (driver >= 0) {
-    const [pw, ph] = dims.get(leaves[driver].sprite) ?? [TILE_PX, TILE_PX];
-    lines.push(`    if oflags[${driver}] & 8 != 0 {`);
-    lines.push(...emitDrive(driver, w, h, leaves.length, pw, ph).map((l) => `    ${l}`));
-    lines.push(`    }`);
-  }
-  lines.push(...emitAnim(s.id, leaves, anims));
-  const byObject = new Map<string, number>();
-  leaves.forEach((o, i) => {
-    if (!byObject.has(o.id)) byObject.set(o.id, i);
-    byObject.set(o.path, i);
-  });
-  for (const c of [...s.clicks].sort((a, b) => (a.object < b.object ? -1 : 1))) {
-    const i = byObject.get(c.object) as number;
-    const [cw, ch] = dims.get(leaves[i].sprite) ?? [TILE_PX, TILE_PX];
-    const [rx, ry, rw, rh] = hitArgs(`ox[${i}]`, `oy[${i}]`, cw, ch, leaves[i].mask);
-    lines.push(`    if mpressed & 1 != 0 {`);
-    lines.push(`        if pt_in_rect(mx, my, ${rx}, ${ry}, ${rw}, ${rh}) {`);
-    lines.push(`            setup_${c.goto}();`);
-    lines.push(`            scene_go(SC_${c.goto.toUpperCase()});`);
-    lines.push(`        }`);
-    lines.push(`    }`);
-  }
-  for (const k of [...s.keys].sort((a, b) => bindingKey(p, a) - bindingKey(p, b))) {
-    lines.push(`    if k == ${bindingKey(p, k)} {`);
-    lines.push(`        setup_${k.goto}();`);
-    lines.push(`        scene_go(SC_${k.goto.toUpperCase()});`);
-    lines.push(`    }`);
-  }
-  // Object handlers, in loop order: key → click → step → collide →
-  // alarm. Every dispatch guards the alive bit (destroyed leaves go
-  // quiet); the fns themselves carry the statements, so the frame
-  // stays small no matter how the scene fills up.
-  leaves.forEach((o, i) => {
-    for (const e of o.events) {
-      if (e.trigger !== "key" || e.blocks.length === 0 || !e.key) continue;
-      const code = (p.inputs ?? []).find((ii) => ii.id === e.key)?.key ?? 0;
-      lines.push(`    if k == ${code} {`);
-      lines.push(`        if oflags[${i}] & 8 != 0 {`);
-      lines.push(`            key_${slotTag(s.id, o.path)}_${e.key}(${i});`);
-      lines.push(`        }`);
-      lines.push(`    }`);
-    }
-  });
-  if (live("click").length > 0) {
-    lines.push(`    if mpressed & 1 != 0 {`);
-    leaves.forEach((o, i) => {
-      if (!o.events.some((e) => e.trigger === "click" && e.blocks.length > 0)) return;
-      const [cw, ch] = dims.get(o.sprite) ?? [TILE_PX, TILE_PX];
-      const [rx, ry, rw, rh] = hitArgs(`ox[${i}]`, `oy[${i}]`, cw, ch, o.mask);
-      lines.push(`        if pt_in_rect(mx, my, ${rx}, ${ry}, ${rw}, ${rh}) {`);
-      lines.push(`            if oflags[${i}] & 8 != 0 {`);
-      lines.push(`                click_${slotTag(s.id, o.path)}(${i});`);
-      lines.push(`            }`);
-      lines.push(`        }`);
-    });
-    lines.push(`    }`);
-  }
-  leaves.forEach((o, i) => {
-    const stepEv = o.events.find((e) => e.trigger === "step");
-    if ((stepEv && stepEv.blocks.length > 0) || o.tick)
-      lines.push(`    if oflags[${i}] & 8 != 0 { tick_${slotTag(s.id, o.path)}(${i}); }`);
-  });
-  leaves.forEach((o, i) => {
-    let ci = 0;
-    for (const e of o.events) {
-      if (e.trigger !== "collide" || e.blocks.length === 0) continue;
-      lines.push(`    if oflags[${i}] & 8 != 0 { collide_${slotTag(s.id, o.path)}_${ci}(${i}); }`);
-      ci++;
-    }
-  });
-  leaves.forEach((o, i) => {
-    if (!o.events.some((e) => e.trigger === "alarm" && (e.alarm ?? 0) === 0 && e.blocks.length > 0)) return;
-    lines.push(`    if oat[${i}] > 0 {`);
-    lines.push(`        oat[${i}] = oat[${i}] - 1;`);
-    lines.push(`        if oat[${i}] == 0 {`);
-    lines.push(`            alarm_${slotTag(s.id, o.path)}(${i});`);
-    lines.push(`        }`);
-    lines.push(`    }`);
-  });
-  for (const sl of [1, 2, 3]) {
-    leaves.forEach((o, i) => {
-      if (!o.events.some((e) => e.trigger === "alarm" && e.alarm === sl && e.blocks.length > 0)) return;
-      lines.push(`    if oat${sl}[${i}] > 0 {`);
-      lines.push(`        oat${sl}[${i}] = oat${sl}[${i}] - 1;`);
-      lines.push(`        if oat${sl}[${i}] == 0 {`);
-      lines.push(`            alarm_${slotTag(s.id, o.path)}_${sl}(${i});`);
-      lines.push(`        }`);
-      lines.push(`    }`);
-    });
-  }
-  if (frameHook) lines.push(`    custom_frame();`);
-  if (s.frameCode) {
-    lines.push(`    ( --- scene script: ${s.id} --- )`);
-    for (const line of s.frameCode.split("\n")) lines.push(`    ${line}`);
-  }
-  // Empty scenes have no draw fn: the shared loop draws zero slots.
-  lines.push(leaves.length > 0 ? `    draw_${s.id}();` : `    draw_all();`);
-  lines.push(`}`);
-  return lines.join("\n") + "\n";
-}
 
 export function emitProject(p: Project): Record<string, string> {
   const errs = validateProject(p);
   if (errs.length > 0) throw new Error(`invalid project: ${errs.join("; ")}`);
   if (p.kind === "code") return { ...(p.codeFiles ?? {}) };
-  const custom = (p.customCode ?? "").trim();
-  const hasSetupHook = /custom_setup\s*::/.test(custom);
-  const hasFrameHook = /custom_frame\s*::/.test(custom);
-  const scenes = [...p.scenes].sort((a, b) => (a.id < b.id ? -1 : 1));
-  const indexOf = new Map(scenes.map((s, i) => [s.id, i]));
+  // import lines in custom.ux hoist to the top of main.ux; the rest
+  // splices where it always did (old projects have none: same bytes).
+  const customLines = (p.customCode ?? "").split("\n");
+  const hoisted = customLines.filter((l) => /^\s*import\s+"/.test(l)).map((l) => l.trim());
+  const custom = customLines
+    .filter((l) => !/^\s*import\s+"/.test(l))
+    .join("\n")
+    .trim();
+  const hooks = definedHooks(p);
+  if (loopOf(p) === "script") return emitScriptProject(p, custom, hoisted, hooks);
+  return emitEngineProject(p, custom, moduleImports([], hoisted), moduleImports(p.scripts ?? [], hoisted), hooks, moduleFiles(p));
+}
 
+/** Import lines for `scripts` (or `hoisted` lines when scripts is
+    empty), skipping devices.ux and anything in `already`. */
+function moduleImports(scripts: ScriptFile[], already: string[]): string[] {
   const out: string[] = [];
-  out.push(`( generated by uxn-forge from project '${p.name}' — do not edit. )`);
+  const seen = new Set<string>(scripts.length > 0 ? ["import \"devices.ux\"", ...already] : ["import \"devices.ux\""]);
+  for (const line of scripts.length > 0 ? scripts.map((sc) => `import "${sc.path}"`) : already) {
+    if (seen.has(line)) continue;
+    seen.add(line);
+    out.push(line);
+  }
+  return out;
+}
+
+/** Script modules + the library modules they reach, as file entries. */
+function moduleFiles(p: Project): Record<string, string> {
+  const files: Record<string, string> = {};
+  for (const sc of p.scripts ?? []) files[sc.path] = sc.code;
+  for (const mod of usedStdlib(p)) files[mod] = STDLIB[mod];
+  return files;
+}
+
+const DATETIME_DEVICE = `device DateTime 192 {
+    year: 2
+    month: 1
+    day: 1
+    hour: 1
+    minute: 1
+    second: 1
+    dotw: 1
+    doty: 2
+    isdst: 1
+}
+`;
+
+/** Script loop: every standard device is declared (unused devices
+    cost nothing and don't warn), so code can touch any of them. */
+function emitScriptDevices(): string {
+  let s = DEVICES_ENGINE.replace("( generated devices: System + Screen + Controller + Mouse. )", "( generated devices (script loop): System, Screen, Controller, Mouse, Audio0-3, DateTime. )");
+  for (let v = 0; v < 4; v++) s += audioBlock(`Audio${v}`, 48 + v * 16);
+  return s + DATETIME_DEVICE;
+}
+
+/** Engine symbols a script may name, per mode. Shared by the emitter
+    (what to export) and the Code page reference panel (what to show). */
+export function scriptAssetNames(p: Project): { sprites: string[]; sounds: string[]; vars: string[]; inputs: string[]; scenes: string[] } {
+  return {
+    scenes: [...p.scenes].map((x) => x.id).sort(),
+    sprites: [...p.sprites].map((x) => x.id).sort(),
+    sounds: [...(p.sounds ?? [])].map((x) => x.id).sort(),
+    vars: [...(p.vars ?? [])].map((x) => x.id).sort(),
+    inputs: [...p.inputs].map((x) => x.id).sort(),
+  };
+}
+
+/** Script-loop lowering: no scene runtime at all. The engine boots
+    (theme, screen, variables), hands every frame to custom_frame(),
+    routes the key/mouse vectors to their hooks, and exports only the
+    assets the code actually names — unreferenced data would warn,
+    and warning-free assembly is a tested property. */
+function emitScriptProject(p: Project, custom: string, hoisted: string[], hooks: Set<HookName>): Record<string, string> {
+  const all = userSources(p)
+    .map((x) => x.code)
+    .join("\n");
+  const named = (sym: string): boolean => new RegExp(`(^|[^A-Za-z0-9_])${sym}($|[^A-Za-z0-9_])`).test(all);
+  // assets.ux comes first so every script and hook can use it
+  // (globals must be declared before use).
+  const assets: string[] = [];
+  assets.push(`( generated by uxn-forge: the assets your scripts name. Do not edit — repaint sprites, retune sounds, lay out scenes and set variable inits in the studio. )`);
+  assets.push(`import "devices.ux"`);
+  assets.push(``);
+  // Scenes the code names (draw_scene_<id>, scn_<id>, SCN_<ID>_COUNT)
+  // ship as modules; the sprites they draw ship with them.
+  const sceneMods = [...p.scenes]
+    .sort((a, b) => (a.id < b.id ? -1 : 1))
+    .filter((sc) => named(`draw_scene_${sc.id}`) || named(`scn_${sc.id}`) || named(`SCN_${sc.id.toUpperCase()}_COUNT`))
+    .map((sc) => emitSceneModule(p, sc.id));
+  const sceneSprites = new Set(sceneMods.flatMap((m) => [...m.sprites]));
+  for (const o of [...p.sprites].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+    if (named(`spr_${o.id}`) || sceneSprites.has(o.id)) assets.push(`data spr_${o.id} = [${spriteToPlanar(o).join(", ")}];`);
+  }
+  // Sprite indices for scene rows (constants cost nothing unused).
+  if (sceneMods.length > 0 || p.sprites.some((o) => named(`SPR_${o.id.toUpperCase()}`))) {
+    p.sprites.forEach((o, i) => assets.push(`SPR_${o.id.toUpperCase()} :: ${i};`));
+  }
+  const sounds = [...(p.sounds ?? [])].sort((a, b) => (a.id < b.id ? -1 : 1)).filter((x) => named(`snd_${x.id}`));
+  if (sounds.length > 0) assets.push(`data snd_wave = [${SQ32.join(", ")}];`);
+  const vars = [...(p.vars ?? [])].sort((a, b) => (a.id < b.id ? -1 : 1)).filter((v) => named(`var_${v.id}`));
+  for (const v of vars) assets.push(`buffer var_${v.id}[1]: u16;`);
+  for (const inp of [...p.inputs].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+    assets.push(`KEY_${inp.id.toUpperCase()} :: ${inp.key};`);
+  }
+  assets.push(``);
+  if (sceneMods.length > 0) {
+    assets.push(`SCN_ROW :: ${SCN_ROW};`);
+    assets.push(``);
+    for (const m of sceneMods) assets.push(...m.code);
+  }
+  for (const snd of sounds) {
+    assets.push(`snd_${snd.id} :: fn() {`);
+    snd.voices.forEach((v, vi) => {
+      if (vi >= 4 || v.vol <= 0) return;
+      assets.push(`    Audio${vi}.addr = &snd_wave;`);
+      assets.push(`    Audio${vi}.length = 32;`);
+      assets.push(`    Audio${vi}.volume = ${v.vol};`);
+      assets.push(`    Audio${vi}.adsr = 4369;`);
+      assets.push(`    Audio${vi}.pitch = ${128 + v.note};`);
+    });
+    assets.push(`}`);
+    assets.push(``);
+  }
+  const out: string[] = [];
+  out.push(`( generated by uxn-forge from project '${p.name}' — script loop, do not edit. )`);
   out.push(`import "devices.ux"`);
+  out.push(`import "assets.ux"`);
+  for (const line of moduleImports([], hoisted)) if (line !== `import "assets.ux"`) out.push(line);
+  for (const line of moduleImports(p.scripts ?? [], [...hoisted, `import "assets.ux"`])) out.push(line);
   out.push(``);
   out.push(`meta { title: "${p.name}", author: "${p.author}" }`);
   out.push(``);
   if (custom) {
-    out.push(`( --- custom.ux : user-authored top-level declarations --- )`);
+    out.push(`( --- custom.ux : hooks + top-level declarations --- )`);
     out.push(custom);
     out.push(``);
   }
-  for (const s of scenes) out.push(`SC_${s.id.toUpperCase()} :: ${indexOf.get(s.id)};`);
-  out.push(``);
-  const animMap = new Map(p.anims.map((a) => [a.id, a]));
-  // Only referenced sprites become ROM blobs: gallery-only tiles
-  // stay out of the build (and out of unused-data warnings).
-  // Validated projects flatten cleanly, so this never throws here.
-  const usedSprites = new Set<string>();
-  for (const s of p.scenes) {
-    for (const x of flattenScene(p, s.id)) {
-      usedSprites.add(x.sprite);
-      if (x.anim) for (const f of animMap.get(x.anim)?.frames ?? []) usedSprites.add(f);
-    }
-  }
-  for (const o of [...p.sprites].sort((a, b) => (a.id < b.id ? -1 : 1))) {
-    if (!usedSprites.has(o.id)) continue;
-    out.push(`data spr_${o.id} = [${spriteToPlanar(o).join(", ")}];`);
-  }
-  // Solid background tile: one 8×8 of the bg palette index. A
-  // separate label keeps every spr_ blob offset exactly where the
-  // per-scene draw fns assume it is.
-  const bgv = (p.bg ?? 0) & 3;
-  const bgRows = (bit: number) => Array(8).fill(bit ? 255 : 0);
-  out.push(`data bg_tile = [${[...bgRows(bgv & 1), ...bgRows(bgv & 2)].join(", ")}];`);
-  if (usedVoices(p).length > 0) {
-    out.push(`data sq32 = [${SQ32.join(", ")}];`);
-  }
-  const songList = referencedSongs(p);
-  for (const s of songList) {
-    s.tracks.forEach((tr, v) => {
-      const pitch = Array.from({ length: MAX_SONG_STEPS }, (_, i) => tr.notes[i]?.pitch ?? SONG_REST);
-      const len = Array.from({ length: MAX_SONG_STEPS }, (_, i) => tr.notes[i]?.len ?? 1);
-      out.push(`data sg_${s.id}_v${v}p = [${pitch.join(", ")}];`);
-      out.push(`data sg_${s.id}_v${v}l = [${len.join(", ")}];`);
-    });
-  }
-  // Labels prerender their glyphs into per-leaf blobs, so a labeled
-  // project pays only the glyphs it uses, not the whole font, and
-  // never imports lib/font.ux. font8x8 itself is emitted only as the
-  // reference copy tests diff against.
-  if (p.scenes.some((s) => flattenScene(p, s.id).some((o) => o.label))) {
-    for (const s of scenes) {
-      for (const o of flattenScene(p, s.id)) {
-        if (!o.label) continue;
-        const bytes = [...o.label].flatMap((ch) => glyphRows(ch.charCodeAt(0)));
-        const hex = bytes.map((b) => `0x${b.toString(16).padStart(2, "0")}`);
-        out.push(`data lbl_${slotTag(s.id, o.path)} = [${hex.join(", ")}];`);
-      }
-    }
-  }
-  out.push(``);
-  // Flattened once up front: setup/draw/frame all read it, and the
-  // buffer decisions below need every leaf's flags and events.
-  const flat = new Map(p.scenes.map((s) => [s.id, flattenScene(p, s.id)] as const));
-  const flatEvents = [...flat.values()].flatMap((leaves) => leaves.flatMap((o) => o.events));
-  // Dims/alarm buffers exist only when something reads them (a
-  // keyboard driver, move/collide blocks, or custom code naming
-  // them): unreferenced globals warn, and warning-free assembly is
-  // a tested property.
-  const customAll = [
-    custom,
-    ...p.scenes.flatMap((s) => [s.frameCode ?? "", ...s.nodes.map((o) => o.tick ?? "")]),
-  ].join("\n");
-  const needsDims =
-    [...flat.values()].some((leaves) => leaves.some((o) => o.controls)) ||
-    flatEvents.some(
-      (e) =>
-        e.blocks.length > 0 &&
-        (e.trigger === "collide" || eachBlock([e]).some((b) => b.op === "move" || b.op === "sprite")),
-    ) ||
-    customAll.includes("ow[") ||
-    customAll.includes("oh[") ||
-    customAll.includes("overlapwh");
-  const alarmUse = (slot: number): boolean =>
-    flatEvents.some(
-      (e) =>
-        e.blocks.length > 0 &&
-        ((e.trigger === "alarm" && (e.alarm ?? 0) === slot) ||
-          eachBlock([e]).some((b) => b.op === "wait" && (b.slot ?? 0) === slot)),
-    );
-  const needsAlarm = alarmUse(0) || customAll.includes("oat[");
-  const needsAlarmX = [1, 2, 3].map(
-    (s) => alarmUse(s) || customAll.includes(`oat${s}[`),
-  );
-  const needsSong = usesSong(p);
-  const needsOverlay = usesOverlay(p);
-  out.push(`buffer ox[${MAX_OBJECTS}]: u16;`);
-  out.push(`buffer oy[${MAX_OBJECTS}]: u16;`);
-  out.push(`buffer ot[${MAX_OBJECTS}]: u16;`);
-  out.push(`buffer oflags[${MAX_OBJECTS}]: u8;`);
-  if (needsDims) {
-    out.push(`buffer ow[${MAX_OBJECTS}]: u16;`);
-    out.push(`buffer oh[${MAX_OBJECTS}]: u16;`);
-  }
-  if (needsAlarm) out.push(`buffer oat[${MAX_OBJECTS}]: u8;`);
-  needsAlarmX.forEach((need, i) => {
-    if (need) out.push(`buffer oat${i + 1}[${MAX_OBJECTS}]: u8;`);
-  });
-  if (needsSong) {
-    // Per-voice scalars rather than voice-indexed arrays: each
-    // voice's copy loop writes its own names, and the assembler
-    // resolves them without runtime arithmetic.
-    for (let v = 0; v < 4; v++) {
-      out.push(`buffer sglp${v}[${MAX_SONG_STEPS}]: u8;`);
-      out.push(`buffer sgll${v}[${MAX_SONG_STEPS}]: u8;`);
-      out.push(`sg_pos${v}: u8 = 0;`);
-      out.push(`sg_wait${v}: u8 = 0;`);
-      out.push(`sg_len${v}: u8 = 0;`);
-      out.push(`sg_vol${v}: u8 = 0;`);
-    }
-    out.push(`sg_on: u8 = 0;`);
-  }
-  if (needsOverlay) {
-    out.push(`buffer ovst[8]: u8;`);
-    out.push(`buffer ovsp[1]: u8;`);
-  }
-  const vars = [...(p.vars ?? [])].sort((a, b) => (a.id < b.id ? -1 : 1));
-  for (const v of vars) out.push(`buffer var_${v.id}[1]: u16;`);
-  out.push(`ocount: u8 = 0;`);
-  out.push(`scene: u8 = 0;`);
-  const needsKey = scenes.some((x) => x.keys.length > 0);
-  const needsMouse = scenes.some((x) => x.clicks.length > 0);
-  if (needsKey) out.push(`kb: [1] u8;`);
-  if (needsMouse) {
-    out.push(`mb: [1] u8;`);
-    out.push(`mouse_last: u8 = 0;`);
-  }
-  out.push(``);
-  out.push(`scene_go :: fn(id: u8) {`);
-  out.push(`    scene = id;`);
-  out.push(`}`);
-  out.push(``);
-  out.push(`pt_in_rect :: fn(px: u16, py: u16, rx: u16, ry: u16, rw: u16, rh: u16) -> u8 {`);
-  out.push(`    if px >= rx && px < rx + rw && py >= ry && py < ry + rh {`);
-  out.push(`        return 1;`);
-  out.push(`    }`);
-  out.push(`    return 0;`);
-  out.push(`}`);
-  out.push(``);
-  out.push(`overlap88 :: fn(ax: u16, ay: u16, bx: u16, by: u16) -> u8 {`);
-  out.push(`    if ax < bx + 8 && bx < ax + 8 && ay < by + 8 && by < ay + 8 {`);
-  out.push(`        return 1;`);
-  out.push(`    }`);
-  out.push(`    return 0;`);
-  out.push(`}`);
-  out.push(``);
-  if (needsDims) {
-    out.push(`overlapwh :: fn(ax: u16, ay: u16, aw: u16, ah: u16, bx: u16, by: u16, bw: u16, bh: u16) -> u8 {`);
-    out.push(`    if ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah {`);
-    out.push(`        return 1;`);
-    out.push(`    }`);
-    out.push(`    return 0;`);
-    out.push(`}`);
-    out.push(``);
-  }
-  // Per-frame background: opaque bg-index tiles cover the emulator's
-  // boot color and erase the previous frame (no smear trails). Edge
-  // tiles overhang short canvases (320×180); the VM clips them.
-  const cols = Math.ceil(p.width / 8);
-  const rows = Math.ceil(p.height / 8);
-  out.push(`draw_bg :: fn() {`);
-  out.push(`    for ty in 0..${rows} {`);
-  out.push(`        for tx in 0..${cols} {`);
-  out.push(`            Screen.x = tx * 8;`);
-  out.push(`            Screen.y = ty * 8;`);
-  out.push(`            Screen.addr = &bg_tile;`);
-  out.push(`            Screen.sprite = 129;`);
-  out.push(`        }`);
-  out.push(`    }`);
-  out.push(`}`);
-  out.push(``);
-  out.push(`draw_all :: fn() {`);
-  out.push(`    draw_bg();`);
-  out.push(`    for i in 0..${MAX_OBJECTS} {`);
-  out.push(`        if i < ocount {`);
-  out.push(`            if oflags[i] & 1 != 0 {`);
-  out.push(`                if oflags[i] & 8 != 0 {`);
-  out.push(`                    Screen.x = ox[i];`);
-  out.push(`                    Screen.y = oy[i];`);
-  out.push(`                    Screen.addr = ot[i];`);
-  out.push(`                    Screen.sprite = 129;`);
-  out.push(`                }`);
-  out.push(`            }`);
-  out.push(`        }`);
-  out.push(`    }`);
-  out.push(`}`);
-  out.push(``);
-  if (needsSong) {
-    // Shared 4-voice sequencer over the live track buffers (see the
-    // play_song lowering): one start fn per referenced song copies
-    // its 16-step data into the live buffers; the tick advances all
-    // voices and fires attacks through the Audio ports.
-    for (const s of songList) {
-      out.push(`song_${s.id}_start :: fn() {`);
-      s.tracks.forEach((tr, v) => {
-        if (tr.notes.length === 0) {
-          out.push(`    sg_len${v} = 0;`);
-          return;
-        }
-        out.push(`    for i in 0..${tr.notes.length} { sglp${v}[i] = sg_${s.id}_v${v}p[i]; sgll${v}[i] = sg_${s.id}_v${v}l[i]; }`);
-        out.push(`    sg_len${v} = ${tr.notes.length};`);
-        out.push(`    sg_vol${v} = ${tr.vol};`);
-        out.push(`    sg_pos${v} = 0;`);
-        out.push(`    sg_wait${v} = 0;`);
-      });
-      out.push(`}`);
-      out.push(``);
-    }
-    out.push(`song_tick :: fn() {`);
-    out.push(`    if sg_on == 0 { return; }`);
-    for (const v of songVoices(p)) {
-      out.push(`    if sg_len${v} != 0 {`);
-      out.push(`        if sg_wait${v} != 0 { sg_wait${v} = sg_wait${v} - 1; }`);
-      out.push(`        else {`);
-      out.push(`            p${v}: u8 = sglp${v}[sg_pos${v}];`);
-      out.push(`            if p${v} != 127 {`);
-      out.push(`                Audio${v}.addr = &sq32;`);
-      out.push(`                Audio${v}.length = 32;`);
-      out.push(`                Audio${v}.volume = sg_vol${v};`);
-      out.push(`                Audio${v}.adsr = 4369;`);
-      out.push(`                Audio${v}.pitch = 128 + p${v};`);
-      out.push(`            }`);
-      out.push(`            l${v}: u8 = sgll${v}[sg_pos${v}];`);
-      out.push(`            if l${v} == 0 { l${v} = 1; }`);
-      out.push(`            sg_wait${v} = l${v} - 1;`);
-      out.push(`            sg_pos${v} = sg_pos${v} + 1;`);
-      out.push(`            if sg_pos${v} >= sg_len${v} { sg_pos${v} = 0; }`);
-      out.push(`        }`);
-      out.push(`    }`);
-    }
-    out.push(`}`);
-    out.push(``);
-  }
-  if (needsOverlay) {
-    // Fresh-instance scene stack (menu navigation, NOT freeze-pause:
-    // entering a scene always runs its setup). Pushing past 8 or
-    // backing out of empty is a silent no-op, never corruption.
-    out.push(`overlay_back :: fn() {`);
-    out.push(`    if ovsp[0] != 0 {`);
-    out.push(`        ovsp[0] = ovsp[0] - 1;`);
-    out.push(`        bid: u8 = ovst[ovsp[0]];`);
-    out.push(`        match bid {`);
-    for (const s of scenes) out.push(`            ${indexOf.get(s.id)} => { setup_${s.id}(); }`);
-    out.push(`            _ => { }`);
-    out.push(`        }`);
-    out.push(`        scene_go(bid);`);
-    out.push(`    }`);
-    out.push(`}`);
-    out.push(``);
-  }
-  for (const s of scenes) {
-    for (const o of flat.get(s.id) as FlatLeaf[]) {
-      if (o.anim && animMap.has(o.anim)) {
-        const tag = slotTag(s.id, o.path);
-        out.push(`atick_${tag}: u8 = 0;`);
-        out.push(`afr_${tag}: u8 = 0;`);
-        if (animMap.get(o.anim)?.pingpong) out.push(`adir_${tag}: u8 = 0;`);
-      }
-    }
-  }
-  out.push(``);
-  // tiles for draw fns, pixels for setup/collide/click/drive.
-  const tileDims = new Map(p.sprites.map((x) => [x.id, spriteTiles(x)] as const));
-  const pxDims = new Map(p.sprites.map((x) => [x.id, spritePx(x)] as const));
-  const defs = new Map(projectDefs(p).map((d) => [d.id, d]));
-  out.push(...emitDefEvents(p));
-  for (const s of scenes) {
-    // Store order, not sorted: hierarchy drag-reorder defines draw order.
-    const leaves = flat.get(s.id) as FlatLeaf[];
-    out.push(...emitLeafEvents(s.id, leaves, p.width, p.height, defs, soundMap(p), snippetMap(p), tileDims, songMap(p)));
-    out.push(emitSetup(s.id, leaves, pxDims, needsDims, needsAlarm));
-    if (leaves.length > 0) out.push(emitDrawScene(s, leaves, tileDims));
-    out.push(emitFrame(s, leaves, p.width, p.height, animMap, hasFrameHook, p, pxDims));
-  }
-  const arms = scenes.map((s) => `        ${indexOf.get(s.id)} => { ${s.id}_frame(); }`).join("\n");
   out.push(`on_frame :: event() {`);
-  // One sequencer tick per frame, shared by every scene: a song
-  // started in one scene keeps playing across scene switches.
-  if (needsSong) out.push(`    song_tick();`);
-  out.push(`    match scene {`);
-  out.push(arms);
-  out.push(`    }`);
+  out.push(`    custom_frame();`);
   out.push(`}`);
   out.push(``);
-  if (needsKey) {
+  if (hooks.has("custom_key")) {
     out.push(`on_key :: event() {`);
-    out.push(`    kb[0] = Controller.key;`);
+    out.push(`    custom_key();`);
     out.push(`}`);
     out.push(``);
   }
-  if (needsMouse) {
+  if (hooks.has("custom_mouse")) {
     out.push(`on_mouse :: event() {`);
-    out.push(`    mb[0] = mb[0] | Mouse.state;`);
+    out.push(`    custom_mouse();`);
     out.push(`}`);
     out.push(``);
   }
-  out.push(`start :: fn() {`);
   const theme = p.theme ?? { r: THEME_R, g: THEME_G, b: THEME_B };
+  out.push(`start :: fn() {`);
   out.push(`    System.r = ${theme.r};`);
   out.push(`    System.g = ${theme.g};`);
   out.push(`    System.b = ${theme.b};`);
@@ -2447,29 +1680,51 @@ export function emitProject(p: Project): Record<string, string> {
   out.push(`    Screen.height = ${p.height};`);
   out.push(`    Screen.x = 0;`);
   out.push(`    Screen.y = 0;`);
-  out.push(`    Screen.pixel = 128;`);
-  for (const v of vars) out.push(`    var_${v.id}[0] = ${v.init};`);
-  for (const v of usedVoices(p)) {
-    const voice = (p.sound?.voices ?? [])[v];
-    out.push(`    Audio${v}.addr = &sq32;`);
-    out.push(`    Audio${v}.length = 32;`);
-    out.push(`    Audio${v}.volume = ${voice.vol};`);
-    out.push(`    Audio${v}.adsr = 4369;`);
-    out.push(`    Audio${v}.pitch = ${128 + voice.note};`);
-  }
-  out.push(`    setup_${p.start}();`);
-  if (hasSetupHook) out.push(`    custom_setup();`);
-  out.push(`    scene_go(SC_${p.start.toUpperCase()});`);
+  out.push(`    Screen.pixel = ${128 | ((p.bg ?? 0) & 3)};`);
+  for (const v of vars) out.push(`    var_${v.id}[0] = ${(p.vars ?? []).find((x) => x.id === v.id)?.init ?? 0};`);
+  if (hooks.has("custom_setup")) out.push(`    custom_setup();`);
   out.push(`    Screen.vector = &on_frame;`);
-  if (needsKey) out.push(`    Controller.vector = &on_key;`);
-  if (needsMouse) out.push(`    Mouse.vector = &on_mouse;`);
+  if (hooks.has("custom_key")) out.push(`    Controller.vector = &on_key;`);
+  if (hooks.has("custom_mouse")) out.push(`    Mouse.vector = &on_mouse;`);
   out.push(`}`);
   out.push(``);
   out.push(`main :: event() {`);
   out.push(`    start();`);
   out.push(`}`);
   out.push(``);
-  return { "devices.ux": emitDevices(p), "main.ux": out.join("\n") };
+  return { "devices.ux": emitScriptDevices(), "assets.ux": assets.join("\n"), "main.ux": out.join("\n"), ...moduleFiles(p) };
+}
+
+/** custom.ux for a fresh script-loop project: a sprite you steer
+    with the arrows. Small on purpose — every line is the contract. */
+export const SCRIPT_STARTER = `( Script loop: this code owns every frame. The engine already set
+  the palette and screen size; your studio assets are named
+  spr_<sprite>, snd_<sound>(), var_<variable>[0] and KEY_<INPUT>.
+  Hooks: custom_setup (boot), custom_frame (every frame, required),
+  custom_key / custom_mouse (input vectors). Split code into more
+  scripts with + and import library modules by name. )
+import "screen.ux"
+
+px: u16 = 32;
+py: u16 = 32;
+
+custom_frame :: fn() {
+    b: u8 = Controller.button;
+    if b & 16 != 0 { py = py - 1; }
+    if b & 32 != 0 { py = py + 1; }
+    if b & 64 != 0 { px = px - 1; }
+    if b & 128 != 0 { px = px + 1; }
+    clear(128);
+    blit(px, py, &spr_hero, 129);
+}
+`;
+
+/** A fresh script module: imports what most scripts need. */
+export function scriptTemplate(path: string): string {
+  return `( ${path} — imported by main.ux. Put fns, globals and data here;
+  call them from the hooks in custom.ux or from other scripts. )
+import "devices.ux"
+`;
 }
 
 /* Sample project: title → play via click or space. */
@@ -2513,19 +1768,18 @@ export const SAMPLE_PROJECT: Project = {
           sprite: "hero",
           kind: "player",
           controls: true,
-          events: [{ id: "ev_click", trigger: "click", blocks: [{ op: "play", sound: "blip" }] }],
+          events: [{ id: "ev_click", trigger: "click", blocks: [{ op: "play", sound: "blip" }, { op: "goto", scene: "play" }] }],
         },
         { id: "wall", x: 64, y: 64, sprite: "wall", kind: "static", solid: true },
         { id: "coin", x: 96, y: 96, sprite: "coin", kind: "movable", solid: true, anim: "spin" },
+        { id: "hint", x: 8, y: 8, label: "SPACE: PLAY" },
       ],
-      clicks: [{ object: "hero", goto: "play" }],
-      keys: [{ input: "jump", key: 32, goto: "play" }],
+      events: [{ id: "ev_jump", trigger: "key", key: "jump", blocks: [{ op: "goto", scene: "play" }] }],
     },
     {
       id: "play",
       nodes: [{ id: "hero", x: 8, y: 8, sprite: "hero", kind: "player", controls: true }],
-      clicks: [],
-      keys: [{ input: "back", key: 27, goto: "title" }],
+      events: [{ id: "ev_back", trigger: "key", key: "back", blocks: [{ op: "goto", scene: "title" }] }],
     },
   ],
 };
