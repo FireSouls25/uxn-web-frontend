@@ -3,6 +3,7 @@ import { useStore } from "@nanostores/react";
 import { X } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
 import { closePlaytest, playtestStore } from "../lib/store";
+import ShareLink from "./ShareLink";
 
 /* Fullscreen playtest: the compiled web bundle running in an iframe
    (same bytes as the download). X or Esc closes and revokes the blob
@@ -67,11 +68,14 @@ export default function PlaytestOverlay() {
         <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
           {t(lang, "play.title")}
         </p>
+        <div className="ml-auto flex min-w-0 max-w-md flex-1">
+          <ShareLink compact />
+        </div>
         <button
           onClick={closePlaytest}
           title={t(lang, "hdr.close")}
           aria-label={t(lang, "hdr.close")}
-          className="ml-auto grid size-9 place-items-center rounded-lg bg-surface0 text-text transition-colors hover:bg-surface1"
+          className="grid size-9 shrink-0 place-items-center rounded-lg bg-surface0 text-text transition-colors hover:bg-surface1"
         >
           <X size={16} />
         </button>

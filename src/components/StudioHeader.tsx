@@ -24,6 +24,7 @@ import {
 import { t, useLang } from "../lib/i18n";
 import { artifactFilename, compileProject, exportProject, type ExportMode, type ExportTarget } from "../lib/export";
 import Popover from "./blocks/Popover";
+import ShareLink from "./ShareLink";
 import { fetchTargets } from "../lib/api";
 import {
   addScene,
@@ -290,6 +291,8 @@ export default function StudioHeader() {
         >
           {() => (
             <div className="space-y-1">
+              {/* The panel itself scrolls (Popover caps its height to the
+                  window); the download/share footer stays pinned. */}
               {EXPORT_CHOICES.map((c) => {
                 const soon = !!c.os && !served.has(c.id);
                 const active = c.id === choice;
@@ -316,18 +319,23 @@ export default function StudioHeader() {
                   </button>
                 );
               })}
-              <p className="truncate px-1 pt-1 font-mono text-[10px] text-overlay0">
-                {artifactFilename(project.name, choiceTarget(choice), choiceMode(choice))}
-              </p>
-              <button
-                onClick={download}
-                disabled={expBusy}
-                className="seg-active inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-[13px] font-semibold disabled:opacity-70"
-              >
-                {expBusy ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-                {expBusy ? t(lang, "exp.working") : t(lang, "exp.go")}
-              </button>
-              {message && <p className="px-1 text-[11px] leading-snug text-subtext0">{message}</p>}
+              <div className="sticky -bottom-2 -mx-2 space-y-1 border-t border-surface0 bg-[var(--node-bg)] px-2 pb-2 pt-1.5">
+                <p className="truncate px-1 font-mono text-[10px] text-overlay0">
+                  {artifactFilename(project.name, choiceTarget(choice), choiceMode(choice))}
+                </p>
+                <button
+                  onClick={download}
+                  disabled={expBusy}
+                  className="seg-active inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-[13px] font-semibold disabled:opacity-70"
+                >
+                  {expBusy ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                  {expBusy ? t(lang, "exp.working") : t(lang, "exp.go")}
+                </button>
+                {message && <p className="px-1 text-[11px] leading-snug text-subtext0">{message}</p>}
+              </div>
+              <div className="border-t border-surface0 pt-2">
+                <ShareLink />
+              </div>
             </div>
           )}
         </Popover>
