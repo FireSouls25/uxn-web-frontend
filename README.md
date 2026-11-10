@@ -147,6 +147,22 @@ LIVE_AGENT=1 PUBLIC_API_URL=http://localhost:8079 \
   npx vitest run src/lib/agent/live.test.ts
 ```
 
+## Outside agents over MCP (`src/lib/agent/bridge.ts`)
+
+Agent chat → plug icon → **Create connection key** pairs this tab with
+the backend's MCP server. Any MCP client can then build in the open
+project with the same tools and docs as the in-app agent. For Claude
+Code the panel shows the exact command:
+
+```sh
+claude mcp add --transport http uxn-forge https://<api>/mcp --header "Authorization: Bearer uxf_…"
+```
+
+The tab runs the tools (projects live in the browser), so keep it
+open. The key is remembered across reloads and lasts 30 days;
+**Disconnect** revokes it. The protocol is described in
+`backend/app/bridge.py`.
+
 ## Develop
 
 ```sh
