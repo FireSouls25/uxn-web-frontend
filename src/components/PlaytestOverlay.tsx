@@ -43,14 +43,21 @@ export default function PlaytestOverlay() {
     try {
       const doc = frame.contentDocument;
       const canvas = doc?.getElementById("display") as HTMLCanvasElement | null;
-      if (canvas && canvas.width > 0 && canvas.height > 0) {
-        fitCanvas(frame, canvas);
-        const onResize = () => fitCanvas(frame, canvas);
-        window.addEventListener("resize", onResize);
-        // Drop the listener when this bundle goes away.
+      if (canvas) {
+        const refit = () => {
+          if (canvas.width > 0 && canvas.height > 0) fitCanvas(frame, canvas);
+        };
+        refit();
+        window.addEventListener("resize", refit);
+        // The wasm core boots after load, so the ROM sets its screen
+        // size later: refit whenever the canvas changes size.
+        const sized = new MutationObserver(refit);
+        sized.observe(canvas, { attributes: true, attributeFilter: ["width", "height"] });
+        // Drop the listeners when this bundle goes away.
         const obs = new MutationObserver(() => {
           if (!frame.isConnected) {
-            window.removeEventListener("resize", onResize);
+            window.removeEventListener("resize", refit);
+            sized.disconnect();
             obs.disconnect();
           }
         });
