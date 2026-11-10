@@ -66,13 +66,13 @@ describe("hierarchy ops", () => {
     selectionStore.set(null);
   }
 
-  it("renames an object and its click bindings", () => {
+  it("renames an object (its events come along)", () => {
     reset();
     selectionStore.set("hero");
     expect(renameObject("hero", "champ")).toBeNull();
     const s = projectsStore.get().demo.scenes[0];
     expect(s.nodes.some((o) => o.id === "champ")).toBe(true);
-    expect(s.clicks).toEqual([{ object: "champ", goto: "play" }]);
+    expect(s.nodes.find((o) => o.id === "champ")?.events?.[0]?.trigger).toBe("click");
     expect(selectionStore.get()).toBe("champ");
   });
 
@@ -80,15 +80,15 @@ describe("hierarchy ops", () => {
     reset();
     expect(renameObject("hero", "9bad")).toBe("bad id");
     expect(renameObject("hero", "wall")).toBe("duplicate id");
-    expect(projectsStore.get().demo.scenes[0].clicks).toEqual([{ object: "hero", goto: "play" }]);
+    expect(projectsStore.get().demo.scenes[0].nodes[0].id).toBe("hero");
   });
 
   it("reorders slots within a scene", () => {
     reset();
     reorderObject(0, 2);
-    expect(projectsStore.get().demo.scenes[0].nodes.map((o) => o.id)).toEqual(["wall", "coin", "hero"]);
+    expect(projectsStore.get().demo.scenes[0].nodes.map((o) => o.id)).toEqual(["wall", "coin", "hero", "hint"]);
     reorderObject(9, 0);
-    expect(projectsStore.get().demo.scenes[0].nodes.map((o) => o.id)).toEqual(["wall", "coin", "hero"]);
+    expect(projectsStore.get().demo.scenes[0].nodes.map((o) => o.id)).toEqual(["wall", "coin", "hero", "hint"]);
   });
 });
 
@@ -184,7 +184,7 @@ describe("object events", () => {
     expect(addEvent({ def: "crate" }, "step")).toBe("ev_1");
     expect(addEvent({ def: "crate" }, "step")).toBe("ev_2"); // ids unique, dup caught by validation
     expect(addEvent({ def: "crate" }, "key", { key: "jump" })).toBe("ev_3");
-    expect(addEvent({ def: "crate" }, "key", {})).toBeNull();
+    expect(addEvent({ def: "crate" }, "key", {})).toBe("ev_4"); // defaults to the first key; pick another later
     expect(addEvent({ def: "nope" }, "step")).toBeNull();
     expect(addEvent({ leaf: "hero" }, "explode" as never)).toBeNull();
     expect(addBlock({ def: "crate" }, "ev_1", { op: "move", dx: 1, dy: 0 })).toBe(true);
@@ -200,7 +200,7 @@ describe("object events", () => {
     expect(deleteEvent({ def: "crate" }, "ev_2")).toBe(true);
     expect(deleteEvent({ def: "crate" }, "ev_2")).toBe(false);
     const demo = projectsStore.get().demo;
-    expect(demo.objectDefs?.find((d) => d.id === "crate")?.events?.map((e) => e.id)).toEqual(["ev_1", "ev_3"]);
+    expect(demo.objectDefs?.find((d) => d.id === "crate")?.events?.map((e) => e.id)).toEqual(["ev_1", "ev_3", "ev_4"]);
     expect(demo.scenes[0].nodes.find((o) => o.id === "hero")?.events?.map((e) => e.id)).toEqual(["ev_click", "ev_1"]);
   });
 
@@ -276,7 +276,7 @@ describe("named sounds", () => {
     const blk = demo.objectDefs?.find((d) => d.id === "x")?.events?.[0].blocks[0];
     expect(blk).toEqual({ op: "play", sound: "siren" });
     // referenced: refuse with the reason, not a dangling ref
-    expect(deleteSound("siren")).toContain("used by a play block");
+    expect(deleteSound("siren")).toContain("still played");
     expect(deleteBlock({ def }, ev, 0)).toBe(true);
     expect(deleteSound("siren")).toBeNull();
     expect(validateProject(projectsStore.get().demo)).toEqual([]);
