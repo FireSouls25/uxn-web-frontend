@@ -1,5 +1,6 @@
 import { useStore } from "@nanostores/react";
 import { t, useLang } from "../lib/i18n";
+import { sceneFlow } from "../lib/engine";
 import { sceneVar } from "../lib/scene-ui";
 import { projectStore, sceneIdStore, selectionStore } from "../lib/store";
 
@@ -16,7 +17,7 @@ export default function SceneNav() {
       </p>
       <ul className="mt-2 space-y-0.5">
         {project.scenes.map((s, si) => {
-          const edges = s.clicks.length + s.keys.length;
+          const edges = sceneFlow(project).filter((e) => e.from === s.id).length;
           const active = s.id === sceneId;
           return (
             <li key={s.id}>

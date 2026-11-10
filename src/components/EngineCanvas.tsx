@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@nanostores/react";
-import { ChevronRight, Map as MapIcon } from "lucide-react";
-import LogicGraphLayer from "./LogicGraphLayer";
+import { ListChecks, Map as MapIcon } from "lucide-react";
+import EventSheet from "./blocks/EventSheet";
 import SceneLayer from "./SceneLayer";
 import SceneMapLayer from "./SceneMapLayer";
 import { t, useLang } from "../lib/i18n";
@@ -94,25 +94,24 @@ export default function EngineCanvas() {
         className="min-h-full w-full p-4 sm:p-6"
         style={{ transform: `translate(${vp.x}px,${vp.y}px) scale(${vp.k})`, transformOrigin: "0 0" }}
       >
-        {mode === "scene" ? (
-          <SceneLayer />
-        ) : level === "map" ? (
-          <SceneMapLayer />
-        ) : (
-          <LogicGraphLayer />
-        )}
+        {mode === "scene" ? <SceneLayer /> : level === "map" ? <SceneMapLayer /> : null}
       </div>
-      {mode === "logic" && level === "objects" && (
-        <button
-          data-nopan
-          onClick={() => mapLevelStore.set("map")}
-          title={t(lang, "logic.back_map")}
-          className="dock absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full px-3 py-1.5 font-mono text-[11px] text-subtext0 transition-colors hover:text-text"
-        >
-          <MapIcon size={12} /> {t(lang, "logic.map")}
-          <ChevronRight size={12} />
-          <span className="text-text">{sceneId}</span>
-        </button>
+      {mode === "logic" && level === "objects" && <EventSheet />}
+      {mode === "logic" && (
+        <div data-nopan className="dock absolute bottom-3 left-1/2 z-30 flex -translate-x-1/2 items-center gap-1 rounded-full p-1 font-mono text-[11px]">
+          <button
+            onClick={() => mapLevelStore.set("objects")}
+            className={`flex items-center gap-1.5 rounded-full px-3 py-1 transition-colors ${level === "objects" ? "seg-active" : "text-subtext0 hover:text-text"}`}
+          >
+            <ListChecks size={12} /> {t(lang, "logic.events")} · {sceneId}
+          </button>
+          <button
+            onClick={() => mapLevelStore.set("map")}
+            className={`flex items-center gap-1.5 rounded-full px-3 py-1 transition-colors ${level === "map" ? "seg-active" : "text-subtext0 hover:text-text"}`}
+          >
+            <MapIcon size={12} /> {t(lang, "logic.map")}
+          </button>
+        </div>
       )}
     </div>
   );

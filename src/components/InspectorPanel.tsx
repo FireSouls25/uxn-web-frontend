@@ -1,28 +1,26 @@
 import { useState } from "react";
 import { useStore } from "@nanostores/react";
-import { Box, Gamepad2, Move, Plus, X } from "lucide-react";
+import { Box, Gamepad2, Move } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
 import { spritePxOf, spriteTiles, type ObjectKind } from "../lib/project";
-import { keyLabel } from "../lib/keys";
 import {
-  addBinding,
-  addInput,
   canvasModeStore,
   currentScene,
   defSelStore,
   extractObject,
   patchObject,
   projectStore,
-  removeBinding,
   renameObject,
   sceneIdStore,
   selectionStore,
+  setInstanceVar,
   setObjectPos,
 } from "../lib/store";
-import KeyPicker from "./KeyPicker";
 import LabelPreview from "./LabelPreview";
 import MaskEditor from "./MaskEditor";
 import SpritePicker, { SpriteThumb } from "./SpritePicker";
+import LookEditor from "./LookEditor";
+import { themeColors } from "../lib/palette";
 
 const KIND_META: Record<ObjectKind, { icon: typeof Box; key: string }> = {
   player: { icon: Gamepad2, key: "kind.player" },
@@ -41,9 +39,6 @@ export default function InspectorPanel({ hideCode = false }: { hideCode?: boolea
   const project = useStore(projectStore);
   const sceneId = useStore(sceneIdStore);
   const selection = useStore(selectionStore);
-  const [newKind, setNewKind] = useState<"click" | "key">("click");
-  const [newGoto, setNewGoto] = useState(project.scenes[0]?.id ?? "");
-  const [newInput, setNewInput] = useState("");
 
   const scene = currentScene(project, sceneId);
   const segs = (selection ?? "").split("/").filter(Boolean);
@@ -63,10 +58,6 @@ export default function InspectorPanel({ hideCode = false }: { hideCode?: boolea
   const homeScene = homeId ? (project.scenes.find((s) => s.id === homeId) ?? null) : null;
   const nestedNode = homeScene?.nodes.find((n) => n.id === segs[segs.length - 1]) ?? null;
   const obj = nested ? null : (scene.nodes.find((o) => o.id === selection) ?? null);
-  const clickIdx = scene.clicks
-    .map((c, i) => ({ c, i }))
-    .filter(({ c }) => obj && c.object === obj.id);
-  const keyIdx = scene.keys.map((k, i) => ({ k, i }));
   const [rename, setRename] = useState<string | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
@@ -82,7 +73,6 @@ export default function InspectorPanel({ hideCode = false }: { hideCode?: boolea
         solid: obj.solid ?? def?.solid ?? false,
         controls: obj.controls ?? def?.controls ?? false,
         anim: obj.anim ?? def?.anim,
-        tick: obj.tick ?? def?.tick,
         mask: obj.mask ?? def?.mask,
       }
     : null;
@@ -93,8 +83,7 @@ export default function InspectorPanel({ hideCode = false }: { hideCode?: boolea
       obj.kind !== undefined ||
       obj.solid !== undefined ||
       obj.controls !== undefined ||
-      obj.anim !== undefined ||
-      obj.tick !== undefined);
+      obj.anim !== undefined);
 
   function commit(field: "x" | "y", raw: number) {
     if (!obj || Number.isNaN(raw)) return;
@@ -115,7 +104,6 @@ export default function InspectorPanel({ hideCode = false }: { hideCode?: boolea
       solid: undefined,
       controls: undefined,
       anim: undefined,
-      tick: undefined,
     });
   }
 
@@ -293,6 +281,14 @@ export default function InspectorPanel({ hideCode = false }: { hideCode?: boolea
             onPick={(id) => patchObject(obj.id, { sprite: id })}
             onClose={() => setPicking(false)}
           />
+          <LookEditor
+            sprite={project.sprites.find((x) => x.id === eff?.sprite)}
+            look={{ cell: obj.cell ?? def?.cell, flipX: obj.flipX ?? def?.flipX, flipY: obj.flipY ?? def?.flipY, blend: obj.blend ?? def?.blend }}
+            pal={themeColors(project.theme)}
+            bg={themeColors(project.theme)[project.bg ?? 0]}
+            disabled={!!project.locked}
+            onChange={(patch) => patchObject(obj.id, patch)}
+          />
           {(["x", "y"] as const).map((field) => (
             <div
               key={field}
@@ -362,124 +358,35 @@ export default function InspectorPanel({ hideCode = false }: { hideCode?: boolea
               ))}
             </select>
           </label>
-          {hideCode ? (
-            <button
-              onClick={() => canvasModeStore.set("logic")}
-              className="flex w-full items-center justify-between rounded-lg border border-surface0 px-3 py-2 text-left transition-colors hover:border-mauve/40"
-            >
-              <span className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
-                {t(lang, "insp.logic")}: {(def ? (def.events ?? []) : (obj.events ?? [])).length}{" "}
-                {t(lang, "view.events").toLowerCase()}
-                {eff?.tick && <span className="text-teal"> · {t(lang, "insp.tick")}</span>}
-              </span>
-              <span className="rounded-md bg-mauve/15 px-1.5 py-0.5 font-mono text-[11px] text-mauve">
-                {t(lang, "insp.events_open")}
-              </span>
-            </button>
-          ) : (
-            <>
-              <label className="block">
-                <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
-                  {t(lang, "insp.tick")}
-                  {obj.tick !== undefined && def && <span className="ml-1 text-teal">●</span>}
-                </span>
-                <textarea
-                  value={eff?.tick ?? ""}
-                  onChange={(e) => patchObject(obj.id, { tick: e.target.value || undefined })}
-                  spellCheck={false}
-                  rows={3}
-                  placeholder={t(lang, "insp.tick_ph")}
-                  className="w-full resize-y rounded-lg border border-surface1 bg-base p-2 font-mono text-[11px] leading-relaxed outline-none placeholder:text-overlay0 focus:border-mauve"
-                />
-              </label>
-              <label className="block">
-                <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
-                  {t(lang, "insp.init")}
-                </span>
-                <textarea
-                  value={obj.initCode ?? ""}
-                  onChange={(e) => patchObject(obj.id, { initCode: e.target.value || undefined })}
-                  spellCheck={false}
-                  rows={2}
-                  placeholder={t(lang, "insp.init_ph")}
-                  className="w-full resize-y rounded-lg border border-surface1 bg-base p-2 font-mono text-[11px] leading-relaxed outline-none placeholder:text-overlay0 focus:border-mauve"
-                />
-              </label>
-            </>
+          {def && (def.vars ?? []).length > 0 && (
+            <div className="rounded-lg border border-surface0 p-3">
+              <p className="mb-1 font-mono text-[11px] uppercase tracking-widest text-subtext0">{t(lang, "insp.vars")}</p>
+              {(def.vars ?? []).map((v) => (
+                <div key={v.id} className="mb-1 flex items-center gap-2 font-mono text-[11px]">
+                  <span className="flex-1 truncate">{v.id}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={65535}
+                    placeholder={String(v.init)}
+                    value={obj.vars?.[v.id] ?? ""}
+                    onChange={(e) => setInstanceVar(obj.id, v.id, e.target.value === "" ? undefined : e.target.valueAsNumber)}
+                    className="w-20 rounded-md border border-surface1 bg-base px-2 py-1 text-right outline-none focus:border-mauve"
+                  />
+                </div>
+              ))}
+              <p className="text-[10px] text-overlay0">{t(lang, "insp.vars_hint")}</p>
+            </div>
           )}
-
-          <div className="rounded-lg border border-surface0 p-3">
-            <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
-              {t(lang, "insp.bindings")}
-            </p>
-            <div className="mt-2 space-y-1.5">
-              {clickIdx.length === 0 && keyIdx.length === 0 && (
-                <p className="text-[13px] text-subtext0">{t(lang, "insp.no_bindings")}</p>
-              )}
-              {clickIdx.map(({ c, i }) => (
-                <div key={`c${i}`} className="flex items-center gap-2 font-mono text-[11px]">
-                  <span className="text-sky">{t(lang, "events.click")}</span>
-                  <span className="text-mauve">→ {c.goto}</span>
-                  <button
-                    onClick={() => removeBinding("click", i)}
-                    aria-label={t(lang, "insp.remove")}
-                    className="ml-auto text-subtext0 hover:text-red"
-                  >
-                    <X size={13} />
-                  </button>
-                </div>
-              ))}
-              {keyIdx.map(({ k, i }) => (
-                <div key={`k${i}`} className="flex items-center gap-2 font-mono text-[11px]">
-                  <span className="text-sky">
-                    {t(lang, "events.key")} {k.input ?? keyLabel(k.key, (kk) => t(lang, kk))}
-                  </span>
-                  <span className="text-mauve">→ {k.goto}</span>
-                  <button
-                    onClick={() => removeBinding("key", i)}
-                    aria-label={t(lang, "insp.remove")}
-                    className="ml-auto text-subtext0 hover:text-red"
-                  >
-                    <X size={13} />
-                  </button>
-                </div>
-              ))}
-            </div>
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              <select
-                aria-label={t(lang, "insp.event")}
-                value={newKind}
-                onChange={(e) => setNewKind(e.target.value as "click" | "key")}
-                className="select"
-              >
-                <option value="click">{t(lang, "events.click")}</option>
-                <option value="key">{t(lang, "events.key")}</option>
-              </select>
-              {newKind === "key" && <KeyPicker value={newInput} onChange={setNewInput} />}
-              <select
-                aria-label={t(lang, "insp.goto")}
-                value={newGoto}
-                onChange={(e) => setNewGoto(e.target.value)}
-                className="select"
-              >
-                {project.scenes.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    → {s.id}
-                  </option>
-                ))}
-              </select>
-              <button
-                onClick={() => {
-                  if (newKind === "click" && obj) addBinding("click", obj.id, newGoto);
-                  else if (newKind === "key")
-                    addBinding("key", null, newGoto, undefined, newInput || project.inputs[0]?.id || addInput(32));
-                }}
-                className="inline-flex items-center gap-1 rounded-md bg-surface0 px-2 py-1 font-mono text-[11px] transition-colors hover:bg-surface1"
-              >
-                <Plus size={12} /> {t(lang, "insp.add_binding")}
-              </button>
-            </div>
-          </div>
+          <button
+            onClick={() => canvasModeStore.set("logic")}
+            className="flex w-full items-center justify-between rounded-lg border border-surface0 px-3 py-2 text-left transition-colors hover:border-mauve/40"
+          >
+            <span className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
+              {t(lang, "insp.logic")}: {(def ? (def.events ?? []) : (obj.events ?? [])).length} {t(lang, "view.events").toLowerCase()}
+            </span>
+            <span className="rounded-md bg-mauve/15 px-1.5 py-0.5 font-mono text-[11px] text-mauve">{t(lang, "insp.events_open")}</span>
+          </button>
         </fieldset>
       )}
     </div>

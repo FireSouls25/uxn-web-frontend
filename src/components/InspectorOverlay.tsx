@@ -1,9 +1,7 @@
 import { useStore } from "@nanostores/react";
 import { ChevronsLeft, ChevronsRight } from "lucide-react";
 import InspectorPanel from "./InspectorPanel";
-import LogicInspector from "./LogicInspector";
 import ObjectEditor from "./ObjectEditor";
-import RunCodeSection from "./RunCodeSection";
 import { t, useLang } from "../lib/i18n";
 import { canvasModeStore, defSelStore, overlayStore, projectStore, toggleOverlay } from "../lib/store";
 
@@ -20,6 +18,8 @@ export default function InspectorOverlay() {
   const mode = useStore(canvasModeStore);
   const editingDef = !!defSel && (project.objectDefs ?? []).some((d) => d.id === defSel);
 
+  // Blocks mode: the event sheet owns the whole canvas.
+  if (mode === "logic") return null;
   if (!over.right) {
     return (
       <button
@@ -37,7 +37,7 @@ export default function InspectorOverlay() {
     <div className="dock absolute bottom-3 right-3 top-3 z-20 flex w-72 flex-col rounded-2xl p-3">
       <div className="mb-2 flex items-center justify-between">
         <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
-          {mode === "logic" ? t(lang, "hdr.mode_logic") : t(lang, "insp.title")}
+          {t(lang, "insp.title")}
         </p>
         <button
           onClick={() => toggleOverlay("right")}
@@ -49,14 +49,7 @@ export default function InspectorOverlay() {
         </button>
       </div>
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-0.5">
-        {mode === "logic" ? (
-          <LogicInspector />
-        ) : (
-          <>
-            {editingDef && defSel ? <ObjectEditor id={defSel} hideCode /> : <InspectorPanel hideCode />}
-            <RunCodeSection />
-          </>
-        )}
+        {editingDef && defSel ? <ObjectEditor id={defSel} hideCode /> : <InspectorPanel hideCode />}
       </div>
     </div>
   );
