@@ -688,6 +688,8 @@ export function validateCustomCode(code: string): string[] {
 
 export const MAX_OBJECTS = 128;
 const IDENT = /^[A-Za-z][A-Za-z0-9_]*$/;
+/** Project ids are storage keys (slugs like `my-game-2`), never code. */
+const PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 /** Upgrade a pre-library project: inline 1bpp tiles become sprites. */
 export function migrateProject(raw: Record<string, unknown>): Project {
@@ -1234,7 +1236,7 @@ export function validateProject(p: Project): string[] {
   if (!p.name || /["\\]/.test(p.name)) errs.push("name must be non-empty without quotes/backslashes");
   if (!p.author || /["\\]/.test(p.author)) errs.push("author must be non-empty without quotes/backslashes");
   if (p.kind !== "visual" && p.kind !== "code") errs.push(`bad kind '${(p as { kind: unknown }).kind}'`);
-  if (!IDENT.test(p.id)) errs.push(`bad project id '${p.id}'`);
+  if (!PROJECT_ID.test(p.id)) errs.push(`bad project id '${p.id}'`);
   const theme = p.theme ?? { r: THEME_R, g: THEME_G, b: THEME_B };
   for (const [ch, v] of [["r", theme.r], ["g", theme.g], ["b", theme.b]] as const) {
     if (!Number.isInteger(v) || v < 0 || v > 65535) errs.push(`theme.${ch} must be 0–65535`);
@@ -1380,7 +1382,7 @@ export function validateProject(p: Project): string[] {
   }
   if (sceneIds.size !== p.scenes.length) errs.push("duplicate scene id");
   if (!sceneIds.has(p.start)) errs.push(`start scene '${p.start}' missing`);
-  if (!IDENT.test(p.id)) errs.push(`bad project id '${p.id}'`);
+  if (!PROJECT_ID.test(p.id)) errs.push(`bad project id '${p.id}'`);
   const voices = p.sound?.voices ?? [];
   if (voices.length > 4) errs.push("at most 4 voices (Uxn limit)");
   voices.forEach((v, i) => {

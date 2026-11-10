@@ -33,6 +33,14 @@ describe("account persistence", () => {
     expect(second.currentIdStore.get()).toBe("my-game");
   });
 
+  it("a project made from a multi-word name validates (its id is a slug)", async () => {
+    const store = await import("./store");
+    const { validateProject } = await import("./project");
+    store.createProject("Agent Garden");
+    expect(store.projectStore.get().id).toBe("agent-garden");
+    expect(validateProject(store.projectStore.get()).filter((e) => e.includes("project id"))).toEqual([]);
+  });
+
   it("work is written to localStorage", async () => {
     const first = await import("./store");
     first.createProject("Saved Sketch");
