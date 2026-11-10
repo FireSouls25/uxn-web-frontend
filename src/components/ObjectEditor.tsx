@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useStore } from "@nanostores/react";
 import { Box, Gamepad2, Move, Trash2 } from "lucide-react";
 import { t, useLang } from "../lib/i18n";
-import { spritePxOf, spriteTiles, type ObjectKind } from "../lib/project";
+import { spritePxOf, spriteTiles, type ObjectDef, type ObjectKind } from "../lib/project";
 import MaskEditor from "./MaskEditor";
 import {
   canvasModeStore,
@@ -153,7 +153,48 @@ export default function ObjectEditor({ id, hideCode = false }: { id: string; hid
         </button>
         <SpritePicker open={picking} onPick={(sid) => patchDef(id, { sprite: sid })} onClose={() => setPicking(false)} />
         {toggleRow("solid", t(lang, "insp.solid"))}
-        {def.kind === "player" && toggleRow("controls", t(lang, "insp.controls"))}
+        {def.kind === "player" && !def.movement && toggleRow("controls", t(lang, "insp.controls"))}
+        <div className="space-y-2 rounded-lg border border-surface0 px-3 py-2">
+          <label className="flex items-center justify-between gap-2 text-[13px]">
+            <span title={t(lang, "insp.movement_hint")}>{t(lang, "insp.movement")}</span>
+            <select
+              className="select"
+              value={def.movement ?? ""}
+              onChange={(e) => {
+                const movement = (e.target.value || undefined) as ObjectDef["movement"];
+                patchDef(id, movement ? { movement, controls: false } : { movement: undefined });
+              }}
+            >
+              <option value="">{t(lang, "insp.move_none")}</option>
+              <option value="platformer">{t(lang, "insp.move_platformer")}</option>
+              <option value="walker">{t(lang, "insp.move_walker")}</option>
+            </select>
+          </label>
+          {def.movement && (
+            <div className="flex gap-2 text-[12px] text-subtext0">
+              <label className="flex flex-1 items-center justify-between gap-1">
+                {t(lang, "insp.speed")}
+                <input type="number" min={1} max={4} value={def.speed ?? (def.movement === "walker" ? 1 : 2)} onChange={(e) => patchDef(id, { speed: Math.max(1, Math.min(4, e.target.valueAsNumber || 1)) })} className="w-14 rounded-md border border-surface1 bg-base px-1.5 py-0.5 text-right font-mono outline-none focus:border-mauve" />
+              </label>
+              {def.movement === "platformer" && (
+                <label className="flex flex-1 items-center justify-between gap-1">
+                  {t(lang, "insp.jump")}
+                  <input type="number" min={1} max={8} value={def.jump ?? 5} onChange={(e) => patchDef(id, { jump: Math.max(1, Math.min(8, e.target.valueAsNumber || 1)) })} className="w-14 rounded-md border border-surface1 bg-base px-1.5 py-0.5 text-right font-mono outline-none focus:border-mauve" />
+                </label>
+              )}
+            </div>
+          )}
+        </div>
+        <button
+          onClick={() => patchDef(id, { hud: !def.hud })}
+          title={t(lang, "insp.hud_hint")}
+          className="flex w-full items-center justify-between rounded-lg border border-surface0 px-3 py-2 text-left"
+        >
+          <span className="text-[13px]">{t(lang, "insp.hud")}</span>
+          <span className={`relative h-5 w-9 rounded-full transition-colors ${def.hud ? "bg-green" : "bg-surface1"}`}>
+            <span className={`absolute top-0.5 size-4 rounded-full bg-[var(--toggle-knob)] transition-all ${def.hud ? "left-[18px]" : "left-0.5"}`} />
+          </span>
+        </button>
         <div className="rounded-lg border border-surface0 px-3 py-2">
           <MaskEditor
             value={def.mask}
@@ -191,21 +232,7 @@ export default function ObjectEditor({ id, hideCode = false }: { id: string; hid
               {t(lang, "insp.events_open")}
             </span>
           </button>
-        ) : (
-          <label className="block">
-            <span className="mb-1 block font-mono text-[11px] uppercase tracking-widest text-subtext0">
-              {t(lang, "insp.tick")}
-            </span>
-            <textarea
-              value={def.tick ?? ""}
-              onChange={(e) => patchDef(id, { tick: e.target.value || undefined })}
-              spellCheck={false}
-              rows={3}
-              placeholder={t(lang, "insp.tick_ph")}
-              className="w-full resize-y rounded-lg border border-surface1 bg-base p-2 font-mono text-[11px] leading-relaxed outline-none placeholder:text-overlay0 focus:border-mauve"
-            />
-          </label>
-        )}
+        ) : null}
         <div className="rounded-lg border border-surface0 p-3">
           <p className="font-mono text-[11px] uppercase tracking-widest text-subtext0">
             {t(lang, "assets.used_by")} ({usedBy.length})
