@@ -13,7 +13,7 @@
      custom_draw hook.
    Locked example: Duplicate to edit. */
 import lifeRaw from "./lifelab/life.ux?raw";
-import { FONT8X8 } from "../font";
+import { art, bigText, tileSheet } from "./pixel";
 import type { Block, ObjectEvent, Project, SceneNode, Sprite, Tilemap, Value } from "../project";
 
 const W = 320;
@@ -22,17 +22,6 @@ const COLS = W / 8;
 const ROWS = H / 8;
 
 /* ---------- art helpers ---------- */
-
-/** Rows of palette digits (8·w wide, 8·h tall) → tile-major pixels. */
-function art(id: string, rows: string[], cell?: { w: number; h: number }): Sprite {
-  const w = rows[0].length / 8;
-  const h = rows.length / 8;
-  const pixels: number[] = [];
-  for (let ty = 0; ty < h; ty++)
-    for (let tx = 0; tx < w; tx++)
-      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) pixels.push(Number(rows[ty * 8 + y][tx * 8 + x]));
-  return { id, w, h, pixels, ...(cell ? { cell } : {}) };
-}
 
 /** A blank canvas of palette indices, read back as digit rows. */
 function canvas(w: number, h: number): { px: number[][]; set: (x: number, y: number, c: number) => void; rows: () => string[] } {
@@ -44,30 +33,6 @@ function canvas(w: number, h: number): { px: number[][]; set: (x: number, y: num
     },
     rows: () => px.map((r) => r.join("")),
   };
-}
-
-/** Cut a canvas into 32-px-wide sprites named `${id}_0`, `_1`, … */
-function slices(id: string, rows: string[], width = 32): Sprite[] {
-  const out: Sprite[] = [];
-  for (let x = 0, i = 0; x < rows[0].length; x += width, i++) out.push(art(`${id}_${i}`, rows.map((r) => r.slice(x, x + width))));
-  return out;
-}
-
-/** Headline type: the 8×8 font at 2× in ink with a coral shadow,
-    two letters per 32×24 sprite. */
-function bigText(id: string, text: string): Sprite[] {
-  const padded = text.length % 2 ? `${text} ` : text;
-  const c = canvas(padded.length * 16, 24);
-  for (const [color, off] of [[3, 2], [1, 0]] as const) {
-    [...padded].forEach((ch, i) => {
-      const g = (ch.charCodeAt(0) - 32) * 8;
-      for (let gy = 0; gy < 8; gy++)
-        for (let gx = 0; gx < 8; gx++)
-          if (FONT8X8[g + gy] & (0x80 >> gx))
-            for (let d = 0; d < 4; d++) c.set(i * 16 + gx * 2 + (d & 1) + off, 2 + gy * 2 + (d >> 1) + off, color);
-    });
-  }
-  return slices(id, c.rows());
 }
 
 /** The petri dish: ink rim, teal glass with a highlight, dithered
@@ -223,10 +188,7 @@ const SHEET: string[][] = [
 ];
 
 function sheet(): Sprite {
-  const rows: string[] = [];
-  for (let band = 0; band < 4; band++)
-    for (let y = 0; y < 8; y++) rows.push(SHEET.slice(band * 4, band * 4 + 4).map((c) => c[y]).join(""));
-  return art("layout", rows, { w: 1, h: 1 });
+  return tileSheet("layout", SHEET);
 }
 
 /** A page's tile grid, painted with a few primitives. */
