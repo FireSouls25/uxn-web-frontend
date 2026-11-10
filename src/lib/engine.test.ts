@@ -488,3 +488,17 @@ describe("life lab example", () => {
     expect(dish(s.d)).toBe(dish(s.c));
   });
 });
+
+describe("sound", () => {
+  it("plays notes looped so the ADSR envelope, not the 32-byte wave, sets their length", () => {
+    // Pitch bit 0x80 means "play the sample once": with the 32-byte
+    // square wave that is a ~1ms click on uxn2 and in the browser.
+    for (const p of [catcherProject(), platformerProject()]) {
+      const main = emitProject(p)["main.ux"];
+      const pitches = [...main.matchAll(/Audio\d\.pitch = (\d+);/g)].map((m) => Number(m[1]));
+      expect(pitches.length).toBeGreaterThan(0);
+      for (const n of pitches) expect(n).toBeLessThan(108);
+      expect(main).not.toMatch(/Audio\d\.pitch = 128 \+/);
+    }
+  });
+});

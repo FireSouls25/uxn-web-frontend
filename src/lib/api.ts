@@ -23,7 +23,6 @@ export const FALLBACK_TARGETS: TargetsResponse = {
   ],
   coming_soon: [
     { id: "macos-arm64", etal_target: "macos-arm64", kind: "sh+tar.gz", vendored: true },
-    { id: "macos-x86_64", etal_target: "macos-x86_64", kind: "sh+tar.gz", vendored: false },
     { id: "linux-aarch64", etal_target: "linux-aarch64", kind: "sh+tar.gz", vendored: false },
     { id: "windows-x86_64", etal_target: "windows-x86_64", kind: "exe", vendored: false },
   ],

@@ -1638,7 +1638,7 @@ function emitScriptProject(p: Project, custom: string, hoisted: string[], hooks:
       assets.push(`    Audio${vi}.length = 32;`);
       assets.push(`    Audio${vi}.volume = ${v.vol};`);
       assets.push(`    Audio${vi}.adsr = 4369;`);
-      assets.push(`    Audio${vi}.pitch = ${128 + v.note};`);
+      assets.push(`    Audio${vi}.pitch = ${v.note};`);
     });
     assets.push(`}`);
     assets.push(``);

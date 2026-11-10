@@ -11,6 +11,7 @@
    reload and across studio pages until the user disconnects. */
 import { atom } from "nanostores";
 import { API_URL } from "../api";
+import { authFetch } from "../auth";
 import { projectStore } from "../store";
 import { TOOLS, projectContext, runToolAsync, type ToolResult } from "./tools";
 
@@ -62,15 +63,6 @@ export function claudeCommand(mcpUrl: string, key: string): string {
 /** Config for MCP clients that take JSON (mcpServers entry). */
 export function mcpJson(mcpUrl: string, key: string): string {
   return JSON.stringify({ mcpServers: { "uxn-forge": { type: "http", url: mcpUrl, headers: { Authorization: `Bearer ${key}` } } } }, null, 2);
-}
-
-function accessToken(): string | undefined {
-  try {
-    const raw = localStorage.getItem("uxn.session");
-    return raw ? (JSON.parse(raw) as { access?: string }).access : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function saved(): { key: string; mcpUrl: string } | null {
@@ -162,10 +154,9 @@ projectStore.listen((p) => {
 
 /** Pair: ask the backend for a key, remember it, connect. */
 export async function connectBridge(): Promise<{ ok: boolean; status?: number }> {
-  const token = accessToken();
   let res: Response;
   try {
-    res = await fetch(`${API_URL}/bridge/keys`, { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    res = await authFetch("/bridge/keys", { method: "POST" });
   } catch {
     set({ status: "error" });
     return { ok: false, status: 0 };

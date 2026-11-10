@@ -45,23 +45,22 @@ import {
   viewStore,
 } from "../lib/store";
 
-type ExportChoice = "web" | "linux" | "rom" | "tal" | "macos" | "macos-intel" | "windows";
+type ExportChoice = "web" | "linux" | "rom" | "tal" | "macos" | "windows";
 
-/* What the export panel offers, in order. OS apps (`os`) are offered
-   when the backend's compiler vendors that system's VM (GET
-   /targets); until then they show as "soon". ROM runs everywhere. */
+/* What the export panel offers, in order. OS apps (`os`) are listed
+   only when the backend serves them (GET /targets: its compiler
+   vendors that system's VM); web, ROM and source always are. */
 const EXPORT_CHOICES: Array<{ id: ExportChoice; icon: typeof Globe; ext: string; os?: boolean }> = [
   { id: "web", icon: Globe, ext: ".html" },
   { id: "linux", icon: TerminalSquare, ext: "x86_64" },
   { id: "windows", icon: Monitor, ext: ".exe", os: true },
   { id: "macos", icon: Apple, ext: "Apple silicon", os: true },
-  { id: "macos-intel", icon: Apple, ext: "Intel", os: true },
   { id: "rom", icon: Cpu, ext: ".rom" },
   { id: "tal", icon: FileCode2, ext: ".tal" },
 ];
 
 const choiceTarget = (c: ExportChoice): ExportTarget =>
-  c === "linux" || c === "windows" || c === "macos" || c === "macos-intel" ? c : "web";
+  c === "linux" || c === "windows" || c === "macos" ? c : "web";
 const choiceMode = (c: ExportChoice): ExportMode => (c === "rom" ? "rom" : c === "tal" ? "tal" : "bundle");
 
 /* Studio header: project identity + scene tabs (click, +/x,
@@ -293,26 +292,23 @@ export default function StudioHeader() {
             <div className="space-y-1">
               {/* The panel itself scrolls (Popover caps its height to the
                   window); the download/share footer stays pinned. */}
-              {EXPORT_CHOICES.map((c) => {
-                const soon = !!c.os && !served.has(c.id);
+              {EXPORT_CHOICES.filter((c) => !c.os || served.has(c.id)).map((c) => {
                 const active = c.id === choice;
                 const Icon = c.icon;
                 return (
                   <button
                     key={c.id}
-                    disabled={soon}
                     onClick={() => setChoice(c.id)}
                     aria-pressed={active}
                     className={`flex w-full items-start gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-colors ${
                       active ? "border-mauve bg-mauve/10" : "border-transparent hover:bg-surface0"
-                    } disabled:cursor-not-allowed disabled:opacity-50`}
+                    }`}
                   >
                     <Icon size={16} className={`mt-0.5 shrink-0 ${active ? "text-mauve" : "text-subtext0"}`} />
                     <span className="min-w-0">
                       <span className="flex items-center gap-1.5 text-[13px] font-semibold text-text">
                         {t(lang, `exp.c_${c.id}`)}
                         <span className="font-mono text-[10px] font-normal text-overlay0">{c.ext}</span>
-                        {soon && <span className="rounded bg-surface0 px-1 font-mono text-[9px] uppercase text-subtext0">{t(lang, "exp.soon")}</span>}
                       </span>
                       <span className="block text-[11px] leading-snug text-subtext0">{t(lang, `exp.c_${c.id}_d`)}</span>
                     </span>

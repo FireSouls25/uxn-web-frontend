@@ -1,6 +1,7 @@
 /* Real auth against the backend (/auth/*). Session shape stays
    {name, email} plus tokens; compile calls will reuse `authFetch`. */
 import { API_URL } from "./api";
+import { clearSession, getSession, isAccessExpired, setSession } from "./session";
 
 function lang(): string {
   return typeof document !== "undefined" &&
@@ -59,20 +60,65 @@ export async function apiLogout(refresh: string): Promise<void> {
   }
 }
 
-export async function authFetch(path: string, init?: RequestInit): Promise<Response> {
-  let access: string | undefined;
-  try {
-    const raw = localStorage.getItem("uxn.session");
-    access = raw ? (JSON.parse(raw) as { access?: string }).access : undefined;
-  } catch {
-    access = undefined; // no session (RequireAuth should prevent this) — plain call
-  }
-  return fetch(`${API_URL}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(access ? { Authorization: `Bearer ${access}` } : {}),
-      ...(init?.headers ?? {}),
-    },
+/* One refresh at a time: parallel calls that all hit a stale token
+   share it instead of each rotating (and revoking) the refresh token. */
+let refreshing: Promise<boolean> | null = null;
+
+/** Trade the stored refresh token for a new pair. False (and the
+    session is dropped) when the backend no longer knows it: expired,
+    revoked, or issued by another deployment (new database or secret). */
+export function refreshSession(): Promise<boolean> {
+  if (refreshing) return refreshing;
+  refreshing = (async () => {
+    const s = getSession();
+    if (!s?.refresh) return false;
+    try {
+      const res = await fetch(`${API_URL}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: s.refresh }),
+      });
+      if (res.ok) {
+        const pair = (await res.json()) as TokenPair;
+        setSession({ ...s, access: pair.access_token, refresh: pair.refresh_token });
+        return true;
+      }
+      if (res.status === 401 || res.status === 400) clearSession();
+      return false;
+    } catch {
+      return false; // offline: keep the session, the call reports offline
+    }
+  })().finally(() => {
+    refreshing = null;
   });
+  return refreshing;
+}
+
+/** fetch with the session's access token. An expired or rejected token
+    is refreshed once and the call retried; when the session is dead
+    (see refreshSession) the call is retried without it, so endpoints
+    open to guests (compile, agent turns) keep working and the rest
+    answer 401 as before. */
+export async function authFetch(path: string, init?: RequestInit): Promise<Response> {
+  const send = (access?: string) =>
+    fetch(`${API_URL}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(access ? { Authorization: `Bearer ${access}` } : {}),
+        ...(init?.headers ?? {}),
+      },
+    });
+  let s = getSession();
+  if (!s) return send();
+  if (isAccessExpired(s.access)) {
+    await refreshSession();
+    s = getSession();
+    if (!s) return send();
+  }
+  const res = await send(s.access);
+  if (res.status !== 401) return res;
+  await refreshSession();
+  const again = getSession();
+  return send(again && again.access !== s.access ? again.access : undefined);
 }

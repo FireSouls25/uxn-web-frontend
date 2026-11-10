@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { motion } from "motion/react";
-import { Check, Clock, Download, Loader2 } from "lucide-react";
+import { Check, Download, Loader2 } from "lucide-react";
 import { FALLBACK_TARGETS, fetchTargets, type TargetsResponse } from "../lib/api";
 import { exportProject, type ExportTarget } from "../lib/export";
 import { t, useLang } from "../lib/i18n";
@@ -73,26 +73,6 @@ export default function TargetsGrid() {
               {busy === tgt.id ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}{" "}
               {t(lang, "tgt.export")} {tgt.id}
             </button>
-          </motion.div>
-        ))}
-        {data.coming_soon.map((tgt, i) => (
-          <motion.div
-            key={tgt.id}
-            initial={{ opacity: 0, y: 18 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true, margin: "-60px" }}
-            transition={{ duration: 0.45, delay: (data.supported.length + i) * 0.07 }}
-            className="pane rounded-xl p-5 opacity-70"
-          >
-            <div className="flex items-center justify-between">
-              <h3 className="font-mono text-sm font-semibold">{tgt.id}</h3>
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-yellow/15 px-2.5 py-0.5 font-mono text-[11px] text-yellow">
-                <Clock size={12} /> {t(lang, "tgt.soon")}
-              </span>
-            </div>
-            <p className="mt-2 font-mono text-xs text-subtext0">
-              {tgt.etal_target} · {tgt.kind}
-            </p>
           </motion.div>
         ))}
       </div>

@@ -794,7 +794,7 @@ export function lowerBlocks(blocks: Block[], env: LowerEnv | undefined, scene = 
         else
           snd.voices.forEach((v, vi) => {
             if (vi >= 4 || v.vol <= 0) return;
-            out.push(`Audio${vi}.addr = &sq32;`, `Audio${vi}.length = 32;`, `Audio${vi}.volume = ${v.vol};`, `Audio${vi}.adsr = 4369;`, `Audio${vi}.pitch = ${128 + v.note};`);
+            out.push(`Audio${vi}.addr = &sq32;`, `Audio${vi}.length = 32;`, `Audio${vi}.volume = ${v.vol};`, `Audio${vi}.adsr = 4369;`, `Audio${vi}.pitch = ${v.note};`);
           });
         break;
       }
@@ -1610,7 +1610,7 @@ export function emitEngineProject(
     for (const v of songVoices(p)) {
       push(`    if e_sg[${v * 4 + 2}] != 0 {`, `        if e_sg[${v * 4 + 1}] != 0 { e_sg[${v * 4 + 1}] = e_sg[${v * 4 + 1}] - 1; }`, `        else {`);
       push(`            p${v}: u8 = sglp${v}[e_sg[${v * 4}]];`, `            if p${v} != 127 {`);
-      push(`                Audio${v}.addr = &sq32;`, `                Audio${v}.length = 32;`, `                Audio${v}.volume = e_sg[${v * 4 + 3}];`, `                Audio${v}.adsr = 4369;`, `                Audio${v}.pitch = 128 + p${v};`, `            }`);
+      push(`                Audio${v}.addr = &sq32;`, `                Audio${v}.length = 32;`, `                Audio${v}.volume = e_sg[${v * 4 + 3}];`, `                Audio${v}.adsr = 4369;`, `                Audio${v}.pitch = p${v};`, `            }`);
       push(`            l${v}: u8 = sgll${v}[e_sg[${v * 4}]];`, `            if l${v} == 0 { l${v} = 1; }`, `            e_sg[${v * 4 + 1}] = l${v} - 1;`, `            e_sg[${v * 4}] = e_sg[${v * 4}] + 1;`, `            if e_sg[${v * 4}] >= e_sg[${v * 4 + 2}] { e_sg[${v * 4}] = 0; }`, `        }`, `    }`);
     }
     push(`}`, ``);
@@ -1649,7 +1649,7 @@ export function emitEngineProject(
   for (const v of usedVoices(p)) {
     const voice = (p.sound?.voices ?? [])[v];
     if (!voice || voice.vol <= 0) continue;
-    push(`    Audio${v}.addr = &sq32;`, `    Audio${v}.length = 32;`, `    Audio${v}.volume = ${voice.vol};`, `    Audio${v}.adsr = 4369;`, `    Audio${v}.pitch = ${128 + voice.note};`);
+    push(`    Audio${v}.addr = &sq32;`, `    Audio${v}.length = 32;`, `    Audio${v}.volume = ${voice.vol};`, `    Audio${v}.adsr = 4369;`, `    Audio${v}.pitch = ${voice.note};`);
   }
   push(`    scene = SC_${p.start.toUpperCase()};`, `    e_setup();`);
   if (hooks.has("custom_setup")) push(`    custom_setup();`);

@@ -1,11 +1,11 @@
 /* Export flow: validate → emit → POST /compile → download.
    The anchor download lands in the browser's default directory —
    no server round-trip for the bytes. */
-import { API_URL } from "./api";
+import { authFetch } from "./auth";
 import { t, type Lang } from "./i18n";
 import { emitProject, validateProject, type Project } from "./project";
 
-export type ExportTarget = "linux" | "web" | "macos" | "macos-intel" | "windows";
+export type ExportTarget = "linux" | "web" | "macos" | "windows";
 export type ExportMode = "bundle" | "rom" | "tal";
 
 export interface Diagnostic {
@@ -31,7 +31,7 @@ export function artifactFilename(project: string, target: ExportTarget, mode: Ex
   if (mode === "rom") return `${slug}.rom`;
   if (target === "web") return `${slug}.html`;
   if (target === "windows") return `${slug}.exe`;
-  if (target === "macos" || target === "macos-intel") return `${slug}.${target}`;
+  if (target === "macos") return `${slug}.macos`;
   return `${slug}.linux`;
 }
 
@@ -71,16 +71,6 @@ function remember(key: string, r: CompileResult): void {
   while (buildCache.size > BUILD_CACHE_MAX) buildCache.delete(buildCache.keys().next().value as string);
 }
 
-function authHeader(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem("uxn.session");
-    const access = raw ? (JSON.parse(raw) as { access?: string }).access : undefined;
-    return access ? { Authorization: `Bearer ${access}` } : {};
-  } catch {
-    return {};
-  }
-}
-
 /** Validate → emit → POST /compile, returning the artifact bytes
     without downloading. Powers both export-to-file and the in-studio
     playtest (same bytes either way). */
@@ -103,9 +93,10 @@ export async function compileProject(
 
   let res: Response;
   try {
-    res = await fetch(`${API_URL}/compile`, {
+    // authFetch refreshes a stale login, or builds as a guest when the
+    // session is dead (e.g. a token from an earlier deployment).
+    res = await authFetch("/compile", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeader() },
       body: JSON.stringify({ target, mode, entry, files, lang }),
     });
   } catch {
@@ -179,9 +170,8 @@ export async function shareProject(project: Project, lang: Lang): Promise<ShareR
   if (!built.ok || !built.jobId) return { ok: false, message: built.message, diagnostics: built.diagnostics };
   let res: Response;
   try {
-    res = await fetch(`${API_URL}/share`, {
+    res = await authFetch("/share", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeader() },
       body: JSON.stringify({ job_id: built.jobId, title: project.name.slice(0, 64), hide_cursor: !!project.gameCursor }),
     });
   } catch {
